@@ -1,0 +1,27 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 18
+VisualStudioVersion = 18.0.0.0
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "LaTeXBlocks.Word.AddIn", "src\LaTeXBlocks.Word.AddIn\LaTeXBlocks.Word.AddIn.csproj", "{C7D9074C-D91D-45AF-BA64-9A67AF3B1E02}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "LaTeXBlocks.WordSmoke", "tests\LaTeXBlocks.WordSmoke\LaTeXBlocks.WordSmoke.csproj", "{8C5F8B74-4F93-468F-9D81-B72B3F92452D}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{C7D9074C-D91D-45AF-BA64-9A67AF3B1E02}.Debug|Any CPU.ActiveCfg = Debug|AnyCPU
+		{C7D9074C-D91D-45AF-BA64-9A67AF3B1E02}.Debug|Any CPU.Build.0 = Debug|AnyCPU
+		{C7D9074C-D91D-45AF-BA64-9A67AF3B1E02}.Release|Any CPU.ActiveCfg = Release|AnyCPU
+		{C7D9074C-D91D-45AF-BA64-9A67AF3B1E02}.Release|Any CPU.Build.0 = Release|AnyCPU
+		{8C5F8B74-4F93-468F-9D81-B72B3F92452D}.Debug|Any CPU.ActiveCfg = Debug|AnyCPU
+		{8C5F8B74-4F93-468F-9D81-B72B3F92452D}.Debug|Any CPU.Build.0 = Debug|AnyCPU
+		{8C5F8B74-4F93-468F-9D81-B72B3F92452D}.Release|Any CPU.ActiveCfg = Release|AnyCPU
+		{8C5F8B74-4F93-468F-9D81-B72B3F92452D}.Release|Any CPU.Build.0 = Release|AnyCPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+EndGlobal
