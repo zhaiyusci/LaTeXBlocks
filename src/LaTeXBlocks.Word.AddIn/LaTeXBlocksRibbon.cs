@@ -27,7 +27,6 @@ namespace LaTeXBlocks.Word
         public void OnInsertFormula(Office.IRibbonControl control) { Run(addIn.ShowInsertFormulaEditor); }
         public void OnInsertBlock(Office.IRibbonControl control) { Run(addIn.ShowInsertBlockEditor); }
         public void OnEdit(Office.IRibbonControl control) { Run(addIn.ShowEditEditor); }
-
         private void Run(Action action)
         {
             try { action(); }

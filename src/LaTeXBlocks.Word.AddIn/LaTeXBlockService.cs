@@ -1,6 +1,7 @@
 using System;
 using System.Globalization;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
@@ -11,10 +12,6 @@ namespace LaTeXBlocks.Word
 {
     internal sealed class LaTeXBlockService
     {
-        private const double StemTeXBaseFontSizePt = 10.0;
-        // Word writes wp:effectExtent b="9525" for an inline SVG. That bottom
-        // layout extent is 0.75 pt and participates in the host baseline anchor.
-        private const double WordInlineSvgEffectBottomPt = 9525.0 / 12700.0;
         private readonly WordInterop.Application application;
         private readonly StemTeXBackend renderers;
         private readonly string cacheDirectory;
@@ -31,21 +28,25 @@ namespace LaTeXBlocks.Word
 
         internal string[] Profiles => renderers.Profiles;
 
-        internal LaTeXBlockRender RenderPreview(string source, double widthPt, LaTeXBlockLayoutMode mode, string profile)
+        internal LaTeXBlockRender RenderPreview(string source, double widthPt, LaTeXBlockLayoutMode mode, string profile,
+            double fontSizePt = 10)
         {
-            return RenderPreviewAsync(source, widthPt, mode, profile).GetAwaiter().GetResult();
+            return RenderPreviewAsync(source, widthPt, mode, profile, fontSizePt).GetAwaiter().GetResult();
         }
 
         internal async Task<LaTeXBlockRender> RenderPreviewAsync(string source, double widthPt,
-            LaTeXBlockLayoutMode mode, string profile)
+            LaTeXBlockLayoutMode mode, string profile, double fontSizePt = 10)
         {
-            var result = await renderers.RenderLatestAsync(profile, source, widthPt, mode == LaTeXBlockLayoutMode.Auto);
-            return new LaTeXBlockRender(WriteSvg(result.Bytes), result.Bytes, result.DepthPt);
+            var result = await renderers.RenderLatestAsync(profile, source, widthPt,
+                mode == LaTeXBlockLayoutMode.Auto, fontSizePt);
+            return new LaTeXBlockRender(WriteSvg(result.Bytes), result.Bytes, result.DepthPt, fontSizePt);
         }
 
         internal WordInterop.InlineShape InsertBlock(string source, double widthPt, LaTeXBlockLayoutMode mode, string profile)
         {
-            var render = RenderPreview(source, widthPt, mode, profile);
+            EnsureDocument();
+            var fontSizePt = ResolveFontSize(application.Selection.Range, mode, 10);
+            var render = RenderPreview(source, widthPt, mode, profile, fontSizePt);
             return InsertRendered(source, widthPt, mode, render);
         }
 
@@ -55,46 +56,47 @@ namespace LaTeXBlocks.Word
             EnsureDocument();
             if (render == null) throw new ArgumentNullException(nameof(render));
             var target = application.Selection.Range.Duplicate;
-            var inlineScale = GetInlineScale(target, mode);
-            var metadata = LaTeXBlockMetadata.Create(widthPt, render.DepthPt * inlineScale, mode);
+            var metadata = LaTeXBlockMetadata.Create(widthPt, render.DepthPt, mode, render.FontSizePt);
             target.Text = string.Empty;
             target.Collapse(WordInterop.WdCollapseDirection.wdCollapseStart);
-            var insertionPath = PrepareInsertionSvg(render, inlineScale, mode);
+            var insertionPath = PrepareInsertionSvg(render, mode);
             var shape = target.InlineShapes.AddPicture(insertionPath, LinkToFile: false, SaveWithDocument: true, Range: target);
-            ScaleInlineShape(shape, inlineScale);
             ApplyContract(shape, source, metadata);
+            shape = RemoveWordInlineEffectExtent(shape);
+            ApplyBaselinePosition(shape, metadata);
             shape.Range.Select();
             return shape;
         }
 
         internal WordInterop.InlineShape UpdateBlock(WordInterop.InlineShape oldShape, string source, double widthPt,
-            LaTeXBlockLayoutMode mode, string profile)
+            LaTeXBlockLayoutMode mode, string profile, double? fontSizePt = null, bool selectReplacement = true)
         {
-            var render = RenderPreview(source, widthPt, mode, profile);
-            return UpdateRendered(oldShape, source, widthPt, mode, render);
+            var size = fontSizePt ?? ResolveFontSize(oldShape.Range, mode, 10);
+            var render = RenderPreview(source, widthPt, mode, profile, size);
+            return UpdateRendered(oldShape, source, widthPt, mode, render, selectReplacement);
         }
 
         internal WordInterop.InlineShape UpdateRendered(WordInterop.InlineShape oldShape, string source, double widthPt,
-            LaTeXBlockLayoutMode mode, LaTeXBlockRender render)
+            LaTeXBlockLayoutMode mode, LaTeXBlockRender render, bool selectReplacement = true)
         {
             if (oldShape == null) throw new ArgumentNullException(nameof(oldShape));
             if (render == null) throw new ArgumentNullException(nameof(render));
-            if (!LaTeXBlockMetadata.TryParse(oldShape.Title, out var previous))
+            if (!TryReadContract(oldShape, out var previous, out _))
                 throw new InvalidOperationException("The selected image is not a LaTeX Block.");
 
             var target = oldShape.Range.Duplicate;
-            var inlineScale = GetInlineScale(target, mode);
-            var metadata = new LaTeXBlockMetadata(previous.Id, widthPt, render.DepthPt * inlineScale, mode);
+            var metadata = new LaTeXBlockMetadata(previous.Id, widthPt, render.DepthPt, mode, render.FontSizePt);
             target.Collapse(WordInterop.WdCollapseDirection.wdCollapseStart);
             WordInterop.InlineShape replacement = null;
             try
             {
-                var insertionPath = PrepareInsertionSvg(render, inlineScale, mode);
+                var insertionPath = PrepareInsertionSvg(render, mode);
                 replacement = target.InlineShapes.AddPicture(insertionPath, LinkToFile: false, SaveWithDocument: true, Range: target);
-                ScaleInlineShape(replacement, inlineScale);
                 ApplyContract(replacement, source, metadata);
+                replacement = RemoveWordInlineEffectExtent(replacement);
+                ApplyBaselinePosition(replacement, metadata);
                 oldShape.Delete();
-                replacement.Range.Select();
+                if (selectReplacement) replacement.Range.Select();
                 return replacement;
             }
             catch
@@ -113,7 +115,7 @@ namespace LaTeXBlocks.Word
             if (selection.InlineShapes.Count == 1)
             {
                 var candidate = selection.InlineShapes[1];
-                if (LaTeXBlockMetadata.TryParse(candidate.Title, out metadata))
+                if (TryReadContract(candidate, out metadata, out _))
                 {
                     shape = candidate;
                     return true;
@@ -122,39 +124,106 @@ namespace LaTeXBlocks.Word
             return false;
         }
 
+        internal static bool TryReadContract(WordInterop.InlineShape shape, out LaTeXBlockMetadata metadata,
+            out string source)
+        {
+            metadata = null;
+            source = null;
+            if (shape == null) return false;
+            try
+            {
+                // MathType and other embedded OLE objects are also InlineShapes, but
+                // several picture metadata properties return E_NOTIMPL on those types.
+                // Never probe Title/AlternativeText until the host object is a picture.
+                if (!IsSupportedInlineShapeType(shape.Type)) return false;
+                if (!LaTeXBlockMetadata.TryParse(shape.Title, out metadata)) return false;
+                source = shape.AlternativeText;
+                if (string.IsNullOrWhiteSpace(source)) { metadata = null; source = null; return false; }
+                return true;
+            }
+            catch (COMException) { metadata = null; source = null; return false; }
+            catch (NotImplementedException) { metadata = null; source = null; return false; }
+        }
+
+        internal static bool IsSupportedInlineShapeType(WordInterop.WdInlineShapeType type)
+        {
+            const int WordSvgInlineShapeType = 17; // Current Word value; absent from the shipped Office PIA enum.
+            return type == WordInterop.WdInlineShapeType.wdInlineShapePicture ||
+                   type == WordInterop.WdInlineShapeType.wdInlineShapeLinkedPicture ||
+                   (int)type == WordSvgInlineShapeType;
+        }
+
         private static void ApplyContract(WordInterop.InlineShape shape, string source, LaTeXBlockMetadata metadata)
         {
             shape.AlternativeText = source;
             shape.Title = metadata.ToString();
             shape.LockAspectRatio = Office.MsoTriState.msoTrue;
+            ApplyBaselinePosition(shape, metadata);
+        }
+
+        private static void ApplyBaselinePosition(WordInterop.InlineShape shape, LaTeXBlockMetadata metadata)
+        {
             // Word aligns the bottom of an InlineShape to the text baseline. Move the image
             // character down by the TeX box depth. This is always the TeX/Western baseline:
             // CJK glyph extents inside the SVG do not define a second alignment reference.
             // Word persists this API value as whole points.
-            var hostDepth = metadata.DepthPt +
-                (metadata.Mode == LaTeXBlockLayoutMode.Auto ? WordInlineSvgEffectBottomPt : 0.0);
-            shape.Range.Font.Position = -(int)Math.Round(hostDepth, MidpointRounding.AwayFromZero);
+            shape.Range.Font.Position = -(int)Math.Round(metadata.DepthPt, MidpointRounding.AwayFromZero);
         }
 
-        private static double GetInlineScale(WordInterop.Range target, LaTeXBlockLayoutMode mode)
+        private static WordInterop.InlineShape RemoveWordInlineEffectExtent(WordInterop.InlineShape shape)
         {
-            if (mode != LaTeXBlockLayoutMode.Auto) return 1.0;
+            // AddPicture wraps an SVG in wp:inline and gives it a bottom effect extent
+            // (typically one CSS pixel). Word includes that host-only extent in inline
+            // baseline layout even though it is not part of the SVG or the TeX box.
+            // Reinsert the same Flat OPC object with b=0, then remove InsertXML's
+            // temporary paragraph boundary. The SVG, metadata and TeX depth are unchanged.
+            var flatOpc = shape.Range.WordOpenXML;
+            var effect = Regex.Match(flatOpc,
+                "<wp:effectExtent\\b(?=[^>]*\\bb=\"(?<bottom>[0-9]+)\")[^>]*/>",
+                RegexOptions.CultureInvariant);
+            if (!effect.Success || effect.Groups["bottom"].Value == "0") return shape;
+
+            var patched = Regex.Replace(flatOpc,
+                "(<wp:effectExtent\\b[^>]*\\bb=\")[^\"]+(\"[^>]*/>)", "${1}0${2}",
+                RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
+            var originalStart = shape.Range.Start;
+            var document = shape.Range.Document;
+            var insertion = document.Range(originalStart, originalStart);
+            shape.Delete();
+            try
+            {
+                insertion.InsertXML(patched);
+            }
+            catch
+            {
+                // Keep the user's formula recoverable if Word rejects the normalized
+                // package in an unusual story or protected range.
+                insertion.InsertXML(flatOpc);
+                throw;
+            }
+
+            var replacementRange = document.Range(originalStart, originalStart + 1);
+            if (replacementRange.InlineShapes.Count != 1)
+                throw new InvalidDataException("Word did not reinsert the normalized inline SVG.");
+            var replacement = replacementRange.InlineShapes[1];
+
+            var separator = document.Range(replacement.Range.End, replacement.Range.End + 1);
+            if (separator.Text == "\r") separator.Delete();
+            return replacement;
+        }
+
+        internal static double ResolveFontSize(WordInterop.Range target, LaTeXBlockLayoutMode mode, double fallback)
+        {
+            if (mode != LaTeXBlockLayoutMode.Auto) return fallback;
             var fontSize = (double)target.Font.Size;
-            if (!(fontSize > 0) || fontSize > 1000) return 1.0;
-            return fontSize / StemTeXBaseFontSizePt;
+            if (fontSize < 1 || fontSize > 200) return fallback;
+            return fontSize;
         }
 
-        private static void ScaleInlineShape(WordInterop.InlineShape shape, double scale)
-        {
-            if (Math.Abs(scale - 1.0) < 0.0001) return;
-            shape.LockAspectRatio = Office.MsoTriState.msoTrue;
-            shape.Width = shape.Width * (float)scale;
-        }
-
-        private string PrepareInsertionSvg(LaTeXBlockRender render, double scale, LaTeXBlockLayoutMode mode)
+        private string PrepareInsertionSvg(LaTeXBlockRender render, LaTeXBlockLayoutMode mode)
         {
             if (mode != LaTeXBlockLayoutMode.Auto) return render.SvgPath;
-            return WriteSvg(ApplyFractionalBaselineCompensation(render.SvgBytes, render.DepthPt, scale));
+            return WriteSvg(ApplyFractionalBaselineCompensation(render.SvgBytes, render.DepthPt, 1));
         }
 
         internal static byte[] ApplyFractionalBaselineCompensation(byte[] svgBytes, double depthPt, double scale)
@@ -163,12 +232,12 @@ namespace LaTeXBlocks.Word
             if (!(scale > 0)) throw new ArgumentOutOfRangeException(nameof(scale));
 
             var scaledDepth = depthPt * scale;
-            var hostDepth = scaledDepth + WordInlineSvgEffectBottomPt;
-            var wordDepth = Math.Round(hostDepth, MidpointRounding.AwayFromZero);
+            var wordDepth = Math.Round(scaledDepth, MidpointRounding.AwayFromZero);
             // Word supplies the whole-point component. Shift the SVG viewport so the
-            // remaining fraction, including Word's SVG effect extent, moves the TeX
-            // baseline by exactly the residual amount.
-            var residualInSvgUnits = (hostDepth - wordDepth) / scale;
+            // remaining fraction moves the TeX baseline by exactly the residual amount.
+            // wp:effectExtent is deliberately excluded: Word derives it from the image
+            // and it is not a stable part of the inline character's baseline metric.
+            var residualInSvgUnits = (scaledDepth - wordDepth) / scale;
             var svg = Encoding.UTF8.GetString(svgBytes);
             if (Math.Abs(residualInSvgUnits) < 0.000001) return svgBytes;
 
@@ -208,14 +277,16 @@ namespace LaTeXBlocks.Word
 
     internal sealed class LaTeXBlockRender
     {
-        internal LaTeXBlockRender(string svgPath, byte[] svgBytes, double depthPt)
+        internal LaTeXBlockRender(string svgPath, byte[] svgBytes, double depthPt, double fontSizePt)
         {
             SvgPath = svgPath;
             SvgBytes = svgBytes ?? throw new ArgumentNullException(nameof(svgBytes));
             DepthPt = depthPt;
+            FontSizePt = fontSizePt;
         }
         internal string SvgPath { get; }
         internal byte[] SvgBytes { get; }
         internal double DepthPt { get; }
+        internal double FontSizePt { get; }
     }
 }

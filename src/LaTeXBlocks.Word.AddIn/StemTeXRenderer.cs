@@ -50,10 +50,12 @@ namespace LaTeXBlocks.Word
             return profiles.ToArray();
         }
 
-        internal StemTeXSvgResult RenderSvg(string source, double widthPt, bool autoWidth = false)
+        internal StemTeXSvgResult RenderSvg(string source, double widthPt, bool autoWidth = false,
+            double fontSizePt = 10)
         {
             if (string.IsNullOrWhiteSpace(source)) throw new ArgumentException("LaTeX source cannot be empty.", nameof(source));
             if (widthPt <= 0) throw new ArgumentOutOfRangeException(nameof(widthPt));
+            if (!(fontSizePt >= 1) || fontSizePt > 200) throw new ArgumentOutOfRangeException(nameof(fontSizePt));
 
             lock (gate)
             {
@@ -67,8 +69,8 @@ namespace LaTeXBlocks.Word
                     var result = new StemTeXRenderOutputResult();
                     IntPtr error;
                     int errorCode;
-                    var ok = api.RenderOutputBytes(renderer, sourceUtf8.Pointer, renderWidth, SvgOutputFormat,
-                        out bytes, out result, out errorCode, out error);
+                    var ok = api.RenderOutputBytesWithFontSize(renderer, sourceUtf8.Pointer, renderWidth, fontSizePt,
+                        SvgOutputFormat, out bytes, out result, out errorCode, out error);
                     try
                     {
                         if (ok == 0)
@@ -143,27 +145,51 @@ namespace LaTeXBlocks.Word
         {
             var candidates = new List<string>();
             var configured = Environment.GetEnvironmentVariable("STEMTEX_HOME");
-            if (!string.IsNullOrWhiteSpace(configured)) candidates.Add(configured);
-            candidates.Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Scholia", "StemTeX"));
-            candidates.Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "StemTeX"));
+            if (!string.IsNullOrWhiteSpace(configured))
+            {
+                var configuredHome = ValidateStemTeXHome(configured, profile);
+                if (configuredHome != null) return configuredHome;
+                throw new DirectoryNotFoundException("STEMTEX_HOME does not contain a usable StemTeX runtime: " + configured);
+            }
             var documents = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
             candidates.Add(Path.Combine(documents, "xetex", "stemtex", "dist", "stemtex-installer", "StemTeX"));
             candidates.Add(Path.Combine(documents, "xetex", "stemtex", "build", "stemtex-check-stage"));
+            candidates.Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Scholia", "StemTeX"));
+            candidates.Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "StemTeX"));
 
+            string bestHome = null;
+            Version bestVersion = null;
             foreach (var candidate in candidates)
             {
-                if (string.IsNullOrWhiteSpace(candidate)) continue;
-                var home = Path.GetFullPath(candidate);
-                var profilesRoot = Path.Combine(home, "gui", "profiles");
-                var hasProfile = profile == null
-                    ? Directory.Exists(profilesRoot) && Directory.GetFiles(profilesRoot, "preamble.tex", SearchOption.AllDirectories).Length > 0
-                    : File.Exists(Path.Combine(profilesRoot, profile, "preamble.tex"));
-                if (File.Exists(Path.Combine(home, "runtime", "bin", "sdk", "stemtex-renderer.dll")) &&
-                    File.Exists(Path.Combine(home, "runtime", "bin", "windows", "dvisvgmdaemon.dll")) && hasProfile)
-                    return home;
+                var home = ValidateStemTeXHome(candidate, profile);
+                if (home == null) continue;
+                Version version;
+                var versionFile = Path.Combine(home, "runtime", "VERSION");
+                var versionText = File.Exists(versionFile) ? File.ReadAllText(versionFile).Trim() : "0.0.0";
+                if (!Version.TryParse(versionText, out version)) version = new Version(0, 0);
+                if (bestHome == null || version.CompareTo(bestVersion) > 0) { bestHome = home; bestVersion = version; }
             }
+            if (bestHome != null) return bestHome;
             throw new DirectoryNotFoundException(
-                "StemTeX with SVG support was not found. Install StemTeX 0.10 or set STEMTEX_HOME to its installation root.");
+                "StemTeX with SVG support was not found. Install StemTeX or set STEMTEX_HOME to its installation root.");
+        }
+
+        private static string ValidateStemTeXHome(string candidate, string profile)
+        {
+            if (string.IsNullOrWhiteSpace(candidate)) return null;
+            var home = Path.GetFullPath(candidate);
+            Version runtimeVersion;
+            var versionFile = Path.Combine(home, "runtime", "VERSION");
+            if (!File.Exists(versionFile) ||
+                !Version.TryParse(File.ReadAllText(versionFile).Trim(), out runtimeVersion) ||
+                runtimeVersion.CompareTo(new Version(0, 11, 0)) < 0) return null;
+            var profilesRoot = Path.Combine(home, "gui", "profiles");
+            var hasProfile = profile == null
+                ? Directory.Exists(profilesRoot) && Directory.GetFiles(profilesRoot, "preamble.tex", SearchOption.AllDirectories).Length > 0
+                : File.Exists(Path.Combine(profilesRoot, profile, "preamble.tex"));
+            return File.Exists(Path.Combine(home, "runtime", "bin", "sdk", "stemtex-renderer.dll")) &&
+                   File.Exists(Path.Combine(home, "runtime", "bin", "windows", "dvisvgmdaemon.dll")) && hasProfile
+                ? home : null;
         }
 
         public void Dispose()
@@ -176,6 +202,26 @@ namespace LaTeXBlocks.Word
                 renderer = IntPtr.Zero;
                 if (library != IntPtr.Zero) NativeMethods.FreeLibrary(library);
                 library = IntPtr.Zero;
+            }
+        }
+
+        internal void CancelCurrent()
+        {
+            // Cancellation is intentionally concurrent with RenderSvg. The native API
+            // uses its own control mutex and stops the active XeTeX child; taking gate
+            // here would wait behind the render and defeat cancellation during shutdown.
+            var currentRenderer = renderer;
+            var currentApi = api;
+            if (currentRenderer == IntPtr.Zero || currentApi == null) return;
+            IntPtr error = IntPtr.Zero;
+            int errorCode;
+            try
+            {
+                currentApi.CancelCurrent(currentRenderer, out errorCode, out error);
+            }
+            finally
+            {
+                if (error != IntPtr.Zero) currentApi.FreeString(error);
             }
         }
 
@@ -214,7 +260,8 @@ namespace LaTeXBlocks.Word
             }
 
             // dvisvgm expands {?y} to the current TeX baseline without adding visible geometry.
-            return "\\leavevmode\\special{dvisvgm:raw <g id='latexblocks-baseline' data-y='{?y}'/>}" + source;
+            return "\\begingroup\\leavevmode\\special{dvisvgm:raw <g id='latexblocks-baseline' data-y='{?y}'/>}" +
+                   source + "\\endgroup";
         }
 
         private static byte[] ProcessMeasurementMarkers(byte[] svgBytes, bool autoWidth, out double depthPt)
@@ -330,8 +377,9 @@ namespace LaTeXBlocks.Word
             [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
             internal delegate IntPtr CreateDelegate(ref StemTeXConfig config, out int errorCode, out IntPtr error);
             [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-            internal delegate int RenderOutputBytesDelegate(IntPtr renderer, IntPtr source, double widthPt, int format,
-                out StemTeXOutputBytes bytes, out StemTeXRenderOutputResult result, out int errorCode, out IntPtr error);
+            internal delegate int RenderOutputBytesWithFontSizeDelegate(IntPtr renderer, IntPtr source, double widthPt,
+                double fontSizePt, int format, out StemTeXOutputBytes bytes, out StemTeXRenderOutputResult result,
+                out int errorCode, out IntPtr error);
             [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
             internal delegate void FreeOutputBytesDelegate(ref StemTeXOutputBytes bytes);
             [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
@@ -339,23 +387,28 @@ namespace LaTeXBlocks.Word
             [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
             internal delegate void FreeStringDelegate(IntPtr value);
             [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+            internal delegate int CancelCurrentDelegate(IntPtr renderer, out int errorCode, out IntPtr error);
+            [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
             internal delegate void DestroyDelegate(IntPtr renderer);
 
             internal NativeApi(IntPtr module)
             {
                 Create = Load<CreateDelegate>(module, "stemtex_renderer_create");
-                RenderOutputBytes = Load<RenderOutputBytesDelegate>(module, "stemtex_renderer_render_output_bytes");
+                RenderOutputBytesWithFontSize = Load<RenderOutputBytesWithFontSizeDelegate>(module,
+                    "stemtex_renderer_render_output_bytes_with_font_size");
                 FreeOutputBytes = Load<FreeOutputBytesDelegate>(module, "stemtex_renderer_free_output_bytes");
                 FreeOutputResult = Load<FreeOutputResultDelegate>(module, "stemtex_renderer_free_output_result");
                 FreeString = Load<FreeStringDelegate>(module, "stemtex_renderer_free_string");
+                CancelCurrent = Load<CancelCurrentDelegate>(module, "stemtex_renderer_cancel_current");
                 Destroy = Load<DestroyDelegate>(module, "stemtex_renderer_destroy");
             }
 
             internal CreateDelegate Create { get; }
-            internal RenderOutputBytesDelegate RenderOutputBytes { get; }
+            internal RenderOutputBytesWithFontSizeDelegate RenderOutputBytesWithFontSize { get; }
             internal FreeOutputBytesDelegate FreeOutputBytes { get; }
             internal FreeOutputResultDelegate FreeOutputResult { get; }
             internal FreeStringDelegate FreeString { get; }
+            internal CancelCurrentDelegate CancelCurrent { get; }
             internal DestroyDelegate Destroy { get; }
 
             private static T Load<T>(IntPtr module, string name) where T : class

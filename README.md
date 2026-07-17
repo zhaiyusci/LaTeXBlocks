@@ -38,9 +38,9 @@ Requirements:
 - .NET Framework 4.8
 - a StemTeX stage containing `stemtex-renderer.dll`, `dvisvgmdaemon.dll`, and the `unicodemath_cjk` profile
 
-StemTeX is located from `STEMTEX_HOME`, an installed location, or the adjacent development stages used by Scholia/StemTeX development.
+`STEMTEX_HOME`, when set, selects one runtime explicitly. Otherwise the add-in examines the installed and adjacent Scholia/StemTeX development stages and selects the usable runtime with the highest semantic version. The current binding requires StemTeX 0.11's native per-request font-size API.
 
-At Word startup the add-in discovers valid profile directories and queues creation of the renderer for the globally selected profile (`unicodemath_cjk` when no preference has been saved). Word's UI thread is not blocked by the cold start. Like the StemTeX GUI, the add-in owns one renderer and one dedicated FIFO background thread. Renderer creation, rendering, profile replacement, and destruction all happen on that same thread. A profile switch disposes the old renderer and creates the new one; Word exit disposes the current renderer.
+At Word startup the add-in discovers valid profile directories and queues creation of the renderer for the globally selected profile (`xits_cjk` when no preference has been saved). Word's UI thread is not blocked by the cold start. Like the StemTeX GUI, the add-in owns one renderer and one dedicated FIFO background thread. Renderer creation, rendering, profile replacement, and destruction all happen on that same thread. A profile switch disposes the old renderer and creates the new one; Word exit disposes the current renderer.
 
 The editor uses a 300ms input debounce. Every request receives a monotonically increasing UI request ID. The dedicated worker skips queued requests that are no longer latest, and the UI discards any completed result whose generation or request ID has become stale. Syntax errors from automatic preview stay in the status line rather than opening modal dialogs; the Preview button remains available for an immediate refresh with an explicit error dialog.
 

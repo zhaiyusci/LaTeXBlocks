@@ -16,18 +16,22 @@ A LaTeX block should behave like one semantic document object, not like an image
 Version 1 metadata is:
 
 ```text
-LaTeXBlocks/1;id=<guid>;width=<points>;depth=<points>;mode=<auto|fixed>
+LaTeXBlocks/1;id=<guid>;width=<points>;depth=<points>;mode=<auto|fixed>;size=<points>
 ```
 
 The stable ID survives edits. Width is the StemTeX typesetting constraint, not a DPI value and not a raster-image scale. For a one-line inline source, depth is measured from an invisible dvisvgm marker at the TeX baseline to the SVG viewport bottom.
 
 Profile names are discovered from the active StemTeX installation. A directory is offered only when it contains `preamble.tex`. Profile is global add-in state, not object state: changing it affects every subsequent preview, insertion, and rerender. The choice is stored under the current user's LaTeX Blocks settings and is the profile warmed when Word next starts.
 
-Word aligns an inline image through its layout bottom, but an SVG receives an automatic `wp:effectExtent.b=9525` (0.75 pt) below the image extent. `InlineShape.Range.Font.Position` also persists only whole points. For a scaled TeX depth `d`, the effective host depth is therefore `h = d + 0.75 pt`. LaTeX Blocks applies `Font.Position = -round(h)` and moves the SVG viewBox by the residual `h - round(h)`. The two components account for the floating-point TeX depth and Word's host-only effect boundary without adding another Word object or visible marker. Display or multiline blocks have no single surrounding-text baseline and retain position zero.
+Word aligns an inline image through its layout bottom, while `InlineShape.Range.Font.Position` persists only whole points. For a TeX depth `d`, LaTeX Blocks applies `Font.Position = -round(d)` and moves the SVG viewBox by the residual `d - round(d)`. `InlineShapes.AddPicture` also creates a host-only `wp:effectExtent` below an SVG; controlled Word rendering shows that this shifts the inline baseline even though it is not part of the SVG or TeX box. LaTeX Blocks therefore reinserts the same Flat OPC object with `wp:effectExtent.b=0`. No numerical effect-extent compensation is mixed into the TeX depth. Display or multiline blocks have no single surrounding-text baseline and retain position zero.
+
+Auto-width formulas store the TeX design size used to render them. LaTeX Blocks listens to Word's native Font Size combo-box command and rerenders formulas in the selected range at the new TeX size. Because Word has no general formatting-changed event, shortcut and other native formatting paths are covered when the selection next changes: the previous range is checked once for a difference between its image-character size and stored TeX size. There is no timer or document-wide background scan.
 
 The reference is always the TeX/Western baseline, including when the TeX source contains Chinese. CJK glyphs may extend farther below that line, according to the Chinese font selected by the active StemTeX profile, but they do not redefine it. The add-in never inspects adjacent Word characters, never switches its reference to a Word East Asian font, and never applies a CJK-specific visual offset. Consequently, mixed Chinese/Western content inside the SVG remains internally governed by TeX font metrics, while the SVG's TeX baseline is mapped to Word's running-text baseline exactly once.
 
-The maintained StemTeX profiles use the 10 pt `article` base size. An auto-width inline object is therefore scaled uniformly by `Word insertion-point font size / 10 pt`; its measured TeX depth is scaled by the same ratio before Word positioning. This makes 10 pt TeX text become 11 pt beside ordinary 11 pt Word text without changing the baseline definition. Fixed-width blocks preserve their explicit canvas size and are not scaled from surrounding text.
+Font size is a renderer input, not an image transform. For an auto-width inline object, LaTeX Blocks reads the Word insertion-point size and passes it through StemTeX 0.11's native per-request `font_size_pt` API. StemTeX applies the size inside its live TeX worker, so the resulting SVG, natural width, math metrics, script sizes, optical-size choices, and TeX depth are all produced at the requested size. The add-in does not inject `\fontsize` into the user's source and never enlarges a 10 pt SVG to imitate another TeX size. Fixed-width blocks preserve their explicit document design and editor size.
+
+The Typography control is a one-shot, LaTeX-aware font-size command. It applies the requested size to the selected Word text and rerenders every auto-width LaTeX object in that selection at the same TeX size. This is an explicit user transaction, not a document watcher or timer.
 
 ## Layout modes
 

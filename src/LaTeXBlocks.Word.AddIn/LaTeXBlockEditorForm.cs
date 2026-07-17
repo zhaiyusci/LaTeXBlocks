@@ -21,6 +21,7 @@ namespace LaTeXBlocks.Word
         private readonly Timer previewTimer;
         private readonly ToolTip statusToolTip = new ToolTip();
         private readonly Action<string> profileChanged;
+        private readonly double fontSizePt;
         private int editVersion;
         private int activeRenders;
         private int renderedVersion = -1;
@@ -32,10 +33,12 @@ namespace LaTeXBlocks.Word
             new System.Collections.Generic.List<string>();
 
         internal LaTeXBlockEditorForm(LaTeXBlockService service, string source, double widthPt,
-            LaTeXBlockLayoutMode mode, string profile, Action<string> profileChanged, bool editing)
+            LaTeXBlockLayoutMode mode, string profile, Action<string> profileChanged, bool editing,
+            double fontSizePt = 10)
         {
             this.service = service ?? throw new ArgumentNullException(nameof(service));
             this.profileChanged = profileChanged ?? throw new ArgumentNullException(nameof(profileChanged));
+            this.fontSizePt = fontSizePt;
             Text = editing ? "Edit LaTeX Block" : "Insert LaTeX Block";
             StartPosition = FormStartPosition.CenterParent;
             MinimumSize = new Size(760, 560);
@@ -184,10 +187,12 @@ namespace LaTeXBlocks.Word
             var width = WidthPt;
             var mode = Mode;
             var profile = Profile;
+            var phase = "Render";
             SetRendering(true, "Rendering...");
             try
             {
-                var render = await service.RenderPreviewAsync(source, width, mode, profile);
+                var render = await service.RenderPreviewAsync(source, width, mode, profile, fontSizePt);
+                phase = "Preview update";
                 if (IsDisposed) return;
                 if (version == editVersion)
                 {
@@ -206,8 +211,12 @@ namespace LaTeXBlocks.Word
             {
                 if (!IsDisposed && version == editVersion)
                 {
-                    statusLabel.Text = "Render failed; keep editing";
-                    statusToolTip.SetToolTip(statusLabel, exception.Message);
+                    WriteErrorLog(exception, source, profile, version);
+                    var message = (exception.GetBaseException().Message ?? exception.Message)
+                        .Replace('\r', ' ').Replace('\n', ' ').Trim();
+                    var shortMessage = message.Length > 90 ? message.Substring(0, 87) + "..." : message;
+                    statusLabel.Text = phase + " failed: " + shortMessage;
+                    statusToolTip.SetToolTip(statusLabel, exception.ToString());
                     if (showErrorDialog)
                         MessageBox.Show(this, exception.Message, Text, MessageBoxButtons.OK, MessageBoxIcon.Error);
                 }
@@ -220,6 +229,21 @@ namespace LaTeXBlocks.Word
                     SetRendering(activeRenders > 0, statusLabel.Text);
                 }
             }
+        }
+
+        private static void WriteErrorLog(Exception exception, string source, string profile, int version)
+        {
+            try
+            {
+                var directory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                    "LaTeXBlocks");
+                Directory.CreateDirectory(directory);
+                File.AppendAllText(Path.Combine(directory, "errors.log"),
+                    DateTime.Now.ToString("O") + " preview version=" + version + " profile=" + profile +
+                    Environment.NewLine + source + Environment.NewLine + exception + Environment.NewLine +
+                    new string('-', 72) + Environment.NewLine, new UTF8Encoding(false));
+            }
+            catch { }
         }
 
         private void SetRendering(bool rendering, string status)
