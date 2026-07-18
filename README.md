@@ -8,18 +8,18 @@ This repository intentionally does not implement document search. [Comprehensive
 
 - Insert a traditional inline formula at its TeX natural width.
 - Insert a fixed-width LaTeX block for display, multiline, or paragraph content.
-- Insert a centered display equation with a Word-native `SEQ LaTeXEquation` number.
-- Update equation numbers explicitly after moving, inserting, or deleting equations; no document watcher is used.
+- Insert a natural-width, display-style equation on its own visual line with a Word-native `SEQ LaTeXEquation` number.
+- Update equation numbers explicitly after moving, inserting, or removing complete equation lines; no document watcher is used.
 - Preview through the long-lived StemTeX renderer.
 - Refresh the editor preview automatically after a short typing pause, while coalescing stale requests.
 - Discover StemTeX profiles and persist one global selection for the Word add-in.
 - Start warming the default profile in the background as soon as the Word add-in starts.
-- Store the exact source in the SVG object's Alternative Text.
+- Store the authoritative source in the SVG object's Alternative Text, with Word-stable LF line endings.
 - Edit a selected block from the Ribbon or by double-clicking it.
 - Replace an existing SVG only after the new render succeeds.
 - Preserve a stable block ID across edits and DOCX save/reopen cycles.
 
-The smoke test has verified SVG insertion, exact-source persistence, metadata persistence, atomic replacement,
+The smoke test has verified SVG insertion, canonical-source persistence, metadata persistence, atomic replacement,
 Word-native equation numbering and bookmarks, deletion-time renumbering, and DOCX reopen in desktop Word.
 
 ## Object contract
@@ -27,13 +27,16 @@ Word-native equation numbering and bookmarks, deletion-time renumbering, and DOC
 The mathematical artifact is an embedded `InlineShape` SVG. Version 1 distinguishes `mode=auto` from `mode=fixed`
 and ordinary content from a numbered equation:
 
-- `AlternativeText`: the exact, authoritative LaTeX source, with no normalization or duplicate search vocabulary.
+- `AlternativeText`: the authoritative LaTeX source, with line endings canonically stored as LF and no duplicate search vocabulary.
 - `Title`: short machine metadata in the form `LaTeXBlocks/1;id=<guid>;width=<pt>;depth=<pt>;mode=<auto|fixed>;size=<pt>;role=<content|numbered-equation>`.
 - image bytes: a self-contained SVG rendered by StemTeX.
 
-A numbered equation places that SVG in the center cell of a borderless one-row Word table. The right cell contains
-the native field `( { SEQ LaTeXEquation \\* ARABIC } )`; its result is bookmarked with the SVG's stable ID. Word,
-not StemTeX, therefore owns numbering and future cross-reference semantics.
+A numbered equation remains inside the current Word paragraph. Manual line breaks create its visual line; a center
+tab at the text-column midpoint places the natural-width SVG and a right tab at the text-column edge places
+`( { SEQ LaTeXEquation \\* ARABIC } )`. These display tabs deliberately do not bake in running-text paragraph indents.
+The field result is
+bookmarked with the SVG's stable ID. Word, not StemTeX, therefore owns line placement, numbering, and future
+cross-reference semantics without introducing a table or a paragraph boundary.
 
 See [docs/OBJECT_MODEL.md](docs/OBJECT_MODEL.md) for invariants and update behavior.
 

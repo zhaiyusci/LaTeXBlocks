@@ -242,26 +242,55 @@ namespace LaTeXBlocks.Word
 
         private static string AddMeasurementMarkers(string source, bool autoWidth)
         {
-            // A block/display has no single baseline to align to surrounding Word text.
-            if (source.IndexOf('\n') >= 0 || source.IndexOf('\r') >= 0 ||
-                source.IndexOf("\\[", StringComparison.Ordinal) >= 0 ||
-                source.IndexOf("$$", StringComparison.Ordinal) >= 0 ||
-                source.IndexOf("\\begin{", StringComparison.Ordinal) >= 0)
+            // A full display environment owns a line-width box and therefore has no
+            // natural inline width. Source newlines alone are harmless inside the hbox;
+            // they let users format a single formula legibly without changing its box.
+            var uncommented = RemoveTeXCommentsForDetection(source);
+            if (uncommented.IndexOf("\\[", StringComparison.Ordinal) >= 0 ||
+                uncommented.IndexOf("$$", StringComparison.Ordinal) >= 0 ||
+                Regex.IsMatch(uncommented,
+                    "\\\\begin\\s*\\{\\s*(?:displaymath|equation\\*?|align\\*?|gather\\*?|multline\\*?|flalign\\*?|minipage)\\s*\\}",
+                    RegexOptions.CultureInvariant))
             {
-                if (autoWidth) throw new ArgumentException("Auto width supports one-line inline LaTeX only. Use Fixed width for display or multiline content.", nameof(source));
+                if (autoWidth) throw new ArgumentException(
+                    "Auto width does not accept a full display or page-width environment. Use Fixed width for that content.",
+                    nameof(source));
                 return source;
             }
 
             if (autoWidth)
             {
-                return "\\begingroup\\setbox255=\\hbox{" + source + "}" +
+                return "\\begingroup\n\\setbox255=\\hbox{\n" + source + "\n}%\n" +
                        "\\leavevmode\\special{dvisvgm:raw <g id='latexblocks-start' data-x='{?x}' data-y='{?y}'/>}" +
                        "\\box255\\special{dvisvgm:raw <g id='latexblocks-end' data-x='{?x}'/>}\\endgroup";
             }
 
             // dvisvgm expands {?y} to the current TeX baseline without adding visible geometry.
-            return "\\begingroup\\leavevmode\\special{dvisvgm:raw <g id='latexblocks-baseline' data-y='{?y}'/>}" +
-                   source + "\\endgroup";
+            return "\\begingroup\n\\leavevmode\\special{dvisvgm:raw <g id='latexblocks-baseline' data-y='{?y}'/>}\n" +
+                   source + "\n\\endgroup";
+        }
+
+        internal static string RemoveTeXCommentsForDetection(string source)
+        {
+            if (string.IsNullOrEmpty(source)) return source ?? string.Empty;
+            var result = new StringBuilder(source.Length);
+            for (var index = 0; index < source.Length; index++)
+            {
+                if (source[index] == '%')
+                {
+                    var backslashes = 0;
+                    for (var previous = index - 1; previous >= 0 && source[previous] == '\\'; previous--)
+                        backslashes++;
+                    if (backslashes % 2 == 0)
+                    {
+                        while (index + 1 < source.Length && source[index + 1] != '\r' &&
+                               source[index + 1] != '\n') index++;
+                        continue;
+                    }
+                }
+                result.Append(source[index]);
+            }
+            return result.ToString();
         }
 
         private static byte[] ProcessMeasurementMarkers(byte[] svgBytes, bool autoWidth, out double depthPt)

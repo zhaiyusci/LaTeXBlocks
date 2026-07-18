@@ -22,6 +22,7 @@ namespace LaTeXBlocks.Word
         private readonly ToolTip statusToolTip = new ToolTip();
         private readonly Action<string> profileChanged;
         private readonly double fontSizePt;
+        private readonly bool displayMathStyle;
         private int editVersion;
         private int activeRenders;
         private int renderedVersion = -1;
@@ -34,11 +35,12 @@ namespace LaTeXBlocks.Word
 
         internal LaTeXBlockEditorForm(LaTeXBlockService service, string source, double widthPt,
             LaTeXBlockLayoutMode mode, string profile, Action<string> profileChanged, bool editing,
-            double fontSizePt = 10, string windowTitle = null)
+            double fontSizePt = 10, string windowTitle = null, bool displayMathStyle = false)
         {
             this.service = service ?? throw new ArgumentNullException(nameof(service));
             this.profileChanged = profileChanged ?? throw new ArgumentNullException(nameof(profileChanged));
             this.fontSizePt = fontSizePt;
+            this.displayMathStyle = displayMathStyle;
             Text = windowTitle ?? (editing ? "Edit LaTeX Block" : "Insert LaTeX Block");
             StartPosition = FormStartPosition.CenterParent;
             MinimumSize = new Size(760, 560);
@@ -65,9 +67,17 @@ namespace LaTeXBlocks.Word
                 Value = (decimal)Math.Max(36, Math.Min(2000, widthPt))
             };
             modeBox = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 155 };
-            modeBox.Items.Add("Auto-width formula");
-            modeBox.Items.Add("LaTeX block (Fixed)");
-            modeBox.SelectedIndex = mode == LaTeXBlockLayoutMode.Auto ? 0 : 1;
+            if (displayMathStyle)
+            {
+                modeBox.Items.Add("Display equation (Auto)");
+                modeBox.SelectedIndex = 0;
+            }
+            else
+            {
+                modeBox.Items.Add("Auto-width formula");
+                modeBox.Items.Add("LaTeX block (Fixed)");
+                modeBox.SelectedIndex = mode == LaTeXBlockLayoutMode.Auto ? 0 : 1;
+            }
             profileBox = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 145 };
             foreach (var availableProfile in service.Profiles) profileBox.Items.Add(availableProfile);
             profileBox.SelectedIndex = 0;
@@ -191,7 +201,8 @@ namespace LaTeXBlocks.Word
             SetRendering(true, "Rendering...");
             try
             {
-                var render = await service.RenderPreviewAsync(source, width, mode, profile, fontSizePt);
+                var render = await service.RenderPreviewAsync(source, width, mode, profile, fontSizePt,
+                    displayMathStyle);
                 phase = "Preview update";
                 if (IsDisposed) return;
                 if (version == editVersion)

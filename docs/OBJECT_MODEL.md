@@ -4,17 +4,17 @@
 
 An ordinary LaTeX block behaves like one semantic document object, not like an image plus hidden text plus a control
 wrapper. The source, visual output, and editing identity occupy three native properties of one Word `InlineShape`.
-A numbered display equation adds a native Word layout-and-numbering container around that same content object; it
-does not add a second copy of the TeX source.
+A numbered display equation adds a same-paragraph Word line-and-number scaffold around that same content object; it
+does not add a container or a second copy of the TeX source.
 
 ## Representation
 
 | Concern | Word representation | Rule |
 | --- | --- | --- |
 | Display | Embedded SVG image bytes | Portable output; Word does not need StemTeX to display an existing block. |
-| Authoritative source | `InlineShape.AlternativeText` | Exact TeX source only. No AsciiMath, normalized terms, prefixes, or duplicate metadata. |
+| Authoritative source | `InlineShape.AlternativeText` | TeX source only, with Word-stable LF line endings. No AsciiMath, normalized terms, prefixes, or duplicate metadata. |
 | Identification | `InlineShape.Title` | Versioned, compact metadata only. |
-| Placement | Word `InlineShape` range | Word remains responsible for layout, anchoring, and document persistence. |
+| Placement | Word `InlineShape` range | Word remains responsible for layout, anchoring, and document persistence. A numbered equation uses same-paragraph manual breaks and tab stops. |
 | Equation number | Word `SEQ LaTeXEquation` field | Native searchable text, updated explicitly in document order. |
 | Equation reference target | Word bookmark over the `SEQ` result | Name is derived from the stable SVG ID. |
 
@@ -24,13 +24,17 @@ Version 1 metadata is:
 LaTeXBlocks/1;id=<guid>;width=<points>;depth=<points>;mode=<auto|fixed>;size=<points>;role=<content|numbered-equation>
 ```
 
+Word rewrites CRLF in Alternative Text to LF when a DOCX is saved. LaTeX Blocks therefore canonicalizes CRLF and bare
+CR to LF before rendering and storage; all other source characters are preserved. This keeps the authoritative source
+stable across save/reopen without changing TeX comment boundaries.
+
 The stable ID survives edits. Width is the StemTeX typesetting constraint, not a DPI value and not a raster-image
 scale. For a one-line inline source, depth is measured from an invisible dvisvgm marker at the TeX baseline to the
 SVG viewport bottom. Metadata written before `role` existed parses as ordinary `content`.
 
 Profile names are discovered from the active StemTeX installation. A directory is offered only when it contains `preamble.tex`. Profile is global add-in state, not object state: changing it affects every subsequent preview, insertion, and rerender. The choice is stored under the current user's LaTeX Blocks settings and is the profile warmed when Word next starts.
 
-Word aligns an inline image through its layout bottom, while `InlineShape.Range.Font.Position` persists only whole points. For a TeX depth `d`, LaTeX Blocks applies `Font.Position = -round(d)` and moves the SVG viewBox by the residual `d - round(d)`. `InlineShapes.AddPicture` also creates a host-only `wp:effectExtent` below an SVG; controlled Word rendering shows that this shifts the inline baseline even though it is not part of the SVG or TeX box. LaTeX Blocks therefore reinserts the same Flat OPC object with `wp:effectExtent.b=0`. No numerical effect-extent compensation is mixed into the TeX depth. Display or multiline blocks have no single surrounding-text baseline and retain position zero.
+Word aligns an inline image through its layout bottom, while `InlineShape.Range.Font.Position` persists only whole points. For a TeX depth `d`, LaTeX Blocks applies `Font.Position = -round(d)` and moves the SVG viewBox by the residual `d - round(d)`. `InlineShapes.AddPicture` also creates a host-only `wp:effectExtent` below an SVG; controlled Word rendering shows that this shifts the inline baseline even though it is not part of the SVG or TeX box. LaTeX Blocks therefore reinserts the same Flat OPC object with `wp:effectExtent.b=0`. `InsertXML` reconstructs the containing paragraph, so the add-in duplicates and restores its complete direct `ParagraphFormat`; editing an SVG must not erase indentation, spacing, or equation tab stops. No numerical effect-extent compensation is mixed into the TeX depth. Fixed-width multiline blocks have no single surrounding-text baseline and retain position zero. A numbered equation is instead one natural-width TeX display box and therefore has one measurable baseline.
 
 Auto-width formulas store the TeX design size used to render them. LaTeX Blocks listens to Word's native Font Size
 combo-box command and rerenders formulas in the selected range at the new TeX size. Because Word has no general
@@ -62,45 +66,61 @@ Objects created before the mode field existed parse as `fixed`, preserving their
 
 ### Word-native numbered equation
 
-A numbered equation has one formula SVG and one Word number. The first version accepts a collapsed insertion point
-in an empty paragraph in the main document story; it does not replace text, create nested tables, or number content
-in headers, footnotes, or text boxes.
-
-The host structure is a borderless one-row, three-column table spanning the current text column:
+A numbered equation has one natural-width formula SVG and one Word number. It accepts a collapsed insertion point
+inside a paragraph in the main document story; it does not replace a selection or number content in tables, headers,
+footnotes, or text boxes. The display line remains part of that logical paragraph:
 
 ```text
-| 10% empty balance | 80% centered SVG | 10% right-aligned number |
+running text before <manual line break>
+<center tab> SVG <right tab> ( SEQ field ) <manual line break>
+running text after
 ```
 
-The left and right cells have equal widths, so the formula remains centered relative to the text column rather than
-being shifted by the number. All cell padding, paragraph indentation, and paragraph spacing are zero. The formula
-and number cells are vertically centered. A 1pt separator paragraph follows the table because Word otherwise merges
-adjacent equation tables; this paragraph carries no source or search proxy.
+Either manual break is omitted when the equation is already at that edge of the paragraph. Both breaks are Word line
+breaks (`w:br` / character 11), never paragraph marks. The paragraph receives one center tab stop at the midpoint of
+the current text column and one right tab stop at the column's right edge. The display line deliberately ignores the
+running-text paragraph's left and right indents: Word stores custom tab positions as static offsets from the column's
+left edge, so baking an indent into them would leave stale positions after later paragraph-format changes. **Update
+Numbers** recomputes these two positions and migrates documents written by the earlier indent-relative implementation.
+The center tab aligns the formula independently of the number; the right tab aligns the number. There is no Word table, balancing cell, content
+control, separator paragraph, or hidden text. A paragraph containing ordinary tabbed content is rejected because the
+equation scaffold must own these two tab stops; another numbered equation in the same paragraph reuses them.
+Paragraphs with **Exact** line spacing are rejected because Word cannot expand only the manual-break display line;
+Single, At least, and Multiple spacing allow the inline SVG to participate in the line box without rewriting the
+paragraph's typography.
 
-The right cell contains literal parentheses around a native field:
+The authoritative source may use `\[...\]`, `$$...$$`, `\(...\)`, `$...$`, `displaymath`, or `equation` delimiters.
+For rendering only, LaTeX Blocks removes that outer delimiter and submits `\(\displaystyle <body>\)` through the
+existing auto-width hbox measurement path. Thus TeX selects display-style fractions, limits, and glyph metrics while
+the SVG is cropped to the formula's natural box. The wrapper never enters Alternative Text. A full TeX display
+environment would retain the requested page width and is deliberately not embedded as the inline Word object.
+
+The right-aligned tab segment contains literal parentheses around a native field:
 
 ```text
 ( { SEQ LaTeXEquation \\* ARABIC } )
 ```
 
 The field result alone is bookmarked as `LTXEQ_<32-hex-digit block ID>`. Editing replaces only the SVG and preserves
-the block ID, table, field, and bookmark. The renderer's physical SVG width is checked before insertion or replacement;
-Word is never allowed to silently scale an oversized fixed-width equation to make it fit.
+the block ID, line scaffold, field, and bookmark. The renderer's physical natural width is checked before insertion
+or replacement; formulas that would collide with the right-aligned number are rejected before Word is mutated.
 
 The **Update Numbers** command updates only `SEQ LaTeXEquation` fields in the main document story. It is an explicit
-operation, not a timer or document-wide background watcher. Moving, copying, or deleting equations can leave cached
-field results stale until that command or Word's own field-update command runs.
+operation, not a timer or document-wide background watcher. Moving, copying, or removing complete equation-line
+scaffolds can leave cached field results stale until that command or Word's own field-update command runs. Deleting
+only the selected SVG is not a semantic equation deletion: it leaves the two tabs, `SEQ` field, and bookmark behind.
+The current prototype does not yet expose a dedicated **Delete Equation** command.
 
-One numbered block owns one Word number. A multiline block can share that number. Per-row numbering inside one TeX
-`align` SVG is deliberately outside this first contract because Word cannot address the internal SVG rows as separate
-native fields.
+One numbered block owns one Word number. `align` and `gather` input can be reduced to one natural-width `aligned` or
+`gathered` display box and therefore shares one number. Per-row numbering inside one SVG is deliberately outside this
+contract because Word cannot address the internal SVG rows as separate native fields.
 
 ## Insert transaction
 
 1. Render the source to SVG with StemTeX.
 2. If rendering fails, make no document change.
 3. Embed the SVG at the current selection as an `InlineShape`.
-4. Write exact source and metadata to the object.
+4. Write canonical source and metadata to the object.
 5. Select the inserted object.
 
 ## Edit transaction
@@ -124,8 +144,10 @@ Comprehensive Find supplies the missing host capability: it searches visible doc
 - No OMML conversion.
 - No hidden proxy runs.
 - No content-control wrapper.
+- No table or extra paragraph for a numbered equation.
 - No automatic per-row Word numbering inside one multiline SVG.
 - No background field-renumbering watcher.
+- No dedicated numbered-equation deletion command yet; the complete visual-line scaffold is the deletion unit.
 - No duplicated plain-language or AsciiMath search representation.
 - No multi-object or hidden-run baseline scaffold; inline compensation is one Word whole-point character position plus the fractional residual encoded in the SVG viewBox.
 - No mutation of the old object before a successful render.

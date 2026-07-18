@@ -107,11 +107,11 @@ namespace LaTeXBlocks.Word
             if (Application.Documents.Count == 0) throw new InvalidOperationException("Open a Word document first.");
             LaTeXBlockService.ValidateNumberedEquationTarget(Application.Selection.Range);
             var fontSizePt = LaTeXBlockService.ResolveFontSize(Application.Selection.Range,
-                LaTeXBlockLayoutMode.Fixed, 10);
-            var widthPt = LaTeXBlockService.SuggestedNumberedEquationWidth(Application.Selection.Range, 360);
+                LaTeXBlockLayoutMode.Auto, 10);
+            const double widthPt = 360;
             using (var editor = new LaTeXBlockEditorForm(Blocks, "\\[E=mc^2\\]", widthPt,
-                LaTeXBlockLayoutMode.Fixed, currentProfile ?? Renderers.DefaultAvailableProfile,
-                SetCurrentProfile, false, fontSizePt, "Insert Numbered Equation"))
+                LaTeXBlockLayoutMode.Auto, currentProfile ?? Renderers.DefaultAvailableProfile,
+                SetCurrentProfile, false, fontSizePt, "Insert Numbered Equation", true))
             {
                 if (editor.ShowDialog(new LaTeXBlocksRibbon.WordWindow(Application)) == DialogResult.OK)
                 {
@@ -137,7 +137,8 @@ namespace LaTeXBlocks.Word
                 throw new InvalidOperationException("Select a LaTeX Block first.");
             var source = shape.AlternativeText;
             using (var editor = new LaTeXBlockEditorForm(Blocks, source, metadata.WidthPt, metadata.Mode,
-                currentProfile ?? Renderers.DefaultAvailableProfile, SetCurrentProfile, true, metadata.FontSizePt))
+                currentProfile ?? Renderers.DefaultAvailableProfile, SetCurrentProfile, true, metadata.FontSizePt,
+                null, metadata.Role == LaTeXBlockRole.NumberedEquation))
             {
                 if (editor.ShowDialog(new LaTeXBlocksRibbon.WordWindow(Application)) == DialogResult.OK)
                 {
@@ -309,7 +310,8 @@ namespace LaTeXBlocks.Word
                 {
                     var request = requests[index];
                     var render = await service.RenderPreviewAsync(request.Source, request.Metadata.WidthPt,
-                        request.Metadata.Mode, profile, request.FontSizePt).ConfigureAwait(false);
+                        request.Metadata.Mode, profile, request.FontSizePt,
+                        request.Metadata.Role == LaTeXBlockRole.NumberedEquation).ConfigureAwait(false);
                     if (shuttingDown || generation != Interlocked.Read(ref formatRefreshGeneration)) return;
                     await InvokeOnWordUiAsync(() =>
                     {
