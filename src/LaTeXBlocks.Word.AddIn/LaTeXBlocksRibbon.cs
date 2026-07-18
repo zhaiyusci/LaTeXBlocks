@@ -20,13 +20,17 @@ namespace LaTeXBlocks.Word
                    "<group id=\"LaTeXBlocks.Blocks\" label=\"LaTeX\">" +
                    "<button id=\"LaTeXBlocks.InsertFormula\" label=\"Insert Formula\" size=\"large\" imageMso=\"EquationInsertNew\" onAction=\"OnInsertFormula\"/>" +
                    "<button id=\"LaTeXBlocks.InsertBlock\" label=\"Insert Block\" size=\"large\" imageMso=\"TextBoxInsert\" onAction=\"OnInsertBlock\"/>" +
+                   "<button id=\"LaTeXBlocks.InsertNumberedEquation\" label=\"Numbered Equation\" size=\"large\" imageMso=\"CaptionInsert\" onAction=\"OnInsertNumberedEquation\"/>" +
                    "<button id=\"LaTeXBlocks.Edit\" label=\"Edit Block\" size=\"large\" imageMso=\"ObjectEdit\" onAction=\"OnEdit\"/>" +
+                   "<button id=\"LaTeXBlocks.UpdateEquationNumbers\" label=\"Update Numbers\" imageMso=\"FieldsUpdate\" onAction=\"OnUpdateEquationNumbers\"/>" +
                    "</group></tab></tabs></ribbon></customUI>";
         }
 
         public void OnInsertFormula(Office.IRibbonControl control) { Run(addIn.ShowInsertFormulaEditor); }
         public void OnInsertBlock(Office.IRibbonControl control) { Run(addIn.ShowInsertBlockEditor); }
+        public void OnInsertNumberedEquation(Office.IRibbonControl control) { Run(addIn.ShowInsertNumberedEquationEditor); }
         public void OnEdit(Office.IRibbonControl control) { Run(addIn.ShowEditEditor); }
+        public void OnUpdateEquationNumbers(Office.IRibbonControl control) { Run(addIn.UpdateEquationNumbers); }
         private void Run(Action action)
         {
             try { action(); }

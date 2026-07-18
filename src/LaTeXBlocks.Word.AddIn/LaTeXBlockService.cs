@@ -12,6 +12,10 @@ namespace LaTeXBlocks.Word
 {
     internal sealed class LaTeXBlockService
     {
+        internal const string EquationSequenceIdentifier = "LaTeXEquation";
+        internal const string EquationBookmarkPrefix = "LTXEQ_";
+        private const float EquationSideColumnPercent = 10.0f;
+        private const double EquationSvgWidthSafetyPt = 2.0;
         private readonly WordInterop.Application application;
         private readonly StemTeXBackend renderers;
         private readonly string cacheDirectory;
@@ -56,7 +60,80 @@ namespace LaTeXBlocks.Word
             EnsureDocument();
             if (render == null) throw new ArgumentNullException(nameof(render));
             var target = application.Selection.Range.Duplicate;
-            var metadata = LaTeXBlockMetadata.Create(widthPt, render.DepthPt, mode, render.FontSizePt);
+            var metadata = LaTeXBlockMetadata.Create(widthPt, render.DepthPt, mode, render.FontSizePt,
+                LaTeXBlockRole.Content);
+            return InsertRenderedAt(target, source, mode, render, metadata, true);
+        }
+
+        internal WordInterop.InlineShape InsertNumberedBlock(string source, double widthPt,
+            LaTeXBlockLayoutMode mode, string profile)
+        {
+            EnsureDocument();
+            var fontSizePt = ResolveFontSize(application.Selection.Range, mode, 10);
+            var render = RenderPreview(source, widthPt, mode, profile, fontSizePt);
+            return InsertNumberedRendered(source, widthPt, mode, render);
+        }
+
+        internal WordInterop.InlineShape InsertNumberedRendered(string source, double widthPt,
+            LaTeXBlockLayoutMode mode, LaTeXBlockRender render)
+        {
+            EnsureDocument();
+            if (render == null) throw new ArgumentNullException(nameof(render));
+
+            var document = application.ActiveDocument;
+            var target = application.Selection.Range.Duplicate;
+            ValidateNumberedEquationTarget(target);
+            target.Collapse(WordInterop.WdCollapseDirection.wdCollapseStart);
+            WordInterop.Table table = null;
+            var undoStarted = false;
+            try
+            {
+                application.UndoRecord.StartCustomRecord("Insert Numbered Equation");
+                undoStarted = true;
+                target.ParagraphFormat.LeftIndent = 0;
+                target.ParagraphFormat.RightIndent = 0;
+                target.ParagraphFormat.FirstLineIndent = 0;
+                table = document.Tables.Add(target, 1, 3,
+                    WordInterop.WdDefaultTableBehavior.wdWord9TableBehavior,
+                    WordInterop.WdAutoFitBehavior.wdAutoFitFixed);
+                ConfigureNumberedEquationTable(table, render.FontSizePt);
+
+                var centerWidth = (double)table.Cell(1, 2).Width;
+                var renderedWidth = ReadSvgWidthPt(render.SvgBytes);
+                if (renderedWidth > centerWidth + 0.5)
+                    throw new InvalidOperationException("The rendered formula width (" +
+                        renderedWidth.ToString("0.#", CultureInfo.InvariantCulture) +
+                        " pt) is wider than the numbered equation area (" +
+                        centerWidth.ToString("0.#", CultureInfo.InvariantCulture) + " pt). Reduce Block width.");
+
+                var metadata = LaTeXBlockMetadata.Create(widthPt, render.DepthPt, mode, render.FontSizePt,
+                    LaTeXBlockRole.NumberedEquation);
+                var formulaTarget = table.Cell(1, 2).Range.Duplicate;
+                formulaTarget.Collapse(WordInterop.WdCollapseDirection.wdCollapseStart);
+                var shape = InsertRenderedAt(formulaTarget, source, mode, render, metadata, false);
+                ValidateNumberedEquationPlacement(shape, centerWidth);
+                AddEquationNumber(table.Cell(1, 3), metadata.Id);
+                InsertTableSeparatorAfter(table);
+                UpdateEquationNumbers(document);
+                shape.Range.Select();
+                return shape;
+            }
+            catch
+            {
+                try { table?.Delete(); } catch { }
+                throw;
+            }
+            finally
+            {
+                if (undoStarted)
+                    try { application.UndoRecord.EndCustomRecord(); } catch { }
+            }
+        }
+
+        private WordInterop.InlineShape InsertRenderedAt(WordInterop.Range requestedTarget, string source,
+            LaTeXBlockLayoutMode mode, LaTeXBlockRender render, LaTeXBlockMetadata metadata, bool select)
+        {
+            var target = requestedTarget.Duplicate;
             target.Text = string.Empty;
             target.Collapse(WordInterop.WdCollapseDirection.wdCollapseStart);
             var insertionPath = PrepareInsertionSvg(render, mode);
@@ -64,7 +141,7 @@ namespace LaTeXBlocks.Word
             ApplyContract(shape, source, metadata);
             shape = RemoveWordInlineEffectExtent(shape);
             ApplyBaselinePosition(shape, metadata);
-            shape.Range.Select();
+            if (select) shape.Range.Select();
             return shape;
         }
 
@@ -83,9 +160,15 @@ namespace LaTeXBlocks.Word
             if (render == null) throw new ArgumentNullException(nameof(render));
             if (!TryReadContract(oldShape, out var previous, out _))
                 throw new InvalidOperationException("The selected image is not a LaTeX Block.");
+            var numberedCellWidth = previous.Role == LaTeXBlockRole.NumberedEquation
+                ? (double?)NumberedEquationCellWidth(oldShape)
+                : null;
+            if (numberedCellWidth.HasValue && ReadSvgWidthPt(render.SvgBytes) > numberedCellWidth.Value + 0.5)
+                throw new InvalidOperationException("The rendered formula is wider than the numbered equation area. Reduce Block width or shorten the formula.");
 
             var target = oldShape.Range.Duplicate;
-            var metadata = new LaTeXBlockMetadata(previous.Id, widthPt, render.DepthPt, mode, render.FontSizePt);
+            var metadata = new LaTeXBlockMetadata(previous.Id, widthPt, render.DepthPt, mode, render.FontSizePt,
+                previous.Role);
             target.Collapse(WordInterop.WdCollapseDirection.wdCollapseStart);
             WordInterop.InlineShape replacement = null;
             try
@@ -95,6 +178,8 @@ namespace LaTeXBlocks.Word
                 ApplyContract(replacement, source, metadata);
                 replacement = RemoveWordInlineEffectExtent(replacement);
                 ApplyBaselinePosition(replacement, metadata);
+                if (numberedCellWidth.HasValue)
+                    ValidateNumberedEquationPlacement(replacement, numberedCellWidth.Value);
                 oldShape.Delete();
                 if (selectReplacement) replacement.Range.Select();
                 return replacement;
@@ -151,6 +236,186 @@ namespace LaTeXBlocks.Word
             return type == WordInterop.WdInlineShapeType.wdInlineShapePicture ||
                    type == WordInterop.WdInlineShapeType.wdInlineShapeLinkedPicture ||
                    (int)type == WordSvgInlineShapeType;
+        }
+
+        internal int UpdateEquationNumbers(WordInterop.Document document = null)
+        {
+            document = document ?? application.ActiveDocument;
+            if (document == null) return 0;
+
+            var fields = document.StoryRanges[WordInterop.WdStoryType.wdMainTextStory].Fields;
+            var equationFields = 0;
+            for (var index = 1; index <= fields.Count; index++)
+            {
+                var field = fields[index];
+                if (!IsEquationSequenceField(field)) continue;
+                if (!field.Update())
+                    throw new InvalidOperationException("Word could not update equation number " + (equationFields + 1) + ".");
+                equationFields++;
+            }
+            return equationFields;
+        }
+
+        internal static bool IsEquationSequenceField(WordInterop.Field field)
+        {
+            if (field == null || field.Type != WordInterop.WdFieldType.wdFieldSequence) return false;
+            var code = field.Code.Text ?? string.Empty;
+            return Regex.IsMatch(code, "^\\s*SEQ\\s+" + EquationSequenceIdentifier + "(?:\\s|$)",
+                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        }
+
+        internal static string EquationBookmarkName(Guid id)
+        {
+            return EquationBookmarkPrefix + id.ToString("N");
+        }
+
+        internal static double SuggestedNumberedEquationWidth(WordInterop.Range target, double preferredWidthPt = 360)
+        {
+            if (target == null || !(preferredWidthPt > 0)) return preferredWidthPt;
+            try
+            {
+                var page = target.Sections[1].PageSetup;
+                var available = (double)page.PageWidth - page.LeftMargin - page.RightMargin;
+                var columns = page.TextColumns;
+                if (columns.Count > 1)
+                    available = (available - columns.Spacing * (columns.Count - 1)) / columns.Count;
+                available = Math.Max(36, available);
+                var centerWidth = available * (100 - 2 * EquationSideColumnPercent) / 100.0;
+                return Math.Max(36, Math.Min(preferredWidthPt, centerWidth - EquationSvgWidthSafetyPt));
+            }
+            catch
+            {
+                return preferredWidthPt;
+            }
+        }
+
+        internal static double ReadSvgWidthPt(byte[] svgBytes)
+        {
+            if (svgBytes == null || svgBytes.Length == 0)
+                throw new InvalidDataException("StemTeX returned an empty SVG.");
+            var svg = Encoding.UTF8.GetString(svgBytes);
+            var match = Regex.Match(svg,
+                "<svg\\b[^>]*\\bwidth=(?<q>['\"])(?<value>[-+0-9.eE]+)\\s*(?<unit>[A-Za-z]*)\\k<q>",
+                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+            if (!match.Success || !double.TryParse(match.Groups["value"].Value, NumberStyles.Float,
+                    CultureInfo.InvariantCulture, out var value) || !(value > 0))
+                throw new InvalidDataException("StemTeX SVG has no positive physical width.");
+            switch (match.Groups["unit"].Value.ToLowerInvariant())
+            {
+                case "pt": return value;
+                case "bp": return value;
+                case "px": return value * 72.0 / 96.0;
+                case "in": return value * 72.0;
+                case "cm": return value * 72.0 / 2.54;
+                case "mm": return value * 72.0 / 25.4;
+                case "pc": return value * 12.0;
+                case "": return value * 72.0 / 96.0;
+                default: throw new InvalidDataException("StemTeX SVG width uses an unsupported unit: " +
+                    match.Groups["unit"].Value);
+            }
+        }
+
+        internal static void ValidateNumberedEquationTarget(WordInterop.Range target)
+        {
+            if (target.Start != target.End)
+                throw new InvalidOperationException("Place the insertion point on an empty equation line; numbered equations do not replace a selection.");
+            if (target.StoryType != WordInterop.WdStoryType.wdMainTextStory)
+                throw new InvalidOperationException("Numbered equations are currently supported only in the main document body.");
+            if (Convert.ToBoolean(target.Information[WordInterop.WdInformation.wdWithInTable]))
+                throw new InvalidOperationException("Nested numbered-equation tables are not supported in this version.");
+            var paragraphText = (target.Paragraphs[1].Range.Text ?? string.Empty)
+                .Replace("\r", string.Empty).Replace("\a", string.Empty);
+            if (!string.IsNullOrWhiteSpace(paragraphText))
+                throw new InvalidOperationException("Place the insertion point on an empty equation line before inserting a numbered equation.");
+        }
+
+        private static double NumberedEquationCellWidth(WordInterop.InlineShape shape)
+        {
+            var range = shape.Range;
+            if (!Convert.ToBoolean(range.Information[WordInterop.WdInformation.wdWithInTable]) ||
+                range.Cells.Count != 1)
+                throw new InvalidOperationException("A numbered equation must remain in its equation table.");
+            var cell = range.Cells[1];
+            if (cell.ColumnIndex != 2 || cell.RowIndex != 1 || cell.Range.Tables.Count != 1 ||
+                cell.Range.Tables[1].Rows.Count != 1 || cell.Range.Tables[1].Columns.Count != 3)
+                throw new InvalidOperationException("The numbered equation table structure is no longer valid.");
+            return cell.Width;
+        }
+
+        private static void ValidateNumberedEquationPlacement(WordInterop.InlineShape shape, double maximumWidthPt)
+        {
+            NumberedEquationCellWidth(shape);
+            if (shape.Width > maximumWidthPt + 0.5)
+                throw new InvalidOperationException("The rendered formula is wider than the numbered equation area. Reduce Block width or shorten the formula.");
+        }
+
+        private static void ConfigureNumberedEquationTable(WordInterop.Table table, double fontSizePt)
+        {
+            table.Borders.Enable = 0;
+            table.AllowAutoFit = false;
+            table.PreferredWidthType = WordInterop.WdPreferredWidthType.wdPreferredWidthPercent;
+            table.PreferredWidth = 100;
+            table.Rows.Alignment = WordInterop.WdRowAlignment.wdAlignRowCenter;
+            table.Rows.AllowBreakAcrossPages = 0;
+            table.Rows.SetLeftIndent(0, WordInterop.WdRulerStyle.wdAdjustNone);
+            table.TopPadding = 0;
+            table.BottomPadding = 0;
+            table.LeftPadding = 0;
+            table.RightPadding = 0;
+            table.Spacing = 0;
+
+            table.Columns[1].PreferredWidthType = WordInterop.WdPreferredWidthType.wdPreferredWidthPercent;
+            table.Columns[1].PreferredWidth = EquationSideColumnPercent;
+            table.Columns[2].PreferredWidthType = WordInterop.WdPreferredWidthType.wdPreferredWidthPercent;
+            table.Columns[2].PreferredWidth = 100 - 2 * EquationSideColumnPercent;
+            table.Columns[3].PreferredWidthType = WordInterop.WdPreferredWidthType.wdPreferredWidthPercent;
+            table.Columns[3].PreferredWidth = EquationSideColumnPercent;
+
+            table.Cell(1, 1).VerticalAlignment = WordInterop.WdCellVerticalAlignment.wdCellAlignVerticalCenter;
+            table.Cell(1, 2).VerticalAlignment = WordInterop.WdCellVerticalAlignment.wdCellAlignVerticalCenter;
+            table.Cell(1, 3).VerticalAlignment = WordInterop.WdCellVerticalAlignment.wdCellAlignVerticalCenter;
+            table.Cell(1, 1).Range.ParagraphFormat.Alignment = WordInterop.WdParagraphAlignment.wdAlignParagraphLeft;
+            table.Cell(1, 2).Range.ParagraphFormat.Alignment = WordInterop.WdParagraphAlignment.wdAlignParagraphCenter;
+            table.Cell(1, 3).Range.ParagraphFormat.Alignment = WordInterop.WdParagraphAlignment.wdAlignParagraphRight;
+            for (var column = 1; column <= 3; column++)
+            {
+                var paragraph = table.Cell(1, column).Range.ParagraphFormat;
+                paragraph.LeftIndent = 0;
+                paragraph.RightIndent = 0;
+                paragraph.FirstLineIndent = 0;
+                paragraph.SpaceBefore = 0;
+                paragraph.SpaceAfter = 0;
+                paragraph.LineSpacingRule = WordInterop.WdLineSpacing.wdLineSpaceSingle;
+            }
+            if (fontSizePt >= 1 && fontSizePt <= 200)
+                table.Cell(1, 3).Range.Font.Size = (float)fontSizePt;
+        }
+
+        private static void AddEquationNumber(WordInterop.Cell numberCell, Guid blockId)
+        {
+            var document = numberCell.Range.Document;
+            var start = numberCell.Range.Start;
+            document.Range(start, start).Text = "(";
+            var fieldRange = document.Range(start + 1, start + 1);
+            var field = document.Fields.Add(fieldRange, WordInterop.WdFieldType.wdFieldSequence,
+                EquationSequenceIdentifier + " \\* ARABIC", false);
+            if (!field.Update())
+                throw new InvalidOperationException("Word could not create the equation number field.");
+            document.Bookmarks.Add(EquationBookmarkName(blockId), field.Result);
+            document.Range(field.Result.End + 1, field.Result.End + 1).Text = ")";
+        }
+
+        private static void InsertTableSeparatorAfter(WordInterop.Table table)
+        {
+            var document = table.Range.Document;
+            var separatorStart = table.Range.End;
+            document.Range(separatorStart, separatorStart).Text = "\r";
+            var separator = document.Range(separatorStart, separatorStart + 1);
+            separator.Font.Size = 1;
+            separator.ParagraphFormat.SpaceBefore = 0;
+            separator.ParagraphFormat.SpaceAfter = 0;
+            separator.ParagraphFormat.LineSpacingRule = WordInterop.WdLineSpacing.wdLineSpaceExactly;
+            separator.ParagraphFormat.LineSpacing = 1;
         }
 
         private static void ApplyContract(WordInterop.InlineShape shape, string source, LaTeXBlockMetadata metadata)
@@ -218,6 +483,14 @@ namespace LaTeXBlocks.Word
             var fontSize = (double)target.Font.Size;
             if (fontSize < 1 || fontSize > 200) return fallback;
             return fontSize;
+        }
+
+        internal static bool ShouldRefreshForHostFontSizeChange(double selectedSizePt,
+            double currentSizePt, double renderedSizePt)
+        {
+            return currentSizePt >= 1 && currentSizePt <= 200 &&
+                   Math.Abs(selectedSizePt - currentSizePt) > 0.001 &&
+                   Math.Abs(renderedSizePt - currentSizePt) > 0.001;
         }
 
         private string PrepareInsertionSvg(LaTeXBlockRender render, LaTeXBlockLayoutMode mode)

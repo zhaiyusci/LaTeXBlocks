@@ -21,9 +21,10 @@ namespace LaTeXBlocks.Word
         private string backendStatus = "not-started";
         private Office.CommandBarComboBox nativeFontSizeControl;
         private bool refreshingNativeFontSize;
-        private WordInterop.Range previousSelectionRange;
+        private List<SelectionFontSnapshot> previousSelectionFontSnapshots = new List<SelectionFontSnapshot>();
         private Control wordUiDispatcher;
         private long formatRefreshGeneration;
+        private int programmaticMutationDepth;
         private bool shuttingDown;
         private const int NativeFontSizeControlId = 1731;
         private const string SettingsKey = @"Software\LaTeXBlocks";
@@ -63,7 +64,7 @@ namespace LaTeXBlocks.Word
             Application.WindowBeforeDoubleClick -= Application_WindowBeforeDoubleClick;
             Application.WindowSelectionChange -= Application_WindowSelectionChange;
             DetachNativeFontSizeControl();
-            ReleasePreviousSelection();
+            ClearPreviousSelectionSnapshot();
             rendererPool?.Dispose();
             rendererPool = null;
             blocks = null;
@@ -81,7 +82,8 @@ namespace LaTeXBlocks.Word
             {
                 if (editor.ShowDialog(new LaTeXBlocksRibbon.WordWindow(Application)) == DialogResult.OK)
                 {
-                    Blocks.InsertRendered(editor.Source, editor.WidthPt, editor.Mode, editor.CurrentRender);
+                    RunProgrammaticMutation(() =>
+                        Blocks.InsertRendered(editor.Source, editor.WidthPt, editor.Mode, editor.CurrentRender));
                 }
             }
         }
@@ -94,9 +96,39 @@ namespace LaTeXBlocks.Word
             {
                 if (editor.ShowDialog(new LaTeXBlocksRibbon.WordWindow(Application)) == DialogResult.OK)
                 {
-                    Blocks.InsertRendered(editor.Source, editor.WidthPt, editor.Mode, editor.CurrentRender);
+                    RunProgrammaticMutation(() =>
+                        Blocks.InsertRendered(editor.Source, editor.WidthPt, editor.Mode, editor.CurrentRender));
                 }
             }
+        }
+
+        internal void ShowInsertNumberedEquationEditor()
+        {
+            if (Application.Documents.Count == 0) throw new InvalidOperationException("Open a Word document first.");
+            LaTeXBlockService.ValidateNumberedEquationTarget(Application.Selection.Range);
+            var fontSizePt = LaTeXBlockService.ResolveFontSize(Application.Selection.Range,
+                LaTeXBlockLayoutMode.Fixed, 10);
+            var widthPt = LaTeXBlockService.SuggestedNumberedEquationWidth(Application.Selection.Range, 360);
+            using (var editor = new LaTeXBlockEditorForm(Blocks, "\\[E=mc^2\\]", widthPt,
+                LaTeXBlockLayoutMode.Fixed, currentProfile ?? Renderers.DefaultAvailableProfile,
+                SetCurrentProfile, false, fontSizePt, "Insert Numbered Equation"))
+            {
+                if (editor.ShowDialog(new LaTeXBlocksRibbon.WordWindow(Application)) == DialogResult.OK)
+                {
+                    RunProgrammaticMutation(() =>
+                        Blocks.InsertNumberedRendered(editor.Source, editor.WidthPt, editor.Mode, editor.CurrentRender));
+                }
+            }
+        }
+
+        internal void UpdateEquationNumbers()
+        {
+            if (Application.Documents.Count == 0) throw new InvalidOperationException("Open a Word document first.");
+            var count = 0;
+            RunProgrammaticMutation(() => count = Blocks.UpdateEquationNumbers(Application.ActiveDocument));
+            Application.StatusBar = count == 1
+                ? "Updated 1 LaTeX equation number."
+                : "Updated " + count + " LaTeX equation numbers.";
         }
 
         internal void ShowEditEditor()
@@ -109,7 +141,8 @@ namespace LaTeXBlocks.Word
             {
                 if (editor.ShowDialog(new LaTeXBlocksRibbon.WordWindow(Application)) == DialogResult.OK)
                 {
-                    Blocks.UpdateRendered(shape, editor.Source, editor.WidthPt, editor.Mode, editor.CurrentRender);
+                    RunProgrammaticMutation(() =>
+                        Blocks.UpdateRendered(shape, editor.Source, editor.WidthPt, editor.Mode, editor.CurrentRender));
                 }
             }
         }
@@ -122,6 +155,7 @@ namespace LaTeXBlocks.Word
             var selection = Application.Selection;
             selection.Font.Size = (float)fontSizePt;
             QueueFormatRefresh(CaptureAutoBlocks(selection.Range, fontSizePt, false));
+            RememberSelection(selection);
         }
 
         private void AttachNativeFontSizeControl()
@@ -153,9 +187,11 @@ namespace LaTeXBlocks.Word
             try
             {
                 refreshingNativeFontSize = true;
-                var size = (double)Application.Selection.Font.Size;
+                var selection = Application.Selection;
+                var size = (double)selection.Font.Size;
                 if (size < 1 || size > 200) return;
-                QueueFormatRefresh(CaptureAutoBlocks(Application.Selection.Range, size, true));
+                QueueFormatRefresh(CaptureAutoBlocks(selection.Range, size, true));
+                RememberSelection(selection);
             }
             catch (Exception exception)
             {
@@ -170,7 +206,7 @@ namespace LaTeXBlocks.Word
 
         private void Application_WindowSelectionChange(WordInterop.Selection selection)
         {
-            if (refreshingNativeFontSize)
+            if (refreshingNativeFontSize || programmaticMutationDepth > 0)
                 return;
 
             try
@@ -179,7 +215,7 @@ namespace LaTeXBlocks.Word
                 // Word exposes no general formatting-changed event. If a size was
                 // applied through a shortcut or another native command, validate the
                 // range when the user next leaves it. This is event driven, not polling.
-                QueueFormatRefresh(CaptureAutoBlocksWhoseHostSizeChanged(previousSelectionRange));
+                QueueFormatRefresh(CaptureAutoBlocksWhoseHostSizeChanged(previousSelectionFontSnapshots));
             }
             catch (Exception exception)
             {
@@ -207,19 +243,50 @@ namespace LaTeXBlocks.Word
             return requests;
         }
 
-        private List<FormatRefreshRequest> CaptureAutoBlocksWhoseHostSizeChanged(WordInterop.Range range)
+        private List<FormatRefreshRequest> CaptureAutoBlocksWhoseHostSizeChanged(
+            IList<SelectionFontSnapshot> snapshots)
         {
             var requests = new List<FormatRefreshRequest>();
-            if (range == null) return requests;
-            foreach (WordInterop.InlineShape shape in range.InlineShapes)
+            if (snapshots == null || snapshots.Count == 0) return requests;
+            foreach (var snapshot in snapshots)
             {
-                if (!LaTeXBlockService.TryReadContract(shape, out var metadata, out var source) ||
-                    metadata.Mode != LaTeXBlockLayoutMode.Auto) continue;
-                var size = (double)shape.Range.Font.Size;
-                if (size < 1 || size > 200 || Math.Abs(metadata.FontSizePt - size) <= 0.001) continue;
-                requests.Add(new FormatRefreshRequest(metadata.Id, source, metadata, size));
+                try
+                {
+                    var shape = FindBlock(snapshot.Id);
+                    if (shape == null ||
+                        !LaTeXBlockService.TryReadContract(shape, out var metadata, out var source) ||
+                        metadata.Mode != LaTeXBlockLayoutMode.Auto) continue;
+                    var size = (double)shape.Range.Font.Size;
+                    if (!LaTeXBlockService.ShouldRefreshForHostFontSizeChange(snapshot.HostFontSizePt, size,
+                            metadata.FontSizePt)) continue;
+                    requests.Add(new FormatRefreshRequest(metadata.Id, source, metadata, size));
+                }
+                catch (COMException)
+                {
+                    // The block may have been deleted or moved across a story while
+                    // the selection changed. Size refresh is opportunistic.
+                }
             }
             return requests;
+        }
+
+        private List<SelectionFontSnapshot> CaptureSelectionFontSnapshots(WordInterop.Selection selection)
+        {
+            var snapshots = new List<SelectionFontSnapshot>();
+            if (selection == null) return snapshots;
+            try
+            {
+                foreach (WordInterop.InlineShape shape in selection.Range.InlineShapes)
+                {
+                    if (!LaTeXBlockService.TryReadContract(shape, out var metadata, out _) ||
+                        metadata.Mode != LaTeXBlockLayoutMode.Auto) continue;
+                    var size = (double)shape.Range.Font.Size;
+                    if (size >= 1 && size <= 200)
+                        snapshots.Add(new SelectionFontSnapshot(metadata.Id, size));
+                }
+            }
+            catch (COMException) { }
+            return snapshots;
         }
 
         private void QueueFormatRefresh(List<FormatRefreshRequest> requests)
@@ -249,8 +316,8 @@ namespace LaTeXBlocks.Word
                         if (shuttingDown || generation != Interlocked.Read(ref formatRefreshGeneration)) return;
                         var shape = FindBlock(request.Id);
                         if (shape != null)
-                            service.UpdateRendered(shape, request.Source, request.Metadata.WidthPt,
-                                request.Metadata.Mode, render, false);
+                            RunProgrammaticMutation(() => service.UpdateRendered(shape, request.Source,
+                                request.Metadata.WidthPt, request.Metadata.Mode, render, false), false);
                     }).ConfigureAwait(false);
                 }
             }
@@ -294,21 +361,43 @@ namespace LaTeXBlocks.Word
             return null;
         }
 
-        private void RememberSelection(WordInterop.Selection selection)
+        private void RunProgrammaticMutation(Action action, bool recaptureSelectionSnapshot = true)
         {
-            ReleasePreviousSelection();
-            if (selection != null) previousSelectionRange = selection.Range.Duplicate;
-        }
-
-        private void ReleasePreviousSelection()
-        {
-            if (previousSelectionRange == null) return;
+            if (action == null) throw new ArgumentNullException(nameof(action));
+            var outermost = programmaticMutationDepth == 0;
+            programmaticMutationDepth++;
+            if (outermost && recaptureSelectionSnapshot) ClearPreviousSelectionSnapshot();
             try
             {
-                if (Marshal.IsComObject(previousSelectionRange)) Marshal.FinalReleaseComObject(previousSelectionRange);
+                action();
             }
-            catch { }
-            previousSelectionRange = null;
+            finally
+            {
+                programmaticMutationDepth--;
+                if (outermost && recaptureSelectionSnapshot && !shuttingDown && Application.Documents.Count > 0)
+                {
+                    try { RememberSelection(Application.Selection); }
+                    catch { ClearPreviousSelectionSnapshot(); }
+                }
+            }
+        }
+
+        private void RememberSelection(WordInterop.Selection selection)
+        {
+            previousSelectionFontSnapshots = CaptureSelectionFontSnapshots(selection);
+        }
+
+        private void ClearPreviousSelectionSnapshot()
+        {
+            previousSelectionFontSnapshots = new List<SelectionFontSnapshot>();
+        }
+
+        private sealed class SelectionFontSnapshot
+        {
+            internal SelectionFontSnapshot(Guid id, double hostFontSizePt)
+            { Id = id; HostFontSizePt = hostFontSizePt; }
+            internal Guid Id { get; }
+            internal double HostFontSizePt { get; }
         }
 
         private sealed class FormatRefreshRequest

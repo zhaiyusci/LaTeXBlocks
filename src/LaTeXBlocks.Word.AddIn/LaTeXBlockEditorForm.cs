@@ -34,12 +34,12 @@ namespace LaTeXBlocks.Word
 
         internal LaTeXBlockEditorForm(LaTeXBlockService service, string source, double widthPt,
             LaTeXBlockLayoutMode mode, string profile, Action<string> profileChanged, bool editing,
-            double fontSizePt = 10)
+            double fontSizePt = 10, string windowTitle = null)
         {
             this.service = service ?? throw new ArgumentNullException(nameof(service));
             this.profileChanged = profileChanged ?? throw new ArgumentNullException(nameof(profileChanged));
             this.fontSizePt = fontSizePt;
-            Text = editing ? "Edit LaTeX Block" : "Insert LaTeX Block";
+            Text = windowTitle ?? (editing ? "Edit LaTeX Block" : "Insert LaTeX Block");
             StartPosition = FormStartPosition.CenterParent;
             MinimumSize = new Size(760, 560);
             Size = new Size(900, 680);
@@ -65,7 +65,7 @@ namespace LaTeXBlocks.Word
                 Value = (decimal)Math.Max(36, Math.Min(2000, widthPt))
             };
             modeBox = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 155 };
-            modeBox.Items.Add("Inline formula (Auto)");
+            modeBox.Items.Add("Auto-width formula");
             modeBox.Items.Add("LaTeX block (Fixed)");
             modeBox.SelectedIndex = mode == LaTeXBlockLayoutMode.Auto ? 0 : 1;
             profileBox = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 145 };

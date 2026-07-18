@@ -8,6 +8,8 @@ This repository intentionally does not implement document search. [Comprehensive
 
 - Insert a traditional inline formula at its TeX natural width.
 - Insert a fixed-width LaTeX block for display, multiline, or paragraph content.
+- Insert a centered display equation with a Word-native `SEQ LaTeXEquation` number.
+- Update equation numbers explicitly after moving, inserting, or deleting equations; no document watcher is used.
 - Preview through the long-lived StemTeX renderer.
 - Refresh the editor preview automatically after a short typing pause, while coalescing stale requests.
 - Discover StemTeX profiles and persist one global selection for the Word add-in.
@@ -17,15 +19,21 @@ This repository intentionally does not implement document search. [Comprehensive
 - Replace an existing SVG only after the new render succeeds.
 - Preserve a stable block ID across edits and DOCX save/reopen cycles.
 
-The smoke test has verified SVG insertion, exact-source persistence, metadata persistence, atomic replacement, and a second DOCX reopen in desktop Word.
+The smoke test has verified SVG insertion, exact-source persistence, metadata persistence, atomic replacement,
+Word-native equation numbering and bookmarks, deletion-time renumbering, and DOCX reopen in desktop Word.
 
 ## Object contract
 
-The visible artifact is an embedded `InlineShape` SVG. Version 1 distinguishes `mode=auto` from `mode=fixed`:
+The mathematical artifact is an embedded `InlineShape` SVG. Version 1 distinguishes `mode=auto` from `mode=fixed`
+and ordinary content from a numbered equation:
 
 - `AlternativeText`: the exact, authoritative LaTeX source, with no normalization or duplicate search vocabulary.
-- `Title`: short machine metadata in the form `LaTeXBlocks/1;id=<guid>;width=<pt>;depth=<pt>;mode=<auto|fixed>`.
+- `Title`: short machine metadata in the form `LaTeXBlocks/1;id=<guid>;width=<pt>;depth=<pt>;mode=<auto|fixed>;size=<pt>;role=<content|numbered-equation>`.
 - image bytes: a self-contained SVG rendered by StemTeX.
+
+A numbered equation places that SVG in the center cell of a borderless one-row Word table. The right cell contains
+the native field `( { SEQ LaTeXEquation \\* ARABIC } )`; its result is bookmarked with the SVG's stable ID. Word,
+not StemTeX, therefore owns numbering and future cross-reference semantics.
 
 See [docs/OBJECT_MODEL.md](docs/OBJECT_MODEL.md) for invariants and update behavior.
 
