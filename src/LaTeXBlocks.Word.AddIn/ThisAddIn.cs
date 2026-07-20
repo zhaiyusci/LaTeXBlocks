@@ -75,7 +75,7 @@ namespace LaTeXBlocks.Word
         internal void ShowInsertFormulaEditor()
         {
             if (Application.Documents.Count == 0) throw new InvalidOperationException("Open a Word document first.");
-            var fontSizePt = LaTeXBlockService.ResolveFontSize(Application.Selection.Range,
+            var fontSizePt = LaTeXBlockService.ResolveFontSize(Application.Selection,
                 LaTeXBlockLayoutMode.Auto, 10);
             using (var editor = new LaTeXBlockEditorForm(Blocks, "$E=mc^2$", 360, LaTeXBlockLayoutMode.Auto,
                 currentProfile ?? Renderers.DefaultAvailableProfile, SetCurrentProfile, false, fontSizePt))
@@ -106,7 +106,7 @@ namespace LaTeXBlocks.Word
         {
             if (Application.Documents.Count == 0) throw new InvalidOperationException("Open a Word document first.");
             LaTeXBlockService.ValidateNumberedEquationTarget(Application.Selection.Range);
-            var fontSizePt = LaTeXBlockService.ResolveFontSize(Application.Selection.Range,
+            var fontSizePt = LaTeXBlockService.ResolveFontSize(Application.Selection,
                 LaTeXBlockLayoutMode.Auto, 10);
             const double widthPt = 360;
             using (var editor = new LaTeXBlockEditorForm(Blocks, "\\[E=mc^2\\]", widthPt,

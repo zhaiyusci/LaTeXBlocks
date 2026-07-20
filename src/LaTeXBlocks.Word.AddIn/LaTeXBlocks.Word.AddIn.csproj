@@ -11,7 +11,7 @@
     <LoadBehavior>3</LoadBehavior>
     <TargetFrameworkVersion>v4.8</TargetFrameworkVersion>
     <LangVersion>7.3</LangVersion>
-    <ApplicationVersion>0.1.0.0</ApplicationVersion>
+    <ApplicationVersion>0.1.9.0</ApplicationVersion>
     <DefineConstants>VSTO40;USEOFFICEINTEROP</DefineConstants>
     <BootstrapperEnabled>true</BootstrapperEnabled>
     <IsWebBootstrapper>false</IsWebBootstrapper>
@@ -80,6 +80,37 @@
   </PropertyGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
   <Import Project="$(VSToolsPath)\OfficeTools\Microsoft.VisualStudio.Tools.Office.targets" Condition="'$(VSToolsPath)' != ''" />
+  <PropertyGroup>
+    <!-- Building or cleaning a VSTO project normally rewrites the live Office
+         registration. That is unsafe once an installed ClickOnce build exists:
+         a smoke-test build can redirect the next Word launch to bin\Debug, and a
+         clean can unregister the product entirely. Development registration is
+         therefore explicit through scripts\Register-LaTeXBlocks.ps1. Set this
+         property to true only when the standard VSTO target behavior is wanted. -->
+    <EnableVstoProjectRegistration Condition="'$(EnableVstoProjectRegistration)' == ''">false</EnableVstoProjectRegistration>
+  </PropertyGroup>
+  <!-- These later definitions intentionally override the targets imported above. -->
+  <Target Name="RegisterOfficeAddin"
+          Condition="'$(VSTO_ProjectType)' == 'Application' And '$(EnableVstoProjectRegistration)' == 'true'">
+    <SetOffice2007AddInRegistration
+      Url="$(AbsolutePathToTheDeploymentManifest)"
+      AddInName="$(TargetName)"
+      OfficeApplication="$(OfficeApplication)"
+      FriendlyName="$(FriendlyName)"
+      Description="$(OfficeApplicationDescription)"
+      LoadBehavior="$(LoadBehavior)" />
+  </Target>
+  <Target Name="UnregisterOfficeAddin"
+          Condition="'$(VSTO_ProjectType)' == 'Application' And '$(EnableVstoProjectRegistration)' == 'true'">
+    <SetOffice2007AddInRegistration
+      Url="$(AbsolutePathToTheDeploymentManifest)"
+      AddInName="$(TargetName)"
+      OfficeApplication="$(OfficeApplication)"
+      FriendlyName="$(FriendlyName)"
+      Description="$(OfficeApplicationDescription)"
+      LoadBehavior="$(LoadBehavior)"
+      Unregister="true" />
+  </Target>
   <Target Name="EnsureLaTeXBlocksDevelopmentCertificate" BeforeTargets="Build" Condition="'$(SignManifests)' == 'true' and '$(ManifestCertificateThumbprint)' == '' and '$(ManifestKeyFile)' == ''">
     <Error Text="LaTeX Blocks development signing is not initialized." />
   </Target>

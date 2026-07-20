@@ -4,6 +4,7 @@ using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.RegularExpressions;
+using Microsoft.Win32;
 
 namespace LaTeXBlocks.Word
 {
@@ -151,11 +152,26 @@ namespace LaTeXBlocks.Word
                 if (configuredHome != null) return configuredHome;
                 throw new DirectoryNotFoundException("STEMTEX_HOME does not contain a usable StemTeX runtime: " + configured);
             }
+            try
+            {
+                using (var key = Registry.CurrentUser.OpenSubKey(@"Software\LaTeXBlocks"))
+                {
+                    var installedHome = key?.GetValue("StemTeXHome") as string;
+                    if (!string.IsNullOrWhiteSpace(installedHome)) candidates.Add(installedHome);
+                }
+            }
+            catch { }
+            var systemRoot = Path.GetPathRoot(Environment.SystemDirectory);
+            if (!string.IsNullOrWhiteSpace(systemRoot)) candidates.Add(Path.Combine(systemRoot, "StemTeX"));
+            candidates.Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Scholia", "StemTeX"));
+            candidates.Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "StemTeX"));
+            // Installed runtimes precede development stages so an equal-version dev
+            // tree cannot silently override the self-contained package. A strictly
+            // newer development build can still win; STEMTEX_HOME remains the explicit
+            // override for deterministic development and diagnostics.
             var documents = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
             candidates.Add(Path.Combine(documents, "xetex", "stemtex", "dist", "stemtex-installer", "StemTeX"));
             candidates.Add(Path.Combine(documents, "xetex", "stemtex", "build", "stemtex-check-stage"));
-            candidates.Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Scholia", "StemTeX"));
-            candidates.Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "StemTeX"));
 
             string bestHome = null;
             Version bestVersion = null;
@@ -260,9 +276,20 @@ namespace LaTeXBlocks.Word
 
             if (autoWidth)
             {
-                return "\\begingroup\n\\setbox255=\\hbox{\n" + source + "\n}%\n" +
+                // The wrapper's line breaks are source formatting, not content. A bare
+                // newline after "{" or before "}" becomes interword glue inside an
+                // hbox, which used to add one hidden TeX space to each side of every
+                // auto-width formula. Comment both wrapper newlines instead. Appending
+                // '%' is also safe when the source already ends in a TeX comment, while
+                // avoiding \unskip means explicit trailing \kern/\hspace/control-space
+                // nodes remain part of the user's requested box.
+                var boxedSource = source.TrimEnd('\r', '\n');
+                return "\\begingroup\n\\setbox255=\\hbox{%\n" + boxedSource + "%\n}%\n" +
                        "\\leavevmode\\special{dvisvgm:raw <g id='latexblocks-start' data-x='{?x}' data-y='{?y}'/>}" +
-                       "\\box255\\special{dvisvgm:raw <g id='latexblocks-end' data-x='{?x}'/>}\\endgroup";
+                       "\\special{dvisvgm:bbox new latexblocksink}" +
+                       "\\box255" +
+                       "\\special{dvisvgm:raw <g id='latexblocks-ink' data-viewbox='{?bbox latexblocksink}'/>}" +
+                       "\\special{dvisvgm:raw <g id='latexblocks-end' data-x='{?x}'/>}\\endgroup";
             }
 
             // dvisvgm expands {?y} to the current TeX baseline without adding visible geometry.
@@ -317,15 +344,35 @@ namespace LaTeXBlocks.Word
             {
                 var endMarker = FindMarker(svg, "latexblocks-end");
                 if (!endMarker.Success) throw new InvalidDataException("StemTeX SVG is missing its auto-width end marker.");
+                var inkMarker = FindMarker(svg, "latexblocks-ink");
+                if (!inkMarker.Success) throw new InvalidDataException("StemTeX SVG is missing its auto-width ink marker.");
+                var inkBox = Regex.Match(inkMarker.Value,
+                    "\\bdata-viewbox=['\"](?<x>[-+0-9.eE]+)\\s+(?<y>[-+0-9.eE]+)\\s+" +
+                    "(?<w>[-+0-9.eE]+)\\s+(?<h>[-+0-9.eE]+)['\"]",
+                    RegexOptions.CultureInvariant);
+                if (!inkBox.Success) throw new InvalidDataException("StemTeX SVG has no numeric auto-width ink bounds.");
                 var startX = ReadMarkerCoordinate(marker.Value, "data-x");
                 var endX = ReadMarkerCoordinate(endMarker.Value, "data-x");
                 var naturalWidth = endX - startX;
                 if (!(naturalWidth > 0) || naturalWidth > 2000) throw new InvalidDataException("StemTeX returned an invalid natural formula width.");
+                var inkLeft = double.Parse(inkBox.Groups["x"].Value, System.Globalization.CultureInfo.InvariantCulture);
+                var inkWidth = double.Parse(inkBox.Groups["w"].Value, System.Globalization.CultureInfo.InvariantCulture);
+                var inkRight = inkLeft + inkWidth;
+                if (!(inkWidth >= 0) || double.IsInfinity(inkWidth) || double.IsNaN(inkWidth))
+                    throw new InvalidDataException("StemTeX returned invalid auto-width ink bounds.");
                 svg = svg.Remove(endMarker.Index, endMarker.Length);
+                svg = svg.Remove(inkMarker.Index, inkMarker.Length);
 
-                const double borderPt = 1.0; // Matches the profile's existing PreviewBorder.
-                var croppedX = startX - borderPt;
-                var croppedWidth = naturalWidth + 2 * borderPt;
+                // The renderer deliberately uses --bbox=papersize, so the page viewBox
+                // cannot reveal content bounds. The named dvisvgm bbox marker above was
+                // sampled immediately after drawing the TeX box and contains the exact
+                // glyph/rule ink bounds. Crop to their union with the logical TeX box.
+                // This removes preview.sty's generic 1pt horizontal page border while
+                // retaining genuine accents, operators, rules, and glyph overhangs.
+                const double vectorSafetyPt = 0.05;
+                var croppedX = Math.Min(startX, inkLeft) - vectorSafetyPt;
+                var croppedRight = Math.Max(endX, inkRight) + vectorSafetyPt;
+                var croppedWidth = croppedRight - croppedX;
                 var number = System.Globalization.CultureInfo.InvariantCulture;
                 var newViewBox = "viewBox='" + croppedX.ToString("0.######", number) + " " +
                                  top.ToString("0.######", number) + " " + croppedWidth.ToString("0.######", number) + " " +

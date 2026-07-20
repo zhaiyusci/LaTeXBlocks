@@ -6,3 +6,4 @@
 *.pfx
 src/LaTeXBlocks.Word.AddIn/LaTeXBlocks.Development.props
 tests/**/artifacts/
+dist/

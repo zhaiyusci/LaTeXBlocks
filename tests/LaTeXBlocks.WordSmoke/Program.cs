@@ -25,9 +25,12 @@ namespace LaTeXBlocks.WordSmoke
             var artifactDirectory = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "artifacts");
             var documentPath = Path.Combine(artifactDirectory, "LaTeXBlocks-Smoke.docx");
             var numberedDocumentPath = Path.Combine(artifactDirectory, "LaTeXBlocks-Numbered-Smoke.docx");
+            var spacingDocumentPath = Path.Combine(artifactDirectory, "LaTeXBlocks-Inline-Spacing-Smoke.docx");
             try
             {
                 Directory.CreateDirectory(artifactDirectory);
+                Console.WriteLine("StemTeX: testing immediate shutdown during renderer initialization...");
+                RunStartupShutdownProbe();
                 renderer = new StemTeXBackend();
                 var profile = renderer.DefaultAvailableProfile;
                 var alternateProfile = profile;
@@ -65,12 +68,40 @@ namespace LaTeXBlocks.WordSmoke
                 Assert(svg.DepthPt > 0, "StemTeX inline baseline marker did not produce a positive TeX depth.");
                 var autoSvg = renderer.RenderSvg(profile, source, 360, true);
                 var autoSvg11 = renderer.RenderSvg(profile, source, 360, true, 11);
+                // A deliberately edge-trimmed reference must have the same width. If
+                // the measurement wrapper contributes either of its own line-break
+                // spaces, the ordinary render is wider by a font interword space.
+                var edgeTrimReference = renderer.RenderSvg(profile, "\\unskip" + source + "%", 360, true);
+                Assert(Math.Abs(LaTeXBlockService.ReadSvgWidthPt(autoSvg.Bytes) -
+                                LaTeXBlockService.ReadSvgWidthPt(edgeTrimReference.Bytes)) < 0.01,
+                    "The auto-width TeX wrapper added horizontal interword glue around the formula.");
+                var explicitTrailingSpace = renderer.RenderSvg(profile,
+                    source + "\\hspace{2pt}% trailing source comment", 360, true);
+                var autoWidthPt = LaTeXBlockService.ReadSvgWidthPt(autoSvg.Bytes);
+                var explicitWidthPt = LaTeXBlockService.ReadSvgWidthPt(explicitTrailingSpace.Bytes);
+                Assert(Math.Abs(explicitWidthPt - autoWidthPt - 2) < 0.01,
+                    "Suppressing wrapper glue removed an explicit trailing TeX space " +
+                    "(base=" + autoWidthPt + "pt, explicit=" + explicitWidthPt + "pt).");
+                var logicalBox = renderer.RenderSvg(profile,
+                    "\\hbox to 10pt{\\vrule width.1pt height1pt depth0pt\\hfil}", 360, true);
+                var logicalBoxWidthPt = LaTeXBlockService.ReadSvgWidthPt(logicalBox.Bytes);
+                const double texPointToWordPoint = 72.0 / 72.27;
+                Assert(Math.Abs(logicalBoxWidthPt - (10 * texPointToWordPoint + 0.1)) < 0.01,
+                    "Auto-width SVG retained the profile's visible horizontal preview border " +
+                    "(width=" + logicalBoxWidthPt + "pt).");
+                var overhangingInk = renderer.RenderSvg(profile,
+                    "\\hbox to 10pt{\\kern-2pt\\vrule width1pt height1pt depth0pt\\hfil}", 360, true);
+                var overhangingWidthPt = LaTeXBlockService.ReadSvgWidthPt(overhangingInk.Bytes);
+                Assert(Math.Abs(overhangingWidthPt - (12 * texPointToWordPoint + 0.1)) < 0.01,
+                    "Removing horizontal preview padding clipped a real TeX ink overhang " +
+                    "(width=" + overhangingWidthPt + "pt).");
                 var rhoGhSvg = renderer.RenderSvg(profile, "$\\rho gh$", 360, true, 11);
                 Assert(rhoGhSvg.Bytes.Length > 0 && rhoGhSvg.DepthPt > 0,
                     "A valid rho-gh inline formula did not render.");
                 var autoText = Encoding.UTF8.GetString(autoSvg.Bytes);
                 Assert(autoText.IndexOf("latexblocks-start", StringComparison.Ordinal) < 0 &&
-                    autoText.IndexOf("latexblocks-end", StringComparison.Ordinal) < 0,
+                    autoText.IndexOf("latexblocks-end", StringComparison.Ordinal) < 0 &&
+                    autoText.IndexOf("latexblocks-ink", StringComparison.Ordinal) < 0,
                     "Auto-width measurement markers leaked into the embedded SVG.");
                 Assert(Convert.ToBase64String(autoSvg11.Bytes) != Convert.ToBase64String(autoSvg.Bytes),
                     "Changing the requested TeX font size did not produce a new SVG render.");
@@ -158,15 +189,40 @@ namespace LaTeXBlocks.WordSmoke
                 document.Range(0, 0).Text = "Einstein's theory ";
                 document.Content.Font.Name = "Times New Roman";
                 document.Content.Font.Size = 11;
+                document.Range(0, 1).Font.Size = 13;
+                document.Range(1, 2).Font.Size = 17;
+                document.Range(1, 1).Select();
+                Assert(Math.Abs((double)word.Selection.Range.Font.Size - 17) < 0.001 &&
+                    Math.Abs((double)word.Selection.Font.Size - 13) < 0.001 &&
+                    Math.Abs(LaTeXBlockService.ResolveFontSize(word.Selection,
+                        LaTeXBlockLayoutMode.Auto, 10) - 13) < 0.001,
+                    "A run-boundary insertion used the right-hand character instead of Word's typing size.");
+                word.Selection.Font.Size = 36;
+                Assert(Math.Abs((double)word.Selection.Range.Font.Size - 17) < 0.001 &&
+                    Math.Abs((double)word.Selection.Font.Size - 36) < 0.001 &&
+                    Math.Abs(LaTeXBlockService.ResolveFontSize(word.Selection,
+                        LaTeXBlockLayoutMode.Auto, 10) - 36) < 0.001,
+                    "An explicit caret-only Word font size was not used for inline rendering.");
+                document.Range(0, 2).Select();
+                Assert(Math.Abs(LaTeXBlockService.ResolveFontSize(word.Selection,
+                    LaTeXBlockLayoutMode.Auto, 10) - 13) < 0.001,
+                    "A mixed-size replacement selection silently fell back to 10 pt.");
+                document.Content.Font.Size = 11;
                 document.Range(document.Content.End - 1, document.Content.End - 1).Select();
                 var service = new LaTeXBlockService(word, renderer);
+                RunInlineSpacingSmoke(word, service, profile, spacingDocumentPath);
+                document.Range(document.Content.End - 1, document.Content.End - 1).Select();
+                var editorFontSize = LaTeXBlockService.ResolveFontSize(word.Selection,
+                    LaTeXBlockLayoutMode.Auto, 10);
                 using (var editor = new LaTeXBlockEditorForm(service, "$x_1$", 360, LaTeXBlockLayoutMode.Auto,
-                    profile, selected => { }, false))
+                    profile, selected => { }, false, editorFontSize))
                 {
                     editor.StartPosition = System.Windows.Forms.FormStartPosition.Manual;
                     editor.Location = new System.Drawing.Point(100, 100);
                     editor.Show();
                     WaitFor(() => editor.PreviewIsCurrent, 10000, "The editor did not produce its initial live preview.");
+                    Assert(Math.Abs(editor.CurrentRender.FontSizePt - 11) < 0.001,
+                        "The insert editor did not preview at Word's current insertion font size.");
                     var firstPreview = Convert.ToBase64String(editor.CurrentRender.SvgBytes);
                     editor.SetSourceForTest("$x_2+y_2$");
                     WaitFor(() => editor.PreviewIsCurrent &&
@@ -185,6 +241,81 @@ namespace LaTeXBlocks.WordSmoke
                     }
                     editor.Close();
                 }
+                const string fractionSource = "$\\frac{1}{2}E=mc^2$";
+                var fractionStart = document.Content.End - 1;
+                document.Range(fractionStart, fractionStart).Text = "What?";
+                document.Range(document.Content.End - 1, document.Content.End - 1).Select();
+                word.Selection.Font.Name = "Times New Roman";
+                word.Selection.Font.Size = 36;
+                word.Selection.Font.Position = 0;
+                word.Selection.NoProofing = 0;
+                var fractionRender = service.RenderPreview(fractionSource, 360,
+                    LaTeXBlockLayoutMode.Auto, profile, 36);
+                var fractionShape = service.InsertRendered(fractionSource, 360,
+                    LaTeXBlockLayoutMode.Auto, fractionRender);
+                var fractionDepth = (int)Math.Round(fractionRender.DepthPt,
+                    MidpointRounding.AwayFromZero);
+                Assert(fractionDepth > 1 && fractionShape.Range.Font.Position == -fractionDepth,
+                    "Effect-extent normalization discarded the large inline formula's baseline position.");
+                Assert(Math.Abs((double)fractionShape.Range.Font.Size - 36) < 0.001,
+                    "Effect-extent normalization discarded the large inline formula's host font size.");
+                Assert(document.Range(fractionStart, fractionShape.Range.Start).Text == "What?",
+                    "Restoring the drawing run format duplicated adjacent running text.");
+                Assert(Regex.IsMatch(fractionShape.Range.WordOpenXML,
+                    "<wp:effectExtent\\b(?=[^>]*\\bb=\"0\")[^>]*/>"),
+                    "The large inline formula retained Word's host-only bottom effect extent.");
+                var fractionFollowingStart = word.Selection.Start;
+                word.Selection.TypeText("abc");
+                var fractionFollowing = document.Range(fractionFollowingStart, fractionFollowingStart + 3);
+                Assert(fractionFollowing.Text == "abc" && fractionFollowing.Font.Position == 0 &&
+                    fractionFollowing.NoProofing == 0,
+                    "Text after a large inline formula inherited its compensated picture position.");
+                document.Range(fractionStart, document.Content.End - 1).Delete();
+                document.Range(document.Content.End - 1, document.Content.End - 1).Select();
+                word.Selection.Font.Name = "Times New Roman";
+                word.Selection.Font.Size = 11;
+                word.Selection.Font.Position = 0;
+                word.Selection.NoProofing = 0;
+
+                var reusableInlineRender = new LaTeXBlockRender(null, autoSvg11.Bytes, autoSvg11.DepthPt, 11);
+                var existingTextStart = document.Content.End - 1;
+                document.Range(existingTextStart, existingTextStart).Text = "and we.";
+                document.Range(existingTextStart, existingTextStart).Select();
+                var beforeExistingText = service.InsertRendered(source, 360, LaTeXBlockLayoutMode.Auto,
+                    reusableInlineRender);
+                var insertedRunningStart = word.Selection.Start;
+                word.Selection.TypeText(" think ");
+                var insertedRunning = document.Range(insertedRunningStart, insertedRunningStart + 7);
+                var untouchedFollowing = document.Range(insertedRunningStart + 7, insertedRunningStart + 14);
+                Assert(document.InlineShapes.Count == 1 && beforeExistingText.Range.End == insertedRunningStart &&
+                    insertedRunning.Text == " think " && insertedRunning.Font.Position == 0 &&
+                    insertedRunning.NoProofing == 0 && untouchedFollowing.Text == "and we." &&
+                    untouchedFollowing.Font.Position == 0 && untouchedFollowing.NoProofing == 0,
+                    "Inserting before existing running text leaked the picture baseline or changed the following run.");
+                document.Range(existingTextStart, document.Content.End - 1).Delete();
+                document.Range(document.Content.End - 1, document.Content.End - 1).Select();
+                word.Selection.Font.Position = 0;
+                word.Selection.NoProofing = 0;
+
+                var raisedStart = document.Content.End - 1;
+                document.Range(raisedStart, raisedStart).Select();
+                word.Selection.Font.Position = 2;
+                word.Selection.NoProofing = -1;
+                var raisedShape = service.InsertRendered(source, 360, LaTeXBlockLayoutMode.Auto,
+                    reusableInlineRender);
+                var raisedDepth = (int)Math.Round(autoSvg11.DepthPt, MidpointRounding.AwayFromZero);
+                var raisedTextStart = word.Selection.Start;
+                word.Selection.TypeText("x");
+                var raisedText = document.Range(raisedTextStart, raisedTextStart + 1);
+                Assert(raisedShape.Range.Font.Position == 2 - raisedDepth && raisedText.Font.Position == 0 &&
+                    raisedText.NoProofing == 0,
+                    "Inline baseline compensation was not relative to the deliberate host position, or its " +
+                    "picture-only formatting leaked into the paragraph insertion format.");
+                document.Range(raisedStart, document.Content.End - 1).Delete();
+                document.Range(document.Content.End - 1, document.Content.End - 1).Select();
+                word.Selection.Font.Position = 0;
+                word.Selection.NoProofing = 0;
+
                 var inserted = service.InsertBlock(source, 360, LaTeXBlockLayoutMode.Auto, profile);
                 Assert(inserted.AlternativeText == source, "Alternative Text is not the exact TeX source.");
                 Assert(LaTeXBlockMetadata.TryParse(inserted.Title, out var firstMetadata), "Title metadata is invalid.");
@@ -198,8 +329,19 @@ namespace LaTeXBlocks.WordSmoke
                     "The sub-point TeX depth residual was not encoded in the inline SVG viewport.");
                 Assert(firstMetadata.Mode == LaTeXBlockLayoutMode.Auto, "Auto-width mode was not stored in metadata.");
                 Assert(inserted.Width < 100, "Auto-width formula retained the fixed typesetting canvas width.");
+                Assert(Math.Abs((double)inserted.Range.Font.Size - firstMetadata.FontSizePt) < 0.001,
+                    "The inserted formula's Word run size does not match its TeX design size.");
                 Assert(inserted.Range.Font.Position == -(int)Math.Round(firstMetadata.DepthPt, MidpointRounding.AwayFromZero),
                     "Word baseline compensation does not equal the rounded TeX depth.");
+                Assert(word.Selection.Start == word.Selection.End && word.Selection.Start == inserted.Range.End &&
+                    word.Selection.Font.Position == 0 && word.Selection.NoProofing == 0,
+                    "Inline insertion left the picture selected or leaked its character formatting into the caret.");
+                var runningTextStart = word.Selection.Start;
+                word.Selection.TypeText(" running");
+                var runningText = document.Range(runningTextStart, runningTextStart + 8);
+                Assert(document.InlineShapes.Count == 1 && runningText.Text == " running" &&
+                    runningText.Font.Position == 0 && runningText.NoProofing == 0,
+                    "Text typed after an inline formula inherited the picture run's baseline or no-proof formatting.");
                 Assert(Regex.IsMatch(inserted.Range.WordOpenXML,
                     "<wp:effectExtent\\b(?=[^>]*\\bb=\"0\")[^>]*/>"),
                     "Word's host-only bottom effect extent was not removed from the inline SVG.");
@@ -245,6 +387,23 @@ namespace LaTeXBlocks.WordSmoke
                 Assert(Math.Abs(updatedMetadata.WidthPt - 420) < 0.001, "Update did not persist the new typesetting width.");
                 Assert(Math.Abs(updatedMetadata.FontSizePt - 14) < 0.001,
                     "Update did not rerender and persist the requested TeX font size.");
+                Assert(Math.Abs((double)updated.Range.Font.Size - updatedMetadata.FontSizePt) < 0.001,
+                    "Updating an inline formula discarded its Word host font size.");
+                Assert(updated.Range.Font.Position ==
+                    -(int)Math.Round(updatedMetadata.DepthPt, MidpointRounding.AwayFromZero),
+                    "Updating an inline formula discarded its baseline position.");
+                Assert(Regex.IsMatch(updated.Range.WordOpenXML,
+                    "<wp:effectExtent\\b(?=[^>]*\\bb=\"0\")[^>]*/>"),
+                    "Updating an inline formula restored Word's bottom effect extent.");
+                Assert(word.Selection.Start == word.Selection.End && word.Selection.Start == updated.Range.End &&
+                    word.Selection.Font.Position == 0 && word.Selection.NoProofing == 0,
+                    "Updating an inline formula left its compensated picture run selected.");
+                var updatedRunningStart = word.Selection.Start;
+                word.Selection.TypeText(" updated");
+                var updatedRunning = document.Range(updatedRunningStart, updatedRunningStart + 8);
+                Assert(updatedRunning.Text == " updated" && updatedRunning.Font.Position == 0 &&
+                    updatedRunning.NoProofing == 0,
+                    "Text typed after updating a formula inherited the picture run's formatting.");
                 document.Save();
                 document.Close(WordInterop.WdSaveOptions.wdSaveChanges);
                 Release(document);
@@ -253,6 +412,15 @@ namespace LaTeXBlocks.WordSmoke
                 document = word.Documents.Open(documentPath, ReadOnly: true);
                 Assert(document.InlineShapes.Count == 2 && document.InlineShapes[1].AlternativeText == updatedSource,
                     "Updated block did not survive the second reopen.");
+                var reopenedUpdated = document.InlineShapes[1];
+                Assert(LaTeXBlockMetadata.TryParse(reopenedUpdated.Title, out var reopenedUpdatedMetadata) &&
+                    Math.Abs((double)reopenedUpdated.Range.Font.Size - reopenedUpdatedMetadata.FontSizePt) < 0.001 &&
+                    reopenedUpdated.Range.Font.Position ==
+                    -(int)Math.Round(reopenedUpdatedMetadata.DepthPt, MidpointRounding.AwayFromZero),
+                    "The updated host font size or baseline position did not survive the second reopen.");
+                Assert(Regex.IsMatch(reopenedUpdated.Range.WordOpenXML,
+                    "<wp:effectExtent\\b(?=[^>]*\\bb=\"0\")[^>]*/>"),
+                    "The updated zero bottom effect extent did not survive the second reopen.");
                 document.Close(WordInterop.WdSaveOptions.wdDoNotSaveChanges);
                 Release(document);
                 document = null;
@@ -315,6 +483,13 @@ namespace LaTeXBlocks.WordSmoke
                     "The natural-width numbered-equation contract was not stored in SVG metadata.");
                 Assert(firstNumbered.AlternativeText == numberedSource,
                     "The display-style render wrapper leaked into Alternative Text.");
+                var expectedNumberedCaret = document.Fields[1].Result.End + 2;
+                if (expectedNumberedCaret < document.Content.End &&
+                    document.Range(expectedNumberedCaret, expectedNumberedCaret + 1).Text == "\v")
+                    expectedNumberedCaret++;
+                Assert(word.Selection.Start == word.Selection.End && word.Selection.Start == expectedNumberedCaret &&
+                    word.Selection.Font.Position == 0 && word.Selection.NoProofing == 0,
+                    "Numbered-equation insertion left the picture selected or the caret before its line break.");
                 Assert(firstNumbered.Width < 100,
                     "The numbered equation retained a fixed-width display canvas.");
                 Assert(document.Tables.Count == 0 && document.InlineShapes.Count == 1 &&
@@ -389,13 +564,20 @@ namespace LaTeXBlocks.WordSmoke
                     "An oversized edit damaged or replaced the previous numbered equation.");
 
                 var updatedNumbered = service.UpdateBlock(firstNumbered, "\\[E=h\\nu\\]", numberedWidth,
-                    LaTeXBlockLayoutMode.Auto, profile, 11, false);
+                    LaTeXBlockLayoutMode.Auto, profile, 11);
                 Assert(LaTeXBlockMetadata.TryParse(updatedNumbered.Title, out var updatedNumberedMetadata) &&
                     updatedNumberedMetadata.Role == LaTeXBlockRole.NumberedEquation,
                     "Editing a numbered equation discarded its numbered role.");
                 Assert(document.Tables.Count == 0 && EquationNumberText(document.Fields[1]) == "1" &&
                     document.Bookmarks.Exists(LaTeXBlockService.EquationBookmarkName(updatedNumberedMetadata.Id)),
                     "Editing the formula disturbed its Word-native field or bookmark.");
+                var expectedUpdatedNumberedCaret = document.Fields[1].Result.End + 2;
+                if (expectedUpdatedNumberedCaret < document.Content.End &&
+                    document.Range(expectedUpdatedNumberedCaret, expectedUpdatedNumberedCaret + 1).Text == "\v")
+                    expectedUpdatedNumberedCaret++;
+                Assert(word.Selection.Start == word.Selection.End &&
+                    word.Selection.Start == expectedUpdatedNumberedCaret,
+                    "Editing a numbered equation left the caret inside its tab/number scaffold.");
 
                 Console.WriteLine("Numbered equation: saving tab-stop document...");
                 document.SaveAs2(numberedDocumentPath, WordInterop.WdSaveFormat.wdFormatXMLDocument);
@@ -497,6 +679,479 @@ namespace LaTeXBlocks.WordSmoke
             }
         }
 
+        private static void RunInlineSpacingSmoke(WordInterop.Application word, LaTeXBlockService service,
+            string profile, string documentPath)
+        {
+            WordInterop.Document document = null;
+            try
+            {
+                var render = service.RenderPreview("$E=mc^2$", 360,
+                    LaTeXBlockLayoutMode.Auto, profile, 16);
+                RunInlineSpacingFontMatrix(word, service, profile, render);
+                RunOneSidedInlineSpacingSmoke(word, service, profile,
+                    Path.Combine(Path.GetDirectoryName(documentPath),
+                        "LaTeXBlocks-One-Sided-Inline-Spacing-Smoke.docx"));
+                if (File.Exists(documentPath)) File.Delete(documentPath);
+                document = word.Documents.Add();
+                document.Range(0, 0).Text = "a b\rA xx B\rC,D";
+                document.Content.Font.Name = "Times New Roman";
+                document.Content.Font.Size = 16;
+                var ordinarySpaceWidth = MeasureHorizontalAdvance(document.Range(1, 2));
+                Assert(ordinarySpaceWidth > 3 && ordinarySpaceWidth < 5,
+                    "The isolated Word document did not produce an ordinary 16 pt space.");
+                var leftNaturalWidth = MeasureHorizontalAdvance(document.Range(5, 6));
+                var rightNaturalWidth = MeasureHorizontalAdvance(document.Range(8, 9));
+
+                // Replace "xx" in "A xx B" so both surrounding U+0020 characters can
+                // be measured in their normal pre-InlineShape layout.
+                document.Range(6, 8).Select();
+                var shape = service.InsertRendered("$E=mc^2$", 360, LaTeXBlockLayoutMode.Auto, render);
+                AssertExactSvgDrawingExtents(shape, render.SvgBytes,
+                    "Initial inline formula");
+                var leftSpace = document.Range(shape.Range.Start - 1, shape.Range.Start);
+                var rightSpace = document.Range(shape.Range.End, shape.Range.End + 1);
+                Assert(leftSpace.Text == " " && rightSpace.Text == " " &&
+                       (double)leftSpace.Font.Scaling == 100 && (double)rightSpace.Font.Scaling == 100 &&
+                       Math.Abs((double)leftSpace.Font.Spacing) < 0.001 &&
+                       Math.Abs((double)rightSpace.Font.Spacing) < 0.001,
+                    "Inline spacing compensation changed the adjacent ordinary spaces.");
+
+                var effect = ReadEffectExtent(shape.Range.WordOpenXML);
+                var leftOverlapPt = -effect.Item1 / 12700.0;
+                var rightOverlapPt = -effect.Item2 / 12700.0;
+                var leftInlineWidth = MeasureHorizontalAdvance(leftSpace);
+                var rightInlineWidth = MeasureHorizontalAdvance(rightSpace);
+                Console.WriteLine("Inline spacing: natural=" + leftNaturalWidth.ToString("0.###") + "/" +
+                    rightNaturalWidth.ToString("0.###") + ", inline=" + leftInlineWidth.ToString("0.###") + "/" +
+                    rightInlineWidth.ToString("0.###") + ", overlap=" + leftOverlapPt.ToString("0.###") + "/" +
+                    rightOverlapPt.ToString("0.###"));
+                Assert(effect.Item1 < 0 && effect.Item2 < 0 && effect.Item3 == 0 &&
+                       Math.Abs(leftOverlapPt - (leftInlineWidth - leftNaturalWidth)) < 0.08 &&
+                       Math.Abs(rightOverlapPt - (rightInlineWidth - rightNaturalWidth)) < 0.08,
+                    "The SVG object did not absorb Word's duplicated adjacent-space advance.");
+                AssertEffectiveAdjacentGaps(shape, leftNaturalWidth, rightNaturalWidth,
+                    "Initial inline formula");
+                var layoutAdvance = MeasureHorizontalAdvance(shape.Range);
+                var expectedAdvance = (double)shape.Width - leftOverlapPt - rightOverlapPt;
+                var svgWidth = LaTeXBlockService.ReadSvgWidthPt(render.SvgBytes);
+                Assert(Math.Abs(layoutAdvance - expectedAdvance) < 0.35 &&
+                       Math.Abs((double)shape.Width - svgWidth) < 0.35,
+                    "Signed effect extents changed the SVG width or did not change its inline advance.");
+
+                var updatedRender = service.RenderPreview("$x^2$", 360,
+                    LaTeXBlockLayoutMode.Auto, profile, 16);
+                shape = service.UpdateRendered(shape, "$x^2$", 360,
+                    LaTeXBlockLayoutMode.Auto, updatedRender);
+                AssertExactSvgDrawingExtents(shape, updatedRender.SvgBytes,
+                    "Updated inline formula");
+                var updatedEffect = ReadEffectExtent(shape.Range.WordOpenXML);
+                Assert(updatedEffect.Item1 == effect.Item1 && updatedEffect.Item2 == effect.Item2,
+                    "Replacing an inline formula lost its adjacent-space compensation.");
+                AssertEffectiveAdjacentGaps(shape, leftNaturalWidth, rightNaturalWidth,
+                    "Updated inline formula");
+
+                var punctuationInsertion = (document.Content.Text ?? string.Empty)
+                    .IndexOf("C,D", StringComparison.Ordinal) + 1;
+                Assert(punctuationInsertion > 0, "The no-space test text was not found.");
+                document.Range(punctuationInsertion, punctuationInsertion).Select();
+                var punctuationShape = service.InsertRendered("$E=mc^2$", 360,
+                    LaTeXBlockLayoutMode.Auto, render);
+                var punctuationEffect = ReadEffectExtent(punctuationShape.Range.WordOpenXML);
+                Assert(punctuationEffect.Item1 == 0 && punctuationEffect.Item2 == 0,
+                    "A formula without adjacent spaces received a horizontal overlap.");
+                punctuationShape.Delete();
+
+                document.SaveAs2(documentPath, WordInterop.WdSaveFormat.wdFormatXMLDocument);
+                document.Close(WordInterop.WdSaveOptions.wdDoNotSaveChanges);
+                Release(document);
+                document = null;
+
+                document = word.Documents.Open(documentPath, ReadOnly: false);
+                Assert(document.InlineShapes.Count == 1,
+                    "The inline-spacing SVG did not survive save and reopen.");
+                var reopened = document.InlineShapes[1];
+                var reopenedEffect = ReadEffectExtent(reopened.Range.WordOpenXML);
+                var reopenedLeft = document.Range(reopened.Range.Start - 1, reopened.Range.Start);
+                var reopenedRight = document.Range(reopened.Range.End, reopened.Range.End + 1);
+                Assert(reopenedEffect.Item1 == effect.Item1 && reopenedEffect.Item2 == effect.Item2 &&
+                       reopenedEffect.Item3 == 0 && reopenedLeft.Text == " " && reopenedRight.Text == " " &&
+                       (double)reopenedLeft.Font.Scaling == 100 && (double)reopenedRight.Font.Scaling == 100,
+                    "Signed inline spacing extents or the ordinary spaces did not survive save and reopen.");
+                AssertEffectiveAdjacentGaps(reopened, leftNaturalWidth, rightNaturalWidth,
+                    "Reopened inline formula");
+                AssertExactSvgDrawingExtents(reopened, updatedRender.SvgBytes,
+                    "Reopened inline formula");
+            }
+            finally
+            {
+                if (document != null)
+                {
+                    document.Close(WordInterop.WdSaveOptions.wdDoNotSaveChanges);
+                    Release(document);
+                }
+            }
+        }
+
+        private static void RunOneSidedInlineSpacingSmoke(WordInterop.Application word,
+            LaTeXBlockService service, string profile, string documentPath)
+        {
+            WordInterop.Document document = null;
+            try
+            {
+                if (File.Exists(documentPath)) File.Delete(documentPath);
+                var render = service.RenderPreview("$E=mc^2$", 360,
+                    LaTeXBlockLayoutMode.Auto, profile, 11);
+                var svgWidthPt = LaTeXBlockService.ReadSvgWidthPt(render.SvgBytes);
+
+                document = word.Documents.Add();
+                document.Content.Text = "What is ?";
+                document.Content.Font.Name = "Times New Roman";
+                document.Content.Font.Size = 11;
+                document.Repaginate();
+
+                var questionPosition = (document.Content.Text ?? string.Empty)
+                    .IndexOf("?", StringComparison.Ordinal);
+                Assert(questionPosition > 0,
+                    "The one-sided inline-spacing phrase lost its question mark.");
+                var leftSpaceBeforeInsertion = document.Range(questionPosition - 1, questionPosition);
+                var naturalLeftPt = MeasureHorizontalAdvance(leftSpaceBeforeInsertion);
+                var leftWordEndBeforeInsertion = MeasureHorizontalPosition(document,
+                    leftSpaceBeforeInsertion.Start);
+                var insertionBefore = MeasureHorizontalPosition(document, questionPosition);
+                Assert(leftSpaceBeforeInsertion.Text == " " &&
+                       Math.Abs(naturalLeftPt - 2.70) < 0.08 &&
+                       Math.Abs(insertionBefore -
+                           (leftWordEndBeforeInsertion + naturalLeftPt)) < 0.08,
+                    "The TNR 11 one-sided fixture did not begin with a natural 2.70 pt space.");
+
+                document.Range(questionPosition, questionPosition).Select();
+                var shape = service.InsertRendered("$E=mc^2$", 360,
+                    LaTeXBlockLayoutMode.Auto, render);
+                var effect = ReadEffectExtent(shape.Range.WordOpenXML);
+                const long expectedLeftEffectEmu = -36195; // -(5.55 pt - 2.70 pt) * 12700
+                Assert(Math.Abs(effect.Item1 - expectedLeftEffectEmu) <= 1016 &&
+                       effect.Item2 == 0 && effect.Item3 == 0,
+                    "A TNR 11 formula before punctuation did not receive only the expected " +
+                    "approximately -36195 EMU left effect extent.");
+                AssertOneSidedInlinePositions(shape, naturalLeftPt, svgWidthPt,
+                    "Initial one-sided inline formula");
+                AssertExactSvgDrawingExtents(shape, render.SvgBytes,
+                    "Initial one-sided inline formula");
+
+                document.SaveAs2(documentPath, WordInterop.WdSaveFormat.wdFormatXMLDocument);
+                document.Close(WordInterop.WdSaveOptions.wdDoNotSaveChanges);
+                Release(document);
+                document = null;
+
+                document = word.Documents.Open(documentPath, ReadOnly: false);
+                Assert(document.InlineShapes.Count == 1,
+                    "The one-sided inline formula did not survive save and reopen.");
+                var reopened = document.InlineShapes[1];
+                var reopenedEffect = ReadEffectExtent(reopened.Range.WordOpenXML);
+                Assert(reopenedEffect.Item1 == effect.Item1 && reopenedEffect.Item2 == 0 &&
+                       reopenedEffect.Item3 == 0,
+                    "The one-sided signed effect extent did not survive save and reopen.");
+                AssertOneSidedInlinePositions(reopened, naturalLeftPt, svgWidthPt,
+                    "Reopened one-sided inline formula");
+                AssertExactSvgDrawingExtents(reopened, render.SvgBytes,
+                    "Reopened one-sided inline formula");
+            }
+            finally
+            {
+                if (document != null)
+                {
+                    document.Close(WordInterop.WdSaveOptions.wdDoNotSaveChanges);
+                    Release(document);
+                }
+            }
+        }
+
+        private static void AssertOneSidedInlinePositions(WordInterop.InlineShape shape,
+            double naturalLeftPt, double svgWidthPt, string context)
+        {
+            var document = shape.Range.Document;
+            var leftSpace = document.Range(shape.Range.Start - 1, shape.Range.Start);
+            var punctuation = document.Range(shape.Range.End, shape.Range.End + 1);
+            Assert(leftSpace.Text == " " && punctuation.Text == "?",
+                context + " is no longer between one U+0020 and the question mark.");
+
+            var effect = ReadEffectExtent(shape.Range.WordOpenXML);
+            var leftWordEndX = MeasureHorizontalPosition(document, leftSpace.Start);
+            var shapeRangeStartX = MeasureHorizontalPosition(document, shape.Range.Start);
+            var punctuationStartX = MeasureHorizontalPosition(document, shape.Range.End);
+            // Word keeps Range.Start at the end of its expanded adjacent space. A signed
+            // left effect extent moves the actual drawing canvas relative to that range;
+            // a right extent changes only where following text begins.
+            var canvasLeftX = shapeRangeStartX + effect.Item1 / 12700.0;
+            var expectedCanvasLeftX = leftWordEndX + naturalLeftPt;
+            var expectedPunctuationStartX = canvasLeftX + svgWidthPt;
+            Console.WriteLine(context + " page positions: word-end=" +
+                leftWordEndX.ToString("0.###") + ", range-start=" +
+                shapeRangeStartX.ToString("0.###") + ", effect-left=" +
+                (effect.Item1 / 12700.0).ToString("0.###") + ", canvas-left=" +
+                canvasLeftX.ToString("0.###") + ", punctuation=" +
+                punctuationStartX.ToString("0.###") + ", SVG-width=" +
+                svgWidthPt.ToString("0.###"));
+            Assert(effect.Item2 == 0 &&
+                   Math.Abs(canvasLeftX - expectedCanvasLeftX) < 0.08 &&
+                   Math.Abs(punctuationStartX - expectedPunctuationStartX) < 0.16,
+                context + " does not place the SVG canvas after one natural Word space " +
+                "and the following punctuation immediately after the SVG width.");
+        }
+
+        private static void RunInlineSpacingFontMatrix(WordInterop.Application word,
+            LaTeXBlockService service, string profile, LaTeXBlockRender render)
+        {
+            WordInterop.Document document = null;
+            try
+            {
+                document = word.Documents.Add();
+                var collapsedRender = service.RenderPreview("$E=mc^2$", 360,
+                    LaTeXBlockLayoutMode.Auto, profile, 11);
+                foreach (var fontName in new[]
+                {
+                    "Times New Roman", "Arial", "Calibri", "Cambria", "Aptos", "Microsoft YaHei", "SimSun"
+                })
+                {
+                    document.Content.Text = "a b\rA xx B";
+                    document.Content.Font.Name = fontName;
+                    document.Content.Font.Size = 16;
+                    var leftNatural = MeasureHorizontalAdvance(document.Range(5, 6));
+                    var rightNatural = MeasureHorizontalAdvance(document.Range(8, 9));
+                    document.Range(6, 8).Select();
+                    var shape = service.InsertRendered("$E=mc^2$", 360,
+                        LaTeXBlockLayoutMode.Auto, render);
+                    var leftSpace = document.Range(shape.Range.Start - 1, shape.Range.Start);
+                    var rightSpace = document.Range(shape.Range.End, shape.Range.End + 1);
+                    var leftInline = MeasureHorizontalAdvance(leftSpace);
+                    var rightInline = MeasureHorizontalAdvance(rightSpace);
+                    var effect = ReadEffectExtent(shape.Range.WordOpenXML);
+                    var expectedLeft = Math.Max(0, leftInline - leftNatural);
+                    var expectedRight = Math.Max(0, rightInline - rightNatural);
+                    Assert(Math.Abs(-effect.Item1 / 12700.0 - expectedLeft) < 0.08 &&
+                           Math.Abs(-effect.Item2 / 12700.0 - expectedRight) < 0.08 &&
+                           leftSpace.Text == " " && rightSpace.Text == " " &&
+                           (double)leftSpace.Font.Scaling == 100 && (double)rightSpace.Font.Scaling == 100,
+                        "Inline spacing was not derived from the actual " + fontName + " space metrics.");
+                    AssertEffectiveAdjacentGaps(shape, leftNatural, rightNatural,
+                        fontName + " inline formula");
+
+                    if (fontName == "Times New Roman" || fontName == "Aptos" || fontName == "SimSun")
+                    {
+                        // Reproduce the user's ordinary caret insertion between two
+                        // prepared spaces. Word reports each touching space at roughly
+                        // twice an ordinary interword space even before the image exists,
+                        // so those two boundary advances are diagnostic values, not the
+                        // desired visual gaps. The isolated space in "What does" is an
+                        // independent same-line reference for normal running-text spacing.
+                        document.Content.Text = "What does  stand for?";
+                        document.Content.Font.Name = fontName;
+                        document.Content.Font.Size = 11;
+                        var doubleSpace = (document.Content.Text ?? string.Empty)
+                            .IndexOf("  ", StringComparison.Ordinal);
+                        Assert(doubleSpace >= 0,
+                            "The collapsed-space regression phrase lost its two U+0020 characters.");
+                        var collapsedInsertion = doubleSpace + 1;
+                        var collapsedLeftNatural = MeasureHorizontalAdvance(document.Range(
+                            collapsedInsertion - 1, collapsedInsertion));
+                        var collapsedRightNatural = MeasureHorizontalAdvance(document.Range(
+                            collapsedInsertion, collapsedInsertion + 1));
+                        var ordinaryReferenceNatural = MeasureHorizontalAdvance(document.Range(4, 5));
+                        Console.WriteLine(fontName + " collapsed-space pre-insertion: adjacent=" +
+                            collapsedLeftNatural.ToString("0.###") + "/" +
+                            collapsedRightNatural.ToString("0.###") +
+                            ", ordinary-reference=" + ordinaryReferenceNatural.ToString("0.###"));
+                        document.Range(collapsedInsertion, collapsedInsertion).Select();
+                        var collapsedShape = service.InsertRendered("$E=mc^2$", 360,
+                            LaTeXBlockLayoutMode.Auto, collapsedRender);
+                        var collapsedLeft = document.Range(collapsedShape.Range.Start - 1,
+                            collapsedShape.Range.Start);
+                        var collapsedRight = document.Range(collapsedShape.Range.End,
+                            collapsedShape.Range.End + 1);
+                        Assert(collapsedLeft.Text == " " && collapsedRight.Text == " " &&
+                               (double)collapsedLeft.Font.Scaling == 100 &&
+                               (double)collapsedRight.Font.Scaling == 100,
+                            "A collapsed insertion between spaces did not recover the natural " +
+                            fontName + " space width without modifying the document spaces.");
+                        AssertEffectiveAdjacentGaps(collapsedShape, ordinaryReferenceNatural,
+                            ordinaryReferenceNatural, fontName + " collapsed-space inline formula");
+                        AssertExactSvgDrawingExtents(collapsedShape, collapsedRender.SvgBytes,
+                            fontName + " collapsed-space inline formula");
+                    }
+
+                    if (fontName == "Times New Roman")
+                    {
+                        // Measure the expected 32pt space before removing every isolated
+                        // reference from the document. Updating the formula below must
+                        // not reinterpret the old 16pt negative extent as a 32pt natural
+                        // space merely because both remaining spaces touch the image.
+                        document.Content.Text = "a b";
+                        document.Content.Font.Name = fontName;
+                        document.Content.Font.Size = 32;
+                        var resizedNatural = MeasureHorizontalAdvance(document.Range(1, 2));
+
+                        document.Content.Text = "A xx B";
+                        document.Content.Font.Name = fontName;
+                        document.Content.Font.Size = 16;
+                        document.Range(2, 4).Select();
+                        var original = service.InsertRendered("$E=mc^2$", 360,
+                            LaTeXBlockLayoutMode.Auto, render);
+                        var originalEffect = ReadEffectExtent(original.Range.WordOpenXML);
+                        document.Content.Font.Size = 32;
+                        var resizedRender = service.RenderPreview("$E=mc^2$", 360,
+                            LaTeXBlockLayoutMode.Auto, profile, 32);
+                        var resized = service.UpdateRendered(original, "$E=mc^2$", 360,
+                            LaTeXBlockLayoutMode.Auto, resizedRender, false);
+                        var resizedLeft = document.Range(resized.Range.Start - 1, resized.Range.Start);
+                        var resizedRight = document.Range(resized.Range.End, resized.Range.End + 1);
+                        var resizedEffect = ReadEffectExtent(resized.Range.WordOpenXML);
+                        var resizedExpectedLeft = Math.Max(0,
+                            MeasureHorizontalAdvance(resizedLeft) - resizedNatural);
+                        var resizedExpectedRight = Math.Max(0,
+                            MeasureHorizontalAdvance(resizedRight) - resizedNatural);
+                        Assert(Math.Abs(-resizedEffect.Item1 / 12700.0 - resizedExpectedLeft) < 0.08 &&
+                               Math.Abs(-resizedEffect.Item2 / 12700.0 - resizedExpectedRight) < 0.08 &&
+                               (resizedEffect.Item1 != originalEffect.Item1 ||
+                                resizedEffect.Item2 != originalEffect.Item2),
+                            "A no-reference inline formula update reused its old 16pt " +
+                            "space extent after the surrounding run changed to 32pt.");
+                        AssertEffectiveAdjacentGaps(resized, resizedNatural, resizedNatural,
+                            "32 pt updated inline formula");
+                        AssertExactSvgDrawingExtents(resized, resizedRender.SvgBytes,
+                            "32 pt updated inline formula");
+                    }
+                }
+            }
+            finally
+            {
+                if (document != null)
+                {
+                    document.Close(WordInterop.WdSaveOptions.wdDoNotSaveChanges);
+                    Release(document);
+                }
+            }
+        }
+
+        private static void AssertEffectiveAdjacentGaps(WordInterop.InlineShape shape,
+            double leftNaturalPt, double rightNaturalPt, string context)
+        {
+            var effect = ReadEffectExtent(shape.Range.WordOpenXML);
+            var leftSpace = shape.Range.Document.Range(shape.Range.Start - 1, shape.Range.Start);
+            var rightSpace = shape.Range.Document.Range(shape.Range.End, shape.Range.End + 1);
+            Assert(leftSpace.Text == " " && rightSpace.Text == " ",
+                context + " is no longer surrounded by the two measured U+0020 characters.");
+
+            var leftRawPt = MeasureHorizontalAdvance(leftSpace);
+            var rightRawPt = MeasureHorizontalAdvance(rightSpace);
+            var leftEffectivePt = leftRawPt + effect.Item1 / 12700.0;
+            var rightEffectivePt = rightRawPt + effect.Item2 / 12700.0;
+            Console.WriteLine(context + " effective spaces: natural=" +
+                leftNaturalPt.ToString("0.###") + "/" + rightNaturalPt.ToString("0.###") +
+                ", raw=" + leftRawPt.ToString("0.###") + "/" + rightRawPt.ToString("0.###") +
+                ", effect=" + (effect.Item1 / 12700.0).ToString("0.###") + "/" +
+                (effect.Item2 / 12700.0).ToString("0.###") +
+                ", effective=" + leftEffectivePt.ToString("0.###") + "/" +
+                rightEffectivePt.ToString("0.###"));
+            // Range.Information is reported on Word's 0.15 pt layout grid. Permit one
+            // such quantum only when the raw result is already no wider than the
+            // ordinary space and therefore needs no negative overlap. Any compensated
+            // positive excess remains subject to the tighter 0.08 pt regression bound.
+            var leftTolerancePt = effect.Item1 == 0 && leftRawPt <= leftNaturalPt ? 0.16 : 0.08;
+            var rightTolerancePt = effect.Item2 == 0 && rightRawPt <= rightNaturalPt ? 0.16 : 0.08;
+            Assert(effect.Item3 == 0 &&
+                   Math.Abs(leftEffectivePt - leftNaturalPt) < leftTolerancePt &&
+                   Math.Abs(rightEffectivePt - rightNaturalPt) < rightTolerancePt,
+                context + " does not preserve the pre-insertion Word space advances " +
+                "after applying its signed effect extents.");
+        }
+
+        private static void AssertExactSvgDrawingExtents(WordInterop.InlineShape shape,
+            byte[] svgBytes, string context)
+        {
+            const double emusPerPoint = 12700.0;
+            var expectedWidthEmu = checked((long)Math.Round(
+                LaTeXBlockService.ReadSvgWidthPt(svgBytes) * emusPerPoint,
+                MidpointRounding.AwayFromZero));
+            var expectedHeightEmu = checked((long)Math.Round(
+                LaTeXBlockService.ReadSvgHeightPt(svgBytes) * emusPerPoint,
+                MidpointRounding.AwayFromZero));
+            var flatOpc = shape.Range.WordOpenXML;
+
+            var inlineExtent = Regex.Match(flatOpc,
+                "<wp:extent\\b(?=[^>]*\\bcx=\"(?<cx>[-+0-9]+)\")" +
+                "(?=[^>]*\\bcy=\"(?<cy>[-+0-9]+)\")[^>]*/>",
+                RegexOptions.CultureInvariant);
+            Assert(inlineExtent.Success,
+                context + " has no readable wp:extent in its inline DrawingML.");
+
+            // Deliberately scope a:ext to pic:spPr/a:xfrm. The SVG blip extension
+            // list also contains an a:ext element, but that element has a uri and is
+            // not the picture's physical transform extent.
+            var pictureProperties = Regex.Match(flatOpc,
+                "<pic:spPr\\b[^>]*>.*?</pic:spPr>",
+                RegexOptions.CultureInvariant | RegexOptions.Singleline);
+            Assert(pictureProperties.Success,
+                context + " has no pic:spPr drawing properties.");
+            var transform = Regex.Match(pictureProperties.Value,
+                "<a:xfrm\\b[^>]*>.*?</a:xfrm>",
+                RegexOptions.CultureInvariant | RegexOptions.Singleline);
+            Assert(transform.Success,
+                context + " has no pic:spPr/a:xfrm picture transform.");
+            var transformExtent = Regex.Match(transform.Value,
+                "<a:ext\\b(?=[^>]*\\bcx=\"(?<cx>[-+0-9]+)\")" +
+                "(?=[^>]*\\bcy=\"(?<cy>[-+0-9]+)\")[^>]*/>",
+                RegexOptions.CultureInvariant);
+            Assert(transformExtent.Success,
+                context + " has no numeric pic:spPr/a:xfrm/a:ext.");
+
+            var inlineWidthEmu = long.Parse(inlineExtent.Groups["cx"].Value);
+            var inlineHeightEmu = long.Parse(inlineExtent.Groups["cy"].Value);
+            var transformWidthEmu = long.Parse(transformExtent.Groups["cx"].Value);
+            var transformHeightEmu = long.Parse(transformExtent.Groups["cy"].Value);
+            Console.WriteLine(context + " SVG extents: expected=" + expectedWidthEmu + "x" +
+                expectedHeightEmu + ", wp=" + inlineWidthEmu + "x" + inlineHeightEmu +
+                ", transform=" + transformWidthEmu + "x" + transformHeightEmu);
+            Assert(inlineWidthEmu == expectedWidthEmu && inlineHeightEmu == expectedHeightEmu &&
+                   transformWidthEmu == expectedWidthEmu && transformHeightEmu == expectedHeightEmu,
+                context + " did not preserve the SVG's exact physical EMU dimensions " +
+                "(expected " + expectedWidthEmu + "x" + expectedHeightEmu +
+                ", wp:extent " + inlineWidthEmu + "x" + inlineHeightEmu +
+                ", pic transform " + transformWidthEmu + "x" + transformHeightEmu + ").");
+        }
+
+        private static Tuple<long, long, long> ReadEffectExtent(string flatOpc)
+        {
+            var effect = Regex.Match(flatOpc,
+                "<wp:effectExtent\\b(?=[^>]*\\bl=\"(?<left>-?[0-9]+)\")" +
+                "(?=[^>]*\\br=\"(?<right>-?[0-9]+)\")(?=[^>]*\\bb=\"(?<bottom>-?[0-9]+)\")[^>]*/>",
+                RegexOptions.CultureInvariant);
+            Assert(effect.Success, "The inline SVG has no readable wp:effectExtent.");
+            return Tuple.Create(
+                long.Parse(effect.Groups["left"].Value),
+                long.Parse(effect.Groups["right"].Value),
+                long.Parse(effect.Groups["bottom"].Value));
+        }
+
+        private static double MeasureHorizontalAdvance(WordInterop.Range range)
+        {
+            var start = range.Duplicate;
+            start.Collapse(WordInterop.WdCollapseDirection.wdCollapseStart);
+            var end = range.Duplicate;
+            end.Collapse(WordInterop.WdCollapseDirection.wdCollapseEnd);
+            var startX = Convert.ToDouble(start.get_Information(
+                WordInterop.WdInformation.wdHorizontalPositionRelativeToPage));
+            var endX = Convert.ToDouble(end.get_Information(
+                WordInterop.WdInformation.wdHorizontalPositionRelativeToPage));
+            return endX - startX;
+        }
+
+        private static double MeasureHorizontalPosition(WordInterop.Document document, int position)
+        {
+            var caret = document.Range(position, position);
+            return Convert.ToDouble(caret.get_Information(
+                WordInterop.WdInformation.wdHorizontalPositionRelativeToPage));
+        }
+
         private static void Assert(bool condition, string message)
         {
             if (!condition) throw new InvalidOperationException(message);
@@ -509,10 +1164,39 @@ namespace LaTeXBlocks.WordSmoke
                 5000, "The shutdown probe did not enter a render.");
             var shutdownTimer = Stopwatch.StartNew();
             renderer.Dispose();
-            Assert(shutdownTimer.ElapsedMilliseconds < 250,
-                "StemTeX shutdown blocked the Office UI thread for " + shutdownTimer.ElapsedMilliseconds + " ms.");
+            var disposeMilliseconds = shutdownTimer.ElapsedMilliseconds;
+            Assert(disposeMilliseconds < 250,
+                "StemTeX shutdown blocked the Office UI thread for " + disposeMilliseconds + " ms.");
             Assert(renderer.WaitForStopForTest(2000),
                 "StemTeX background worker did not actually stop after shutdown cancellation.");
+            WaitFor(() => !renderer.HasOwnedWorkerHostForTest, 2000,
+                "StemTeX left an owned worker-host process after render shutdown.");
+            Console.WriteLine("StemTeX: active-render shutdown returned in " +
+                disposeMilliseconds + " ms.");
+        }
+
+        private static void RunStartupShutdownProbe()
+        {
+            var startupBackend = new StemTeXBackend();
+            startupBackend.SwitchProfile(startupBackend.DefaultAvailableProfile);
+            WaitFor(() => startupBackend.WorkerHasActiveItemForTest &&
+                    startupBackend.Status.StartsWith("warming:", StringComparison.Ordinal) &&
+                    startupBackend.HasOwnedWorkerHostForTest,
+                10000, "The startup-shutdown probe did not observe a live worker during renderer initialization.");
+            var shutdownTimer = Stopwatch.StartNew();
+            startupBackend.Dispose();
+            var disposeMilliseconds = shutdownTimer.ElapsedMilliseconds;
+            Assert(disposeMilliseconds < 250,
+                "Shutdown during renderer initialization blocked for " + disposeMilliseconds + " ms.");
+            Assert(startupBackend.WaitForStopForTest(5000),
+                "Renderer initialization survived host shutdown for more than 5 seconds.");
+            WaitFor(() => !startupBackend.HasOwnedWorkerHostForTest, 2000,
+                "StemTeX left an owned worker-host process after initialization shutdown.");
+            Console.WriteLine("StemTeX: initialization shutdown returned in " +
+                disposeMilliseconds + " ms.");
+            // Let the reaper complete its final process-tree pass before constructing
+            // the main test backend in this same host process.
+            Thread.Sleep(100);
         }
 
         private static void WaitFor(Func<bool> condition, int timeoutMs, string message)

@@ -14,7 +14,7 @@ namespace LaTeXBlocks.Word
     {
         internal const string DefaultProfile = "xits_cjk";
         private readonly object gate = new object();
-        private readonly Queue<Action> queue = new Queue<Action>();
+        private readonly Queue<BackendWorkItem> queue = new Queue<BackendWorkItem>();
         private readonly AutoResetEvent wake = new AutoResetEvent(false);
         private readonly Thread worker;
         private readonly string[] profiles;
@@ -26,8 +26,10 @@ namespace LaTeXBlocks.Word
         private long latestRequestId;
         private bool stopping;
         private string status = "not-started";
+        private BackendWorkItem activeWorkItem;
         private const int WorkerRestartingError = 5;
         private const int WorkerBusyError = 6;
+        private const int ShutdownReaperTimeoutMs = 100000;
 
         internal StemTeXBackend()
         {
@@ -64,7 +66,8 @@ namespace LaTeXBlocks.Word
                 requestedGeneration = ++generation;
                 ++latestRequestId;
                 status = "warming:" + canonical;
-                queue.Enqueue(() => InitializeRenderer(canonical, requestedGeneration));
+                queue.Enqueue(new BackendWorkItem(
+                    () => InitializeRenderer(canonical, requestedGeneration), null));
             }
             wake.Set();
         }
@@ -80,10 +83,10 @@ namespace LaTeXBlocks.Word
                     if (renderer == null || !string.Equals(rendererProfile, CanonicalProfile(profile), StringComparison.OrdinalIgnoreCase))
                         throw new InvalidOperationException("StemTeX renderer did not initialize for profile " + profile +
                             ". Backend status: " + Status);
-                    completion.SetResult(true);
+                    completion.TrySetResult(true);
                 }
-                catch (Exception exception) { completion.SetException(exception); }
-            });
+                catch (Exception exception) { completion.TrySetException(exception); }
+            }, () => completion.TrySetCanceled());
             completion.Task.GetAwaiter().GetResult();
         }
 
@@ -101,8 +104,10 @@ namespace LaTeXBlocks.Word
                 requestGeneration = generation;
                 requestId = ++latestRequestId;
                 status = "queued:" + requestId;
-                queue.Enqueue(() => ExecuteRender(canonical, source, widthPt, autoWidth, fontSizePt,
-                    requestGeneration, requestId, completion));
+                queue.Enqueue(new BackendWorkItem(
+                    () => ExecuteRender(canonical, source, widthPt, autoWidth, fontSizePt,
+                        requestGeneration, requestId, completion),
+                    () => completion.TrySetCanceled()));
             }
             wake.Set();
             return completion.Task;
@@ -118,6 +123,7 @@ namespace LaTeXBlocks.Word
         {
             lock (gate) if (requestedGeneration != generation || stopping) return;
             StemTeXRenderer replacement = null;
+            StemTeXRenderer retired = null;
             try
             {
                 replacement = new StemTeXRenderer(profile);
@@ -125,7 +131,7 @@ namespace LaTeXBlocks.Word
                 lock (gate)
                 {
                     if (requestedGeneration != generation || stopping) return;
-                    renderer?.Dispose();
+                    retired = renderer;
                     renderer = replacement;
                     replacement = null;
                     rendererProfile = profile;
@@ -136,7 +142,30 @@ namespace LaTeXBlocks.Word
             {
                 lock (gate) if (requestedGeneration == generation) status = "failed:" + exception.Message;
             }
-            finally { replacement?.Dispose(); }
+            finally
+            {
+                DisposeRendererUnlessHostIsStopping(retired);
+                DisposeRendererUnlessHostIsStopping(replacement);
+            }
+        }
+
+        private void DisposeRendererUnlessHostIsStopping(StemTeXRenderer candidate)
+        {
+            if (candidate == null) return;
+            bool abandon;
+            lock (gate) abandon = stopping;
+            // Native destroy belongs to the backend worker, but it must never run while
+            // holding gate: Office shutdown needs that lock only long enough to publish
+            // managed cancellation. Once shutdown starts, the reaper and process exit
+            // own native cleanup instead.
+            if (!abandon)
+            {
+                try { candidate.Dispose(); }
+                catch (Exception exception)
+                {
+                    lock (gate) if (!stopping) status = "failed:" + exception.Message;
+                }
+            }
         }
 
         private void ExecuteRender(string profile, string source, double widthPt, bool autoWidth, double fontSizePt,
@@ -146,7 +175,7 @@ namespace LaTeXBlocks.Word
             {
                 if (stopping || requestGeneration != generation || requestId != latestRequestId)
                 {
-                    completion.SetCanceled();
+                    completion.TrySetCanceled();
                     return;
                 }
                 status = "rendering:" + requestId;
@@ -161,17 +190,17 @@ namespace LaTeXBlocks.Word
                 {
                     if (stopping || requestGeneration != generation || requestId != latestRequestId)
                     {
-                        completion.SetCanceled();
+                        completion.TrySetCanceled();
                         return;
                     }
                     status = "ready:" + profile;
                 }
-                completion.SetResult(result);
+                completion.TrySetResult(result);
             }
             catch (Exception exception)
             {
                 lock (gate) if (requestGeneration == generation && requestId == latestRequestId) status = "failed:" + exception.Message;
-                completion.SetException(exception);
+                completion.TrySetException(exception);
             }
         }
 
@@ -198,9 +227,9 @@ namespace LaTeXBlocks.Word
             }
         }
 
-        private void Post(Action action)
+        private void Post(Action action, Action cancel = null)
         {
-            lock (gate) { ThrowIfStopping(); queue.Enqueue(action); }
+            lock (gate) { ThrowIfStopping(); queue.Enqueue(new BackendWorkItem(action, cancel)); }
             wake.Set();
         }
 
@@ -208,16 +237,37 @@ namespace LaTeXBlocks.Word
         {
             while (true)
             {
-                Action action = null;
+                BackendWorkItem item = null;
                 lock (gate)
                 {
-                    if (queue.Count > 0) action = queue.Dequeue();
+                    if (queue.Count > 0)
+                    {
+                        item = queue.Dequeue();
+                        activeWorkItem = item;
+                    }
                     else if (stopping) break;
                 }
-                if (action != null) action();
+                if (item != null)
+                {
+                    try { item.Execute(); }
+                    catch (Exception exception)
+                    {
+                        lock (gate) if (!stopping) status = "failed:" + exception.Message;
+                        item.Cancel();
+                    }
+                    finally
+                    {
+                        lock (gate)
+                            if (ReferenceEquals(activeWorkItem, item)) activeWorkItem = null;
+                    }
+                }
                 else wake.WaitOne();
             }
-            renderer?.Dispose();
+            // StemTeXBackend is process-lifetime infrastructure. During Word host
+            // shutdown, native destroy can block in child-process waits while VSTO is
+            // still on Word's UI shutdown path. Owned helpers are terminated by the
+            // background reaper; the renderer/DLL are intentionally abandoned for the
+            // OS to reclaim when WINWORD exits.
             renderer = null;
         }
 
@@ -235,27 +285,27 @@ namespace LaTeXBlocks.Word
 
         public void Dispose()
         {
-            StemTeXRenderer activeRenderer;
+            BackendWorkItem[] abandoned;
+            BackendWorkItem active;
             lock (gate)
             {
                 if (stopping) return;
                 stopping = true;
                 ++generation;
                 ++latestRequestId;
+                abandoned = queue.ToArray();
                 queue.Clear();
                 status = "stopping";
-                activeRenderer = renderer;
+                active = activeWorkItem;
             }
-            try { activeRenderer?.CancelCurrent(); } catch { }
-            // Native cancellation normally recovers a worker for future requests.
-            // During host shutdown there will be no future request, so terminate this
-            // Word process's owned worker tree instead of waiting for recovery/rebuild.
-            CancelOwnedWorkerTrees();
+            foreach (var item in abandoned) item.Cancel();
+            active?.Cancel();
             wake.Set();
-            // Office invokes add-in Shutdown on Word's UI thread. Shutdown is only a
-            // cancellation signal: the background worker owns renderer destruction and
-            // the StemTeX lifetime pipe owns the helper process. In particular, never
-            // Join here—even a bounded wait makes closing Word visibly sluggish.
+            StartShutdownReaper();
+            // Office invokes add-in Shutdown on Word's UI thread. This method performs
+            // no native cancellation, process enumeration, destroy, or Join. A native
+            // cancel can wait up to the worker termination timeout; even a bounded wait
+            // here makes closing Word visibly sluggish.
         }
 
         internal bool WaitForStopForTest(int millisecondsTimeout)
@@ -263,16 +313,62 @@ namespace LaTeXBlocks.Word
             return worker.Join(millisecondsTimeout);
         }
 
-        private void CancelOwnedWorkerTrees()
+        internal bool WorkerHasActiveItemForTest
+        {
+            get { lock (gate) return activeWorkItem != null; }
+        }
+
+        internal bool HasOwnedWorkerHostForTest
+        {
+            get
+            {
+                var snapshot = ProcessTreeSnapshot.Capture();
+                return FindOwnedWorkerHosts(snapshot).Count > 0;
+            }
+        }
+
+        private void StartShutdownReaper()
+        {
+            var reaper = new Thread(() =>
+            {
+                var timer = Stopwatch.StartNew();
+                do
+                {
+                    TerminateOwnedWorkerTrees();
+                    if (worker.Join(100)) break;
+                    Thread.Sleep(50);
+                } while (timer.ElapsedMilliseconds < ShutdownReaperTimeoutMs);
+                TerminateOwnedWorkerTrees();
+            })
+            {
+                IsBackground = true,
+                Name = "LaTeX Blocks StemTeX shutdown reaper"
+            };
+            try { reaper.Start(); } catch { }
+        }
+
+        private void TerminateOwnedWorkerTrees()
         {
             // stemtex_renderer_create does not publish its renderer pointer until the
-            // warm-up process has completed. During that narrow window CancelCurrent
-            // cannot address it, so terminate only the worker-host process tree created
-            // by this Word process and this StemTeX installation. This is the process
-            // equivalent of the GUI invalidating an in-flight renderer generation.
+            // warm-up process has completed. Repeatedly terminate only the worker-host
+            // process tree created by this Word process and this StemTeX installation;
+            // this also catches a host born after the initial shutdown snapshot.
+            var snapshot = ProcessTreeSnapshot.Capture();
+            foreach (var entry in FindOwnedWorkerHosts(snapshot))
+            {
+                try
+                {
+                    ProcessTreeSnapshot.KillTree(entry.ProcessId, snapshot);
+                }
+                catch { }
+            }
+        }
+
+        private List<ProcessTreeSnapshot> FindOwnedWorkerHosts(List<ProcessTreeSnapshot> snapshot)
+        {
+            var matches = new List<ProcessTreeSnapshot>();
             var expectedHost = Path.GetFullPath(Path.Combine(stemTeXHome, "runtime", "bin", "windows",
                 "stemtex-worker-host.exe"));
-            var snapshot = ProcessTreeSnapshot.Capture();
             var ownerPid = Process.GetCurrentProcess().Id;
             foreach (var entry in snapshot)
             {
@@ -286,9 +382,28 @@ namespace LaTeXBlocks.Word
                         if (!string.Equals(Path.GetFullPath(host.MainModule.FileName), expectedHost,
                             StringComparison.OrdinalIgnoreCase)) continue;
                     }
-                    ProcessTreeSnapshot.KillTree(entry.ProcessId, snapshot);
+                    matches.Add(entry);
                 }
                 catch { }
+            }
+            return matches;
+        }
+
+        private sealed class BackendWorkItem
+        {
+            private readonly Action execute;
+            private readonly Action cancel;
+
+            internal BackendWorkItem(Action execute, Action cancel)
+            {
+                this.execute = execute ?? throw new ArgumentNullException(nameof(execute));
+                this.cancel = cancel;
+            }
+
+            internal void Execute() { execute(); }
+            internal void Cancel()
+            {
+                try { cancel?.Invoke(); } catch { }
             }
         }
 

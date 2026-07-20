@@ -7,6 +7,8 @@ This repository intentionally does not implement document search. [Comprehensive
 ## Current prototype
 
 - Insert a traditional inline formula at its TeX natural width.
+- Keep ordinary spaces around an inline formula at their normal visual advance without rewriting those U+0020 characters.
+- Write the SVG's physical width and height exactly into DrawingML at 12,700 EMU per point, bypassing Word's initial CSS-pixel import rounding without introducing a DPI model.
 - Insert a fixed-width LaTeX block for display, multiline, or paragraph content.
 - Insert a natural-width, display-style equation on its own visual line with a Word-native `SEQ LaTeXEquation` number.
 - Update equation numbers explicitly after moving, inserting, or removing complete equation lines; no document watcher is used.
@@ -19,8 +21,9 @@ This repository intentionally does not implement document search. [Comprehensive
 - Replace an existing SVG only after the new render succeeds.
 - Preserve a stable block ID across edits and DOCX save/reopen cycles.
 
-The smoke test has verified SVG insertion, canonical-source persistence, metadata persistence, atomic replacement,
-Word-native equation numbering and bookmarks, deletion-time renumbering, and DOCX reopen in desktop Word.
+The smoke test has verified SVG insertion, exact DrawingML extents, adjacent-space compensation across update and
+reopen, canonical-source persistence, metadata persistence, atomic replacement, Word-native equation numbering and
+bookmarks, deletion-time renumbering, and DOCX reopen in desktop Word.
 
 ## Object contract
 
@@ -49,9 +52,9 @@ Requirements:
 - .NET Framework 4.8
 - a StemTeX stage containing `stemtex-renderer.dll`, `dvisvgmdaemon.dll`, and the `unicodemath_cjk` profile
 
-`STEMTEX_HOME`, when set, selects one runtime explicitly. Otherwise the add-in examines the installed and adjacent Scholia/StemTeX development stages and selects the usable runtime with the highest semantic version. The current binding requires StemTeX 0.11's native per-request font-size API.
+`STEMTEX_HOME`, when set, selects one runtime explicitly. Otherwise the add-in examines the private installed runtime before adjacent Scholia/StemTeX development stages and selects the usable runtime with the highest semantic version. For equal versions, the installed runtime wins so a development stage cannot silently replace the packaged backend. The current binding requires StemTeX 0.11's native per-request font-size API.
 
-At Word startup the add-in discovers valid profile directories and queues creation of the renderer for the globally selected profile (`xits_cjk` when no preference has been saved). Word's UI thread is not blocked by the cold start. Like the StemTeX GUI, the add-in owns one renderer and one dedicated FIFO background thread. Renderer creation, rendering, profile replacement, and destruction all happen on that same thread. A profile switch disposes the old renderer and creates the new one; Word exit disposes the current renderer.
+At Word startup the add-in discovers valid profile directories and queues creation of the renderer for the globally selected profile (`xits_cjk` when no preference has been saved). Word's UI thread is not blocked by the cold start. Like the StemTeX GUI, the add-in owns one renderer and one dedicated FIFO background thread. Renderer creation, rendering, and profile replacement happen on that thread. A profile switch disposes the old renderer and creates the new one. Word shutdown uses a separate fast path: it invalidates managed work and returns without native cancellation, destruction, process enumeration, or a thread join on Office's UI thread. A background reaper terminates only the StemTeX worker tree owned by that Word process, including a worker that appears during the initialization race; the exiting process then reclaims the abandoned native renderer.
 
 The editor uses a 300ms input debounce. Every request receives a monotonically increasing UI request ID. The dedicated worker skips queued requests that are no longer latest, and the UI discards any completed result whose generation or request ID has become stale. Syntax errors from automatic preview stay in the status line rather than opening modal dialogs; the Preview button remains available for an immediate refresh with an explicit error dialog.
 
@@ -60,12 +63,17 @@ After the latest request passes the ID check, its SVG bytes are embedded directl
 Insert and Update are enabled only when the preview exactly matches the current source, mode, width, and global profile. They embed that already-rendered SVG directly; they never repeat native rendering on Word's UI thread.
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/Initialize-LaTeXBlocks.ps1
-powershell -ExecutionPolicy Bypass -File scripts/Build-LaTeXBlocks.ps1 -Configuration Debug
-powershell -ExecutionPolicy Bypass -File scripts/Register-LaTeXBlocks.ps1 -Configuration Debug
+pwsh.exe -NoProfile -File scripts/Initialize-LaTeXBlocks.ps1
+pwsh.exe -NoProfile -File scripts/Build-LaTeXBlocks.ps1 -Configuration Debug
+pwsh.exe -NoProfile -File scripts/Register-LaTeXBlocks.ps1 -Configuration Debug
 ```
 
-Close all Word processes before reopening Word after registration. The Ribbon tab is named **LaTeX Blocks**.
+Ordinary builds, tests, and cleans deliberately do not rewrite Word's live VSTO registration. Use the explicit
+`Register-LaTeXBlocks.ps1` command when switching Word to a development build; pass
+`/p:EnableVstoProjectRegistration=true` only when the standard VSTO build-time registration behavior is specifically
+needed. This prevents a smoke-test build from replacing an installed add-in with `bin\Debug`, or a clean from
+unregistering the installed product. Close all Word processes before reopening Word after explicit registration. The
+Ribbon tab is named **LaTeX Blocks**.
 
 Run the end-to-end smoke test with:
 
@@ -74,3 +82,18 @@ tests/LaTeXBlocks.WordSmoke/bin/Debug/LaTeXBlocks.WordSmoke.exe
 ```
 
 The test executable is explicitly x64 because the current StemTeX SDK and Word installation are x64.
+
+## Installer
+
+Create the self-contained per-user installer with:
+
+```powershell
+pwsh.exe -NoProfile -File .\scripts\Publish-LaTeXBlocks.ps1 -Version 0.1.9
+```
+
+The package is written to `dist\release\LaTeXBlocks-Setup-<version>.exe`, together with its SHA-256 checksum. It
+contains the signed VSTO publication, the Microsoft prerequisite bootstrapper, and the StemTeX 0.11 runtime plus
+profiles used by the add-in. The bundled runtime is installed privately under the LaTeX Blocks application directory;
+the installer records that location under the current user's LaTeX Blocks registry key. `STEMTEX_HOME`, when explicitly
+set, still takes precedence for development and diagnostics. The package targets 64-bit Windows and 64-bit Word; it
+also carries the matching VC++ 2015–2022 x64 runtime and installs it only when the machine's copy is older.
