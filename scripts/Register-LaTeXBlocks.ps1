@@ -1,14 +1,43 @@
-param([ValidateSet('Debug','Release')][string]$Configuration='Debug')
-$ErrorActionPreference='Stop'
-$root=Split-Path -Parent $PSScriptRoot
-$manifest=Join-Path $root "src\LaTeXBlocks.Word.AddIn\bin\$Configuration\LaTeXBlocks.Word.AddIn.vsto"
-if(-not (Test-Path $manifest)){throw 'Build LaTeX Blocks before registering it.'}
-$key='HKCU:\Software\Microsoft\Office\Word\Addins\LaTeXBlocks.Word.AddIn'
-if(-not (Test-Path $key)){[void](New-Item $key -Force)}
-$uri=([Uri](Resolve-Path $manifest).Path).AbsoluteUri+'|vstolocal'
-Set-ItemProperty $key FriendlyName 'LaTeX Blocks'
-Set-ItemProperty $key Description 'Editable, searchable LaTeX blocks rendered by StemTeX'
-Set-ItemProperty $key LoadBehavior -Type DWord 3
-Set-ItemProperty $key Manifest $uri
-Write-Output "Registered LaTeX Blocks: $uri"
-if(Get-Process WINWORD -ErrorAction SilentlyContinue){Write-Warning 'Close every Word window and reopen Word to load this build.'}
+param(
+    [ValidateSet('Debug','Release')][string]$Configuration = 'Debug',
+    [Alias('Host')][ValidateSet('Word','PowerPoint','Both')][string]$TargetHost = 'Both'
+)
+$ErrorActionPreference = 'Stop'
+$root = Split-Path -Parent $PSScriptRoot
+$targets = @()
+if ($TargetHost -in @('Word', 'Both')) {
+    $targets += [pscustomobject]@{
+        Host = 'Word'
+        Project = 'LaTeXBlocks.Word.AddIn'
+        RegistryHost = 'Word'
+        Process = 'WINWORD'
+        Description = 'Editable, searchable LaTeX blocks rendered by StemTeX'
+    }
+}
+if ($TargetHost -in @('PowerPoint', 'Both')) {
+    $targets += [pscustomobject]@{
+        Host = 'PowerPoint'
+        Project = 'LaTeXBlocks.PowerPoint.AddIn'
+        RegistryHost = 'PowerPoint'
+        Process = 'POWERPNT'
+        Description = 'Editable, searchable LaTeX blocks for slides rendered by StemTeX'
+    }
+}
+
+foreach ($target in $targets) {
+    $manifest = Join-Path $root "src\$($target.Project)\bin\$Configuration\$($target.Project).vsto"
+    if (-not (Test-Path -LiteralPath $manifest)) {
+        throw "Build LaTeX Blocks before registering $($target.Host): $manifest"
+    }
+    $key = "HKCU:\Software\Microsoft\Office\$($target.RegistryHost)\Addins\$($target.Project)"
+    if (-not (Test-Path -LiteralPath $key)) { [void](New-Item -Path $key -Force) }
+    $uri = ([Uri](Resolve-Path -LiteralPath $manifest).Path).AbsoluteUri + '|vstolocal'
+    Set-ItemProperty -LiteralPath $key -Name FriendlyName -Value 'LaTeX Blocks'
+    Set-ItemProperty -LiteralPath $key -Name Description -Value $target.Description
+    Set-ItemProperty -LiteralPath $key -Name LoadBehavior -Type DWord -Value 3
+    Set-ItemProperty -LiteralPath $key -Name Manifest -Value $uri
+    Write-Output "Registered LaTeX Blocks for $($target.Host): $uri"
+    if (Get-Process $target.Process -ErrorAction SilentlyContinue) {
+        Write-Warning "Close every $($target.Host) window and reopen it to load this build."
+    }
+}

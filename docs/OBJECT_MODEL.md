@@ -1,5 +1,8 @@
 # LaTeX Block Object Model
 
+This document specifies the Word host. PowerPoint intentionally uses only the free-standing block subset described in
+[POWERPOINT_SCOPE.md](POWERPOINT_SCOPE.md); none of the Word inline-formula rules below apply to PowerPoint.
+
 ## Purpose
 
 An ordinary LaTeX block behaves like one semantic document object, not like an image plus hidden text plus a control
@@ -32,6 +35,18 @@ The stable ID survives edits. Width is the StemTeX typesetting constraint, not a
 scale. For a one-line inline source, depth is measured from an invisible dvisvgm marker at the TeX baseline to the
 SVG viewport bottom. Metadata written before `role` existed parses as ordinary `content`.
 
+For a fixed-width block, the saved `width` remains an absolute TeX layout width in points. The primary Office controls
+therefore use exact points as well: 30–450 pt, a 0.5 pt step, one decimal place, and a 360 pt default, matching the
+StemTeX GUI. It is not a live binding to future page or slide size changes. PowerPoint stores visual
+scale separately from the SVG's intrinsic dimensions. A horizontal-only shape resize changes layout width and
+rerenders after PowerPoint's resize-completed event, while a resize with a vertical component changes visual scale
+and reuses the SVG. This is event-driven direct manipulation, not geometry polling.
+
+Word resolves its actual container (usable table-cell width, text-frame width after internal margins, or the active
+section column's own width) for placement and available geometry, but a new fixed block begins at the independent
+360 pt typesetting width. Its metadata stores that absolute point value, so moving the object later does not silently
+reflow it.
+
 Profile names are discovered from the active StemTeX installation. A directory is offered only when it contains `preamble.tex`. Profile is global add-in state, not object state: changing it affects every subsequent preview, insertion, and rerender. The choice is stored under the current user's LaTeX Blocks settings and is the profile warmed when Word next starts.
 
 Word aligns an inline image through its layout bottom, while `InlineShape.Range.Font.Position` persists only whole points. For a surrounding run position `p` and TeX depth `d`, LaTeX Blocks applies `Font.Position = p - round(d)` and moves the SVG viewBox by the residual `d - round(d)`. `InlineShapes.AddPicture` initially quantizes an SVG's physical dimensions through CSS pixels. LaTeX Blocks therefore converts the final SVG dimensions directly to EMUs (`cx = round(width_pt × 12700)`, `cy = round(height_pt × 12700)`) and writes the exact pair to both `wp:inline/wp:extent` and `pic:spPr/a:xfrm/a:ext`. It also normalizes the host-only `wp:effectExtent.b` to zero. These are vector-layout coordinates, not a DPI calculation. `InsertXML` reconstructs the containing paragraph, so the add-in duplicates and restores its complete direct `ParagraphFormat`; editing an SVG must not erase indentation, spacing, or equation tab stops. No numerical effect-extent compensation is mixed into the TeX depth. Fixed-width multiline blocks have no single surrounding-text baseline and retain position zero. A numbered equation is instead one natural-width TeX display box and therefore has one measurable baseline.
@@ -50,7 +65,7 @@ Word formatting. No live Word `Range` is retained, and there is no timer or docu
 
 The reference is always the TeX/Western baseline, including when the TeX source contains Chinese. CJK glyphs may extend farther below that line, according to the Chinese font selected by the active StemTeX profile, but they do not redefine it. Baseline resolution never inspects adjacent Word characters, never switches its reference to a Word East Asian font, and never applies a CJK-specific visual offset. Consequently, mixed Chinese/Western content inside the SVG remains internally governed by TeX font metrics, while the SVG's TeX baseline is mapped to Word's running-text baseline exactly once.
 
-Font size is a renderer input, not an image transform. For an auto-width inline object, LaTeX Blocks reads `Selection.Font.Size`, which is Word's actual typing size. This distinction matters at a run boundary and after changing the size of a collapsed caret: `Selection.Range.Font.Size` can still describe the character to the right even though newly typed text uses another size. For a mixed non-collapsed selection, Word reports `wdUndefined`; replacement then follows Word's native rule and uses the first selected character's insertion size. The resolved size is passed through StemTeX 0.11's native per-request `font_size_pt` API. StemTeX applies the size inside its live TeX worker, so the resulting SVG, natural width, math metrics, script sizes, optical-size choices, and TeX depth are all produced at the requested size. The add-in does not inject `\fontsize` into the user's source and never enlarges a 10 pt SVG to imitate another TeX size. Fixed-width blocks preserve their explicit document design and editor size.
+Font size is a renderer input, not an image transform. For an auto-width inline object, LaTeX Blocks reads `Selection.Font.Size`, which is Word's actual typing size. This distinction matters at a run boundary and after changing the size of a collapsed caret: `Selection.Range.Font.Size` can still describe the character to the right even though newly typed text uses another size. For a mixed non-collapsed selection, Word reports `wdUndefined`; replacement then follows Word's native rule and uses the first selected character's insertion size. The resolved size is passed through StemTeX 0.12's native per-request `font_size_pt` API. StemTeX applies the size inside its live TeX worker, so the resulting SVG, natural width, math metrics, script sizes, optical-size choices, and TeX depth are all produced at the requested size. The add-in does not inject `\fontsize` into the user's source and never enlarges a 10 pt SVG to imitate another TeX size. Fixed-width blocks preserve their explicit document design and editor size.
 
 The Typography control is a one-shot, LaTeX-aware font-size command. It applies the requested size to the selected Word text and rerenders every auto-width LaTeX object in that selection at the same TeX size. This is an explicit user transaction, not a document watcher or timer.
 

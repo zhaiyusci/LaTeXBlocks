@@ -34,6 +34,87 @@ namespace LaTeXBlocks.Word
 
         internal string[] Profiles => renderers.Profiles;
 
+        internal double ResolveTextAreaWidth(WordInterop.Range range, double fallbackPt = 360)
+        {
+            if (range == null) return LaTeXBlockWidthPolicy.NormalizeTextAreaWidth(fallbackPt);
+            try
+            {
+                if (TryResolveTextFrameWidth(range, out var textFrameWidth))
+                    return textFrameWidth;
+
+                if (Convert.ToBoolean(range.Information[WordInterop.WdInformation.wdWithInTable]) &&
+                    range.Cells.Count > 0)
+                {
+                    var cell = range.Cells[1];
+                    var width = (double)cell.Width;
+                    try { width -= cell.LeftPadding + cell.RightPadding; }
+                    catch (COMException) { }
+                    if (width >= LaTeXBlockWidthPolicy.MinimumWidthPt) return width;
+                }
+
+                var page = range.Sections[1].PageSetup;
+                var widthPt = (double)page.PageWidth - page.LeftMargin - page.RightMargin;
+                var columns = page.TextColumns;
+                if (columns.Count > 1)
+                {
+                    var horizontalPosition = Convert.ToDouble(range.Information[
+                        WordInterop.WdInformation.wdHorizontalPositionRelativeToPage]);
+                    var columnLeft = (double)page.LeftMargin;
+                    var bestWidth = 0.0;
+                    for (var index = 1; index <= columns.Count; index++)
+                    {
+                        var column = columns[index];
+                        var columnWidth = (double)column.Width;
+                        var spaceAfter = index < columns.Count ? (double)column.SpaceAfter : 0;
+                        if (bestWidth <= 0) bestWidth = columnWidth;
+                        if (horizontalPosition >= columnLeft - 0.5 &&
+                            horizontalPosition <= columnLeft + columnWidth + spaceAfter / 2.0)
+                        {
+                            bestWidth = columnWidth;
+                            break;
+                        }
+                        columnLeft += columnWidth + spaceAfter;
+                    }
+                    widthPt = bestWidth;
+                }
+                if (widthPt >= LaTeXBlockWidthPolicy.MinimumWidthPt) return widthPt;
+            }
+            catch (COMException) { }
+            return LaTeXBlockWidthPolicy.NormalizeTextAreaWidth(fallbackPt);
+        }
+
+        private static bool TryResolveTextFrameWidth(WordInterop.Range range,
+            out double widthPt)
+        {
+            widthPt = 0;
+            try
+            {
+                if (range.StoryType != WordInterop.WdStoryType.wdTextFrameStory)
+                    return false;
+                foreach (WordInterop.Shape shape in range.Document.Shapes)
+                {
+                    WordInterop.Range textRange = null;
+                    try
+                    {
+                        if (shape.TextFrame.HasText == 0) continue;
+                        textRange = shape.TextFrame.TextRange;
+                        if (!range.InStory(textRange) || range.Start < textRange.Start ||
+                            range.Start > textRange.End) continue;
+                        widthPt = shape.Width - shape.TextFrame.MarginLeft -
+                                  shape.TextFrame.MarginRight;
+                        return widthPt >= LaTeXBlockWidthPolicy.MinimumWidthPt;
+                    }
+                    catch (COMException) { }
+                    finally
+                    {
+                        if (textRange != null) Marshal.FinalReleaseComObject(textRange);
+                    }
+                }
+            }
+            catch (COMException) { }
+            return false;
+        }
+
         internal LaTeXBlockRender RenderPreview(string source, double widthPt, LaTeXBlockLayoutMode mode, string profile,
             double fontSizePt = 10, bool displayMathStyle = false)
         {
@@ -44,10 +125,29 @@ namespace LaTeXBlocks.Word
         internal async Task<LaTeXBlockRender> RenderPreviewAsync(string source, double widthPt,
             LaTeXBlockLayoutMode mode, string profile, double fontSizePt = 10, bool displayMathStyle = false)
         {
+            return await RenderAsync(source, widthPt, mode, profile, fontSizePt,
+                displayMathStyle, false);
+        }
+
+        internal async Task<LaTeXBlockRender> RenderCommittedAsync(string source, double widthPt,
+            LaTeXBlockLayoutMode mode, string profile, double fontSizePt = 10,
+            bool displayMathStyle = false)
+        {
+            return await RenderAsync(source, widthPt, mode, profile, fontSizePt,
+                displayMathStyle, true);
+        }
+
+        private async Task<LaTeXBlockRender> RenderAsync(string source, double widthPt,
+            LaTeXBlockLayoutMode mode, string profile, double fontSizePt,
+            bool displayMathStyle, bool committed)
+        {
             var normalizedSource = NormalizeSourceText(source);
             var renderSource = displayMathStyle ? PrepareDisplayMathSource(normalizedSource) : normalizedSource;
-            var result = await renderers.RenderLatestAsync(profile, renderSource, widthPt,
-                mode == LaTeXBlockLayoutMode.Auto, fontSizePt);
+            var result = committed
+                ? await renderers.RenderQueuedAsync(profile, renderSource, widthPt,
+                    mode == LaTeXBlockLayoutMode.Auto, fontSizePt)
+                : await renderers.RenderLatestAsync(profile, renderSource, widthPt,
+                    mode == LaTeXBlockLayoutMode.Auto, fontSizePt);
             return new LaTeXBlockRender(WriteSvg(result.Bytes), result.Bytes, result.DepthPt, fontSizePt);
         }
 
@@ -189,8 +289,8 @@ namespace LaTeXBlocks.Word
             var sideEffects = MeasureInlineSpaceEffectExtents(shape, metadata, naturalSpaces);
             shape = NormalizeWordInlineDrawing(shape, sideEffects, svgSize);
             ApplyHostRunFormat(shape, metadata, hostPosition);
-            shape = ReconcileInsertedInlineSpaceEffectExtents(shape, metadata, sideEffects,
-                svgSize, hostPosition);
+            shape = ReconcileInsertedInlineSpaceEffectExtents(shape, metadata, naturalSpaces,
+                sideEffects, svgSize, hostPosition);
             if (select) MoveCaretAfterRange(shape.Range);
             return shape;
         }
@@ -880,7 +980,8 @@ namespace LaTeXBlocks.Word
         }
 
         private static WordInterop.InlineShape ReconcileInsertedInlineSpaceEffectExtents(
-            WordInterop.InlineShape shape, LaTeXBlockMetadata metadata, InlineEffectExtents written,
+            WordInterop.InlineShape shape, LaTeXBlockMetadata metadata,
+            InlineSpaceAdvances preInsertionNaturalSpaces, InlineEffectExtents written,
             SvgPhysicalSize svgSize, int hostPosition)
         {
             if (metadata.Mode != LaTeXBlockLayoutMode.Auto || metadata.Role != LaTeXBlockRole.Content)
@@ -890,12 +991,22 @@ namespace LaTeXBlocks.Word
             // its geometry. Validate that result against the final DrawingML object as a
             // postcondition. In a real interactive insertion Word can occasionally make the
             // pre-insertion geometry unavailable even though the completed inline shape is
-            // measurable; in that case the first pass legitimately writes zero. The update
-            // path below can recover the natural space from an equivalent same-line space,
-            // the persisted extent, or the formatted scratch sample. Rewrite only when that
-            // final answer differs, so the ordinary insertion path still performs one XML
-            // normalization and never waits, polls, or schedules document work.
-            var finalNaturalSpaces = ResolveUpdatedNaturalAdjacentSpaces(shape, metadata);
+            // measurable; in that case the first pass legitimately writes zero. Recover only
+            // those unavailable sides from an equivalent same-line space, the persisted extent,
+            // or the formatted scratch sample. A scratch sample is not allowed to replace an
+            // exact pre-insertion measurement: Word's contextual layout can give two spaces in
+            // the same formatted run slightly different advances (Arial around an "A xx B"
+            // fixture is one example). Rewrite only when the final measured effect differs, so
+            // the ordinary insertion path still performs one XML normalization and never waits,
+            // polls, or schedules document work.
+            var recoveredNaturalSpaces = ResolveUpdatedNaturalAdjacentSpaces(shape, metadata);
+            var finalNaturalSpaces = new InlineSpaceAdvances(
+                preInsertionNaturalSpaces.LeftPt > 0
+                    ? preInsertionNaturalSpaces.LeftPt
+                    : recoveredNaturalSpaces.LeftPt,
+                preInsertionNaturalSpaces.RightPt > 0
+                    ? preInsertionNaturalSpaces.RightPt
+                    : recoveredNaturalSpaces.RightPt);
             var finalEffects = MeasureInlineSpaceEffectExtents(shape, metadata, finalNaturalSpaces);
             if (finalEffects.LeftEmu == written.LeftEmu && finalEffects.RightEmu == written.RightEmu)
                 return shape;

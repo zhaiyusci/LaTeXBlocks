@@ -1,7 +1,11 @@
 using System;
 using System.Globalization;
 
+#if POWERPOINT
+namespace LaTeXBlocks.PowerPoint
+#else
 namespace LaTeXBlocks.Word
+#endif
 {
     internal enum LaTeXBlockLayoutMode { Fixed, Auto }
     internal enum LaTeXBlockRole { Content, NumberedEquation }

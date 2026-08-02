@@ -23,7 +23,11 @@ namespace LaTeXBlocks.Word
         private bool refreshingNativeFontSize;
         private List<SelectionFontSnapshot> previousSelectionFontSnapshots = new List<SelectionFontSnapshot>();
         private Control wordUiDispatcher;
-        private long formatRefreshGeneration;
+        private LaTeXBlocksRibbon ribbon;
+        private readonly Dictionary<long, PendingFormatRefresh> pendingFormatRefreshes =
+            new Dictionary<long, PendingFormatRefresh>();
+        private readonly HashSet<long> formatRefreshesInFlight = new HashSet<long>();
+        private long formatRefreshSequence;
         private int programmaticMutationDepth;
         private bool shuttingDown;
         private const int NativeFontSizeControlId = 1731;
@@ -60,7 +64,9 @@ namespace LaTeXBlocks.Word
         private void ThisAddIn_Shutdown(object sender, EventArgs e)
         {
             shuttingDown = true;
-            Interlocked.Increment(ref formatRefreshGeneration);
+            Interlocked.Increment(ref formatRefreshSequence);
+            pendingFormatRefreshes.Clear();
+            formatRefreshesInFlight.Clear();
             Application.WindowBeforeDoubleClick -= Application_WindowBeforeDoubleClick;
             Application.WindowSelectionChange -= Application_WindowSelectionChange;
             DetachNativeFontSizeControl();
@@ -77,8 +83,10 @@ namespace LaTeXBlocks.Word
             if (Application.Documents.Count == 0) throw new InvalidOperationException("Open a Word document first.");
             var fontSizePt = LaTeXBlockService.ResolveFontSize(Application.Selection,
                 LaTeXBlockLayoutMode.Auto, 10);
-            using (var editor = new LaTeXBlockEditorForm(Blocks, "$E=mc^2$", 360, LaTeXBlockLayoutMode.Auto,
-                currentProfile ?? Renderers.DefaultAvailableProfile, SetCurrentProfile, false, fontSizePt))
+            using (var editor = new LaTeXBlockEditorForm(Blocks, "$E=mc^2$", 360,
+                LaTeXBlockLayoutMode.Auto,
+                currentProfile ?? Renderers.DefaultAvailableProfile, SetCurrentProfile, false,
+                fontSizePt))
             {
                 if (editor.ShowDialog(new LaTeXBlocksRibbon.WordWindow(Application)) == DialogResult.OK)
                 {
@@ -91,7 +99,9 @@ namespace LaTeXBlocks.Word
         internal void ShowInsertBlockEditor()
         {
             if (Application.Documents.Count == 0) throw new InvalidOperationException("Open a Word document first.");
-            using (var editor = new LaTeXBlockEditorForm(Blocks, "\\[E=mc^2\\]", 360, LaTeXBlockLayoutMode.Fixed,
+            var widthPt = LaTeXBlockWidthPolicy.ResolveDefaultFixedWidth();
+            using (var editor = new LaTeXBlockEditorForm(Blocks, "\\[E=mc^2\\]", widthPt,
+                LaTeXBlockLayoutMode.Fixed,
                 currentProfile ?? Renderers.DefaultAvailableProfile, SetCurrentProfile, false, 10))
             {
                 if (editor.ShowDialog(new LaTeXBlocksRibbon.WordWindow(Application)) == DialogResult.OK)
@@ -110,8 +120,9 @@ namespace LaTeXBlocks.Word
                 LaTeXBlockLayoutMode.Auto, 10);
             const double widthPt = 360;
             using (var editor = new LaTeXBlockEditorForm(Blocks, "\\[E=mc^2\\]", widthPt,
-                LaTeXBlockLayoutMode.Auto, currentProfile ?? Renderers.DefaultAvailableProfile,
-                SetCurrentProfile, false, fontSizePt, "Insert Numbered Equation", true))
+                LaTeXBlockLayoutMode.Auto,
+                currentProfile ?? Renderers.DefaultAvailableProfile, SetCurrentProfile, false,
+                fontSizePt, "Insert Numbered Equation", true))
             {
                 if (editor.ShowDialog(new LaTeXBlocksRibbon.WordWindow(Application)) == DialogResult.OK)
                 {
@@ -136,9 +147,10 @@ namespace LaTeXBlocks.Word
             if (!Blocks.TryGetSelectedBlock(out var shape, out var metadata))
                 throw new InvalidOperationException("Select a LaTeX Block first.");
             var source = shape.AlternativeText;
-            using (var editor = new LaTeXBlockEditorForm(Blocks, source, metadata.WidthPt, metadata.Mode,
-                currentProfile ?? Renderers.DefaultAvailableProfile, SetCurrentProfile, true, metadata.FontSizePt,
-                null, metadata.Role == LaTeXBlockRole.NumberedEquation))
+            using (var editor = new LaTeXBlockEditorForm(Blocks, source, metadata.WidthPt,
+                metadata.Mode, currentProfile ?? Renderers.DefaultAvailableProfile,
+                SetCurrentProfile, true, metadata.FontSizePt, null,
+                metadata.Role == LaTeXBlockRole.NumberedEquation))
             {
                 if (editor.ShowDialog(new LaTeXBlocksRibbon.WordWindow(Application)) == DialogResult.OK)
                 {
@@ -146,6 +158,46 @@ namespace LaTeXBlocks.Word
                         Blocks.UpdateRendered(shape, editor.Source, editor.WidthPt, editor.Mode, editor.CurrentRender));
                 }
             }
+        }
+
+        internal bool HasSelectedFixedBlockWidth()
+        {
+            return TryGetSelectedFixedContentBlock(out _, out _);
+        }
+
+        internal string GetSelectedFixedBlockWidthText()
+        {
+            if (!TryGetSelectedFixedContentBlock(out _, out var metadata))
+                return string.Empty;
+            return metadata.WidthPt.ToString("0.0", System.Globalization.CultureInfo.CurrentCulture);
+        }
+
+        internal void ApplySelectedFixedBlockWidth(string text)
+        {
+            if (!LaTeXBlockWidthPolicy.TryParseWidth(text, out var requestedWidthPt))
+                throw new ArgumentException("Enter a typesetting width from 30 to 450 pt.",
+                    nameof(text));
+            if (!TryGetSelectedFixedContentBlock(out var selectedShape, out var metadata))
+                throw new InvalidOperationException("Select one fixed-width LaTeX Block first.");
+            var source = selectedShape.AlternativeText;
+            QueueFormatRefresh(new List<FormatRefreshRequest>
+            {
+                new FormatRefreshRequest(selectedShape, source, metadata, requestedWidthPt,
+                    metadata.FontSizePt)
+            });
+        }
+
+        private bool TryGetSelectedFixedContentBlock(out WordInterop.InlineShape shape,
+            out LaTeXBlockMetadata metadata)
+        {
+            shape = null;
+            metadata = null;
+            if (!Blocks.TryGetSelectedBlock(out var candidate, out var candidateMetadata) ||
+                candidateMetadata.Mode != LaTeXBlockLayoutMode.Fixed ||
+                candidateMetadata.Role != LaTeXBlockRole.Content) return false;
+            shape = candidate;
+            metadata = candidateMetadata;
+            return true;
         }
 
         internal void ApplyFontSizeToSelection(double fontSizePt)
@@ -227,6 +279,7 @@ namespace LaTeXBlocks.Word
             {
                 refreshingNativeFontSize = false;
                 RememberSelection(selection);
+                ribbon?.InvalidateWidthControl();
             }
         }
 
@@ -238,8 +291,9 @@ namespace LaTeXBlocks.Word
             {
                 if (LaTeXBlockService.TryReadContract(shape, out var metadata, out var source) &&
                     metadata.Mode == LaTeXBlockLayoutMode.Auto &&
-                    (!onlyChanged || Math.Abs(metadata.FontSizePt - fontSizePt) > 0.001))
-                    requests.Add(new FormatRefreshRequest(metadata.Id, source, metadata, fontSizePt));
+                    (!onlyChanged || Math.Abs(metadata.FontSizePt - fontSizePt) > 0.001 ||
+                     HasPendingFontTarget(shape, fontSizePt)))
+                    requests.Add(new FormatRefreshRequest(shape, source, metadata, fontSizePt));
             }
             return requests;
         }
@@ -253,14 +307,15 @@ namespace LaTeXBlocks.Word
             {
                 try
                 {
-                    var shape = FindBlock(snapshot.Id);
+                    var shape = snapshot.Shape;
                     if (shape == null ||
                         !LaTeXBlockService.TryReadContract(shape, out var metadata, out var source) ||
                         metadata.Mode != LaTeXBlockLayoutMode.Auto) continue;
                     var size = (double)shape.Range.Font.Size;
-                    if (!LaTeXBlockService.ShouldRefreshForHostFontSizeChange(snapshot.HostFontSizePt, size,
-                            metadata.FontSizePt)) continue;
-                    requests.Add(new FormatRefreshRequest(metadata.Id, source, metadata, size));
+                    if (!LaTeXBlockService.ShouldRefreshForHostFontSizeChange(snapshot.HostFontSizePt,
+                            size, metadata.FontSizePt) &&
+                        !HasPendingFontTarget(shape, size)) continue;
+                    requests.Add(new FormatRefreshRequest(shape, source, metadata, size));
                 }
                 catch (COMException)
                 {
@@ -283,7 +338,7 @@ namespace LaTeXBlocks.Word
                         metadata.Mode != LaTeXBlockLayoutMode.Auto) continue;
                     var size = (double)shape.Range.Font.Size;
                     if (size >= 1 && size <= 200)
-                        snapshots.Add(new SelectionFontSnapshot(metadata.Id, size));
+                        snapshots.Add(new SelectionFontSnapshot(shape, size));
                 }
             }
             catch (COMException) { }
@@ -293,45 +348,156 @@ namespace LaTeXBlocks.Word
         private void QueueFormatRefresh(List<FormatRefreshRequest> requests)
         {
             if (shuttingDown || requests == null || requests.Count == 0) return;
-            var generation = Interlocked.Increment(ref formatRefreshGeneration);
-            var service = Blocks;
-            var profile = currentProfile ?? Renderers.DefaultAvailableProfile;
-            RefreshBlocksAsync(service, profile, requests, generation);
+            foreach (var request in requests) QueueFormatRefresh(request);
         }
 
-        private async void RefreshBlocksAsync(LaTeXBlockService service, string profile,
-            List<FormatRefreshRequest> requests, long generation)
+        private void QueueFormatRefresh(FormatRefreshRequest request)
+        {
+            var profile = currentProfile ?? Renderers.DefaultAvailableProfile;
+            var targetWidthPt = request.Metadata.WidthPt;
+            var targetFontSizePt = request.Metadata.FontSizePt;
+            if (pendingFormatRefreshes.TryGetValue(request.ShapeKey, out var existing) &&
+                SameBaseState(existing, request.Metadata, request.Source, profile))
+            {
+                targetWidthPt = existing.TargetWidthPt;
+                targetFontSizePt = existing.TargetFontSizePt;
+            }
+            if (request.ChangesWidth)
+                targetWidthPt = request.WidthPt;
+            if (request.ChangesFontSize)
+                targetFontSizePt = request.FontSizePt;
+
+            if (Math.Abs(targetWidthPt - request.Metadata.WidthPt) < 0.001 &&
+                Math.Abs(targetFontSizePt - request.Metadata.FontSizePt) < 0.001)
+            {
+                pendingFormatRefreshes.Remove(request.ShapeKey);
+                ribbon?.InvalidateWidthControl();
+                return;
+            }
+
+            var sequence = Interlocked.Increment(ref formatRefreshSequence);
+            var pending = new PendingFormatRefresh(request.ShapeKey, request.Shape,
+                request.Metadata, request.Source, profile, targetWidthPt,
+                targetFontSizePt, sequence);
+            pendingFormatRefreshes[request.ShapeKey] = pending;
+            StartNextFormatRefresh(request.ShapeKey);
+        }
+
+        private void StartNextFormatRefresh(long shapeKey)
+        {
+            if (shuttingDown || formatRefreshesInFlight.Contains(shapeKey) ||
+                !pendingFormatRefreshes.TryGetValue(shapeKey, out var pending)) return;
+            formatRefreshesInFlight.Add(shapeKey);
+            _ = RefreshBlockAsync(Blocks, pending);
+        }
+
+        private async Task RefreshBlockAsync(LaTeXBlockService service,
+            PendingFormatRefresh pending)
         {
             try
             {
-                // Render serially on the StemTeX background queue. Only the small Word
-                // object-model replacement is marshalled back to Office's UI thread.
-                for (var index = requests.Count - 1; index >= 0; index--)
-                {
-                    var request = requests[index];
-                    var render = await service.RenderPreviewAsync(request.Source, request.Metadata.WidthPt,
-                        request.Metadata.Mode, profile, request.FontSizePt,
-                        request.Metadata.Role == LaTeXBlockRole.NumberedEquation).ConfigureAwait(false);
-                    if (shuttingDown || generation != Interlocked.Read(ref formatRefreshGeneration)) return;
-                    await InvokeOnWordUiAsync(() =>
-                    {
-                        if (shuttingDown || generation != Interlocked.Read(ref formatRefreshGeneration)) return;
-                        var shape = FindBlock(request.Id);
-                        if (shape != null)
-                            RunProgrammaticMutation(() => service.UpdateRendered(shape, request.Source,
-                                request.Metadata.WidthPt, request.Metadata.Mode, render, false), false);
-                    }).ConfigureAwait(false);
-                }
+                var render = await service.RenderCommittedAsync(pending.Source,
+                    pending.TargetWidthPt, pending.BaseMetadata.Mode, pending.Profile,
+                    pending.TargetFontSizePt,
+                    pending.BaseMetadata.Role == LaTeXBlockRole.NumberedEquation)
+                    .ConfigureAwait(false);
+                await InvokeOnWordUiAsync(() => CompleteFormatRefresh(service, pending,
+                    render)).ConfigureAwait(false);
             }
-            catch (TaskCanceledException) { }
-            catch (ObjectDisposedException) { }
+            catch (TaskCanceledException)
+            {
+                await AbandonFormatRefreshAsync(pending, null).ConfigureAwait(false);
+            }
+            catch (ObjectDisposedException)
+            {
+                await AbandonFormatRefreshAsync(pending, null).ConfigureAwait(false);
+            }
             catch (Exception exception)
             {
-                if (shuttingDown || generation != Interlocked.Read(ref formatRefreshGeneration)) return;
-                await InvokeOnWordUiAsync(() => MessageBox.Show(new LaTeXBlocksRibbon.WordWindow(Application),
-                    exception.GetBaseException().Message, "LaTeX Blocks", MessageBoxButtons.OK,
-                    MessageBoxIcon.Error)).ConfigureAwait(false);
+                await AbandonFormatRefreshAsync(pending, exception).ConfigureAwait(false);
             }
+        }
+
+        private void CompleteFormatRefresh(LaTeXBlockService service,
+            PendingFormatRefresh pending, LaTeXBlockRender render)
+        {
+            formatRefreshesInFlight.Remove(pending.ShapeKey);
+            if (shuttingDown) return;
+            if (!IsCurrentPending(pending))
+            {
+                StartNextFormatRefresh(pending.ShapeKey);
+                return;
+            }
+            var shape = pending.Shape;
+            if (shape != null && LaTeXBlockService.TryReadContract(shape,
+                    out var currentMetadata, out var currentSource) &&
+                currentSource == pending.Source &&
+                SameMetadataState(currentMetadata, pending.BaseMetadata) &&
+                string.Equals(pending.Profile, currentProfile,
+                    StringComparison.OrdinalIgnoreCase))
+                RunProgrammaticMutation(() => service.UpdateRendered(shape, pending.Source,
+                    pending.TargetWidthPt, pending.BaseMetadata.Mode, render, false), false);
+            pendingFormatRefreshes.Remove(pending.ShapeKey);
+            ribbon?.InvalidateWidthControl();
+            StartNextFormatRefresh(pending.ShapeKey);
+        }
+
+        private Task AbandonFormatRefreshAsync(PendingFormatRefresh pending,
+            Exception exception)
+        {
+            if (shuttingDown) return Task.FromResult(false);
+            return InvokeOnWordUiAsync(() =>
+            {
+                formatRefreshesInFlight.Remove(pending.ShapeKey);
+                if (IsCurrentPending(pending))
+                {
+                    pendingFormatRefreshes.Remove(pending.ShapeKey);
+                    ribbon?.InvalidateWidthControl();
+                    if (exception != null)
+                        MessageBox.Show(new LaTeXBlocksRibbon.WordWindow(Application),
+                            exception.GetBaseException().Message, "LaTeX Blocks",
+                            MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+                StartNextFormatRefresh(pending.ShapeKey);
+            });
+        }
+
+        private bool IsCurrentPending(PendingFormatRefresh pending)
+        {
+            return pendingFormatRefreshes.TryGetValue(pending.ShapeKey,
+                       out var current) && current.Sequence == pending.Sequence;
+        }
+
+        private bool HasPendingFontTarget(WordInterop.InlineShape shape, double fontSizePt)
+        {
+            return shape != null && pendingFormatRefreshes.TryGetValue(
+                       GetComIdentity(shape), out var pending) &&
+                   Math.Abs(pending.TargetFontSizePt - fontSizePt) > 0.001;
+        }
+
+        private static bool SameBaseState(PendingFormatRefresh pending,
+            LaTeXBlockMetadata metadata, string source, string profile)
+        {
+            return SameMetadataState(pending.BaseMetadata, metadata) &&
+                   pending.Source == source && string.Equals(pending.Profile, profile,
+                       StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool SameMetadataState(LaTeXBlockMetadata left,
+            LaTeXBlockMetadata right)
+        {
+            return left != null && right != null && left.Id == right.Id &&
+                   left.Mode == right.Mode && left.Role == right.Role &&
+                   Math.Abs(left.WidthPt - right.WidthPt) < 0.001 &&
+                   Math.Abs(left.FontSizePt - right.FontSizePt) < 0.001;
+        }
+
+        private static long GetComIdentity(object value)
+        {
+            if (value == null) return 0;
+            var unknown = Marshal.GetIUnknownForObject(value);
+            try { return unknown.ToInt64(); }
+            finally { Marshal.Release(unknown); }
         }
 
         private Task InvokeOnWordUiAsync(Action action)
@@ -353,14 +519,6 @@ namespace LaTeXBlocks.Word
             }
             catch (InvalidOperationException) { completion.TrySetCanceled(); }
             return completion.Task;
-        }
-
-        private WordInterop.InlineShape FindBlock(Guid id)
-        {
-            foreach (WordInterop.Document document in Application.Documents)
-                foreach (WordInterop.InlineShape shape in document.InlineShapes)
-                    if (LaTeXBlockService.TryReadContract(shape, out var metadata, out _) && metadata.Id == id) return shape;
-            return null;
         }
 
         private void RunProgrammaticMutation(Action action, bool recaptureSelectionSnapshot = true)
@@ -396,20 +554,71 @@ namespace LaTeXBlocks.Word
 
         private sealed class SelectionFontSnapshot
         {
-            internal SelectionFontSnapshot(Guid id, double hostFontSizePt)
-            { Id = id; HostFontSizePt = hostFontSizePt; }
-            internal Guid Id { get; }
+            internal SelectionFontSnapshot(WordInterop.InlineShape shape,
+                double hostFontSizePt)
+            { Shape = shape; HostFontSizePt = hostFontSizePt; }
+            internal WordInterop.InlineShape Shape { get; }
             internal double HostFontSizePt { get; }
         }
 
         private sealed class FormatRefreshRequest
         {
-            internal FormatRefreshRequest(Guid id, string source, LaTeXBlockMetadata metadata, double fontSizePt)
-            { Id = id; Source = source; Metadata = metadata; FontSizePt = fontSizePt; }
-            internal Guid Id { get; }
+            internal FormatRefreshRequest(WordInterop.InlineShape shape, string source,
+                LaTeXBlockMetadata metadata, double fontSizePt)
+            {
+                Shape = shape;
+                ShapeKey = GetComIdentity(shape);
+                Source = source;
+                Metadata = metadata;
+                WidthPt = metadata.WidthPt;
+                FontSizePt = fontSizePt;
+                ChangesFontSize = true;
+            }
+            internal FormatRefreshRequest(WordInterop.InlineShape shape, string source,
+                LaTeXBlockMetadata metadata, double widthPt, double fontSizePt)
+            {
+                Shape = shape;
+                ShapeKey = GetComIdentity(shape);
+                Source = source;
+                Metadata = metadata;
+                WidthPt = widthPt;
+                FontSizePt = fontSizePt;
+                ChangesWidth = true;
+            }
+            internal WordInterop.InlineShape Shape { get; }
+            internal long ShapeKey { get; }
             internal string Source { get; }
             internal LaTeXBlockMetadata Metadata { get; }
+            internal double WidthPt { get; }
             internal double FontSizePt { get; }
+            internal bool ChangesWidth { get; }
+            internal bool ChangesFontSize { get; }
+        }
+
+        private sealed class PendingFormatRefresh
+        {
+            internal PendingFormatRefresh(long shapeKey, WordInterop.InlineShape shape,
+                LaTeXBlockMetadata baseMetadata, string source, string profile,
+                double targetWidthPt, double targetFontSizePt, long sequence)
+            {
+                ShapeKey = shapeKey;
+                Shape = shape;
+                BaseMetadata = baseMetadata;
+                Source = source;
+                Profile = profile;
+                TargetWidthPt = targetWidthPt;
+                TargetFontSizePt = targetFontSizePt;
+                Sequence = sequence;
+            }
+
+            internal long ShapeKey { get; }
+            internal WordInterop.InlineShape Shape { get; }
+            internal LaTeXBlockMetadata BaseMetadata { get; }
+            internal string Source { get; }
+            internal string Profile { get; }
+            internal double TargetWidthPt { get; }
+            internal double TargetFontSizePt { get; }
+            internal long Sequence { get; }
         }
 
         private void Application_WindowBeforeDoubleClick(WordInterop.Selection selection, ref bool cancel)
@@ -441,12 +650,17 @@ namespace LaTeXBlocks.Word
             foreach (var candidate in Renderers.Profiles)
                 if (string.Equals(candidate, profile, StringComparison.OrdinalIgnoreCase)) { profile = candidate; valid = true; break; }
             if (!valid) throw new ArgumentException("Unknown StemTeX profile: " + profile, nameof(profile));
+            pendingFormatRefreshes.Clear();
+            Interlocked.Increment(ref formatRefreshSequence);
             currentProfile = profile;
             Renderers.SwitchProfile(profile);
             using (var key = Registry.CurrentUser.CreateSubKey(SettingsKey)) key.SetValue("Profile", profile, RegistryValueKind.String);
         }
 
-        protected override Office.IRibbonExtensibility CreateRibbonExtensibilityObject() { return new LaTeXBlocksRibbon(this); }
+        protected override Office.IRibbonExtensibility CreateRibbonExtensibilityObject()
+        {
+            return ribbon = new LaTeXBlocksRibbon(this);
+        }
         protected override object RequestComAddInAutomationService() { return diagnostics ?? (diagnostics = new RuntimeDiagnostics(this)); }
 
         private void InternalStartup()

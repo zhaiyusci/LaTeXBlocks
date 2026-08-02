@@ -2,12 +2,12 @@ using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 
-[assembly: AssemblyTitle("LaTeX Blocks for Microsoft Word")]
-[assembly: AssemblyDescription("Editable, searchable LaTeX blocks for Microsoft Word")]
+[assembly: AssemblyTitle("LaTeX Blocks for Microsoft PowerPoint")]
+[assembly: AssemblyDescription("Editable, searchable LaTeX blocks for Microsoft PowerPoint")]
 [assembly: AssemblyProduct("LaTeX Blocks")]
 [assembly: AssemblyCopyright("Copyright 2026")]
 [assembly: ComVisible(false)]
-[assembly: Guid("5E1EBAB5-F36A-42FB-BB07-684F194B8EE3")]
+[assembly: Guid("64665258-9914-4D58-83BF-D8F0F975B679")]
 [assembly: AssemblyVersion("0.2.10.0")]
 [assembly: AssemblyFileVersion("0.2.10.0")]
-[assembly: InternalsVisibleTo("LaTeXBlocks.WordSmoke")]
+[assembly: InternalsVisibleTo("LaTeXBlocks.PowerPointSmoke")]

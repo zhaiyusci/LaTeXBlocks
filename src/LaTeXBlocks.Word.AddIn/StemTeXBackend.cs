@@ -6,7 +6,11 @@ using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 
+#if POWERPOINT
+namespace LaTeXBlocks.PowerPoint
+#else
 namespace LaTeXBlocks.Word
+#endif
 {
     // Mirrors the StemTeX GUI lifecycle: one global profile, one renderer, and one
     // dedicated FIFO worker thread for create/render/destroy.
@@ -23,6 +27,7 @@ namespace LaTeXBlocks.Word
         private string rendererProfile;
         private string selectedProfile;
         private long generation;
+        private long nextRequestId;
         private long latestRequestId;
         private bool stopping;
         private string status = "not-started";
@@ -102,11 +107,40 @@ namespace LaTeXBlocks.Word
             {
                 ThrowIfStopping();
                 requestGeneration = generation;
-                requestId = ++latestRequestId;
+                requestId = ++nextRequestId;
+                latestRequestId = requestId;
                 status = "queued:" + requestId;
                 queue.Enqueue(new BackendWorkItem(
                     () => ExecuteRender(canonical, source, widthPt, autoWidth, fontSizePt,
-                        requestGeneration, requestId, completion),
+                        requestGeneration, requestId, true, completion),
+                    () => completion.TrySetCanceled()));
+            }
+            wake.Set();
+            return completion.Task;
+        }
+
+        // Document mutations are durable work, unlike live previews. They retain FIFO
+        // order and are canceled only by a profile replacement or host shutdown; a
+        // later preview must never silently discard a width/font change already
+        // committed by the user.
+        internal Task<StemTeXSvgResult> RenderQueuedAsync(string profile, string source,
+            double widthPt, bool autoWidth, double fontSizePt = 10)
+        {
+            var canonical = CanonicalProfile(profile);
+            SwitchProfile(canonical);
+            var completion = new TaskCompletionSource<StemTeXSvgResult>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            long requestGeneration;
+            long requestId;
+            lock (gate)
+            {
+                ThrowIfStopping();
+                requestGeneration = generation;
+                requestId = ++nextRequestId;
+                status = "queued:" + requestId;
+                queue.Enqueue(new BackendWorkItem(
+                    () => ExecuteRender(canonical, source, widthPt, autoWidth, fontSizePt,
+                        requestGeneration, requestId, false, completion),
                     () => completion.TrySetCanceled()));
             }
             wake.Set();
@@ -168,12 +202,14 @@ namespace LaTeXBlocks.Word
             }
         }
 
-        private void ExecuteRender(string profile, string source, double widthPt, bool autoWidth, double fontSizePt,
-            long requestGeneration, long requestId, TaskCompletionSource<StemTeXSvgResult> completion)
+        private void ExecuteRender(string profile, string source, double widthPt, bool autoWidth,
+            double fontSizePt, long requestGeneration, long requestId, bool latestOnly,
+            TaskCompletionSource<StemTeXSvgResult> completion)
         {
             lock (gate)
             {
-                if (stopping || requestGeneration != generation || requestId != latestRequestId)
+                if (stopping || requestGeneration != generation ||
+                    (latestOnly && requestId != latestRequestId))
                 {
                     completion.TrySetCanceled();
                     return;
@@ -185,10 +221,11 @@ namespace LaTeXBlocks.Word
                 if (renderer == null || !string.Equals(rendererProfile, profile, StringComparison.OrdinalIgnoreCase))
                     throw new InvalidOperationException("StemTeX renderer is not ready for profile " + profile + ".");
                 var result = RenderWithTransientRetry(source, widthPt, autoWidth, fontSizePt,
-                    requestGeneration, requestId);
+                    requestGeneration, requestId, latestOnly);
                 lock (gate)
                 {
-                    if (stopping || requestGeneration != generation || requestId != latestRequestId)
+                    if (stopping || requestGeneration != generation ||
+                        (latestOnly && requestId != latestRequestId))
                     {
                         completion.TrySetCanceled();
                         return;
@@ -199,13 +236,16 @@ namespace LaTeXBlocks.Word
             }
             catch (Exception exception)
             {
-                lock (gate) if (requestGeneration == generation && requestId == latestRequestId) status = "failed:" + exception.Message;
+                lock (gate)
+                    if (requestGeneration == generation &&
+                        (!latestOnly || requestId == latestRequestId))
+                        status = "failed:" + exception.Message;
                 completion.TrySetException(exception);
             }
         }
 
         private StemTeXSvgResult RenderWithTransientRetry(string source, double widthPt, bool autoWidth,
-            double fontSizePt, long requestGeneration, long requestId)
+            double fontSizePt, long requestGeneration, long requestId, bool latestOnly)
         {
             try
             {
@@ -215,13 +255,15 @@ namespace LaTeXBlocks.Word
                 exception.ErrorCode == WorkerRestartingError || exception.ErrorCode == WorkerBusyError)
             {
                 lock (gate)
-                    if (stopping || requestGeneration != generation || requestId != latestRequestId)
+                    if (stopping || requestGeneration != generation ||
+                        (latestOnly && requestId != latestRequestId))
                         throw new TaskCanceledException("StemTeX request was superseded.");
                 // The hot worker can briefly report restarting/busy while recovering.
                 // Retry this same latest request once; TeX snippet errors are never retried.
                 Thread.Sleep(100);
                 lock (gate)
-                    if (stopping || requestGeneration != generation || requestId != latestRequestId)
+                    if (stopping || requestGeneration != generation ||
+                        (latestOnly && requestId != latestRequestId))
                         throw new TaskCanceledException("StemTeX request was superseded.");
                 return renderer.RenderSvg(source, widthPt, autoWidth, fontSizePt);
             }

@@ -6,11 +6,19 @@ using System.Text;
 using System.Text.RegularExpressions;
 using Microsoft.Win32;
 
+#if POWERPOINT
+namespace LaTeXBlocks.PowerPoint
+#else
 namespace LaTeXBlocks.Word
+#endif
 {
     internal sealed class StemTeXRenderer : IDisposable
     {
         private const int SvgOutputFormat = 1;
+        // StemTeX 0.12 is the first bundled runtime for this host. Keep the
+        // native contract explicit so an old STEMTEX_HOME cannot silently
+        // substitute the 0.11 runtime for the packaged binary.
+        private static readonly Version RequiredRuntimeVersion = new Version(0, 12, 0);
         private readonly object gate = new object();
         private readonly string stemTeXHome;
         private readonly string runtimeRoot;
@@ -198,7 +206,7 @@ namespace LaTeXBlocks.Word
             var versionFile = Path.Combine(home, "runtime", "VERSION");
             if (!File.Exists(versionFile) ||
                 !Version.TryParse(File.ReadAllText(versionFile).Trim(), out runtimeVersion) ||
-                runtimeVersion.CompareTo(new Version(0, 11, 0)) < 0) return null;
+                runtimeVersion.CompareTo(RequiredRuntimeVersion) < 0) return null;
             var profilesRoot = Path.Combine(home, "gui", "profiles");
             var hasProfile = profile == null
                 ? Directory.Exists(profilesRoot) && Directory.GetFiles(profilesRoot, "preamble.tex", SearchOption.AllDirectories).Length > 0

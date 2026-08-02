@@ -12,7 +12,6 @@ try {
     $store.Open([Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
     if (-not ($store.Certificates | Where-Object Thumbprint -eq $certificate.Thumbprint)) { $store.Add($certificate) }
 } finally { $store.Close() }
-$propsPath = Join-Path $root 'src\LaTeXBlocks.Word.AddIn\LaTeXBlocks.Development.props'
 $props = @"
 <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <PropertyGroup>
@@ -21,5 +20,8 @@ $props = @"
   </PropertyGroup>
 </Project>
 "@
-[IO.File]::WriteAllText($propsPath, $props, [Text.UTF8Encoding]::new($false))
+foreach ($projectDirectory in @('LaTeXBlocks.Word.AddIn', 'LaTeXBlocks.PowerPoint.AddIn')) {
+    $propsPath = Join-Path $root "src\$projectDirectory\LaTeXBlocks.Development.props"
+    [IO.File]::WriteAllText($propsPath, $props, [Text.UTF8Encoding]::new($false))
+}
 Write-Output "LaTeX Blocks signing initialized: $($certificate.Thumbprint)"

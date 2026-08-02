@@ -6,6 +6,10 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "LaTeXBlocks.Word.AddIn", "s
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "LaTeXBlocks.WordSmoke", "tests\LaTeXBlocks.WordSmoke\LaTeXBlocks.WordSmoke.csproj", "{8C5F8B74-4F93-468F-9D81-B72B3F92452D}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "LaTeXBlocks.PowerPoint.AddIn", "src\LaTeXBlocks.PowerPoint.AddIn\LaTeXBlocks.PowerPoint.AddIn.csproj", "{35C5B434-1CE3-481B-9F7E-157D9AB9EBD1}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "LaTeXBlocks.PowerPointSmoke", "tests\LaTeXBlocks.PowerPointSmoke\LaTeXBlocks.PowerPointSmoke.csproj", "{33AF3801-37FA-45D4-89D3-A60AFD791DB6}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -20,6 +24,14 @@ Global
 		{8C5F8B74-4F93-468F-9D81-B72B3F92452D}.Debug|Any CPU.Build.0 = Debug|AnyCPU
 		{8C5F8B74-4F93-468F-9D81-B72B3F92452D}.Release|Any CPU.ActiveCfg = Release|AnyCPU
 		{8C5F8B74-4F93-468F-9D81-B72B3F92452D}.Release|Any CPU.Build.0 = Release|AnyCPU
+		{35C5B434-1CE3-481B-9F7E-157D9AB9EBD1}.Debug|Any CPU.ActiveCfg = Debug|AnyCPU
+		{35C5B434-1CE3-481B-9F7E-157D9AB9EBD1}.Debug|Any CPU.Build.0 = Debug|AnyCPU
+		{35C5B434-1CE3-481B-9F7E-157D9AB9EBD1}.Release|Any CPU.ActiveCfg = Release|AnyCPU
+		{35C5B434-1CE3-481B-9F7E-157D9AB9EBD1}.Release|Any CPU.Build.0 = Release|AnyCPU
+		{33AF3801-37FA-45D4-89D3-A60AFD791DB6}.Debug|Any CPU.ActiveCfg = Debug|AnyCPU
+		{33AF3801-37FA-45D4-89D3-A60AFD791DB6}.Debug|Any CPU.Build.0 = Debug|AnyCPU
+		{33AF3801-37FA-45D4-89D3-A60AFD791DB6}.Release|Any CPU.ActiveCfg = Release|AnyCPU
+		{33AF3801-37FA-45D4-89D3-A60AFD791DB6}.Release|Any CPU.Build.0 = Release|AnyCPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

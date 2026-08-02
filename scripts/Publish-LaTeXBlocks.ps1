@@ -1,13 +1,15 @@
 param(
     [ValidatePattern('^\d+\.\d+\.\d+$')]
-    [string]$Version = '0.1.9',
+    [string]$Version = '0.2.10',
     [string]$StemTeXSourceDir
 )
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $project = Join-Path $root 'src\LaTeXBlocks.Word.AddIn\LaTeXBlocks.Word.AddIn.csproj'
+$powerPointProject = Join-Path $root 'src\LaTeXBlocks.PowerPoint.AddIn\LaTeXBlocks.PowerPoint.AddIn.csproj'
 $publishDir = Join-Path $root 'src\LaTeXBlocks.Word.AddIn\bin\Release\app.publish'
+$powerPointPublishDir = Join-Path $root 'src\LaTeXBlocks.PowerPoint.AddIn\bin\Release\app.publish'
 $stagingDir = Join-Path $root 'dist\staging'
 $outputDir = Join-Path $root 'dist\release'
 $certificatePath = Join-Path $stagingDir 'publisher.cer'
@@ -27,22 +29,24 @@ foreach ($required in @(
     $msbuild,
     $iscc,
     $project,
+    $powerPointProject,
     (Join-Path $StemTeXSourceDir 'runtime\VERSION'),
     (Join-Path $StemTeXSourceDir 'runtime\bin\sdk\stemtex-renderer.dll'),
     (Join-Path $StemTeXSourceDir 'runtime\bin\windows\dvisvgmdaemon.dll'),
-    (Join-Path $StemTeXSourceDir 'gui\profiles\xits_cjk\preamble.tex')
+    (Join-Path $StemTeXSourceDir 'gui\profiles\xits_cjk\preamble.tex'),
+    (Join-Path $StemTeXSourceDir 'gui\profiles\arial_lete_simhei\preamble.tex')
 )) {
     if (-not (Test-Path -LiteralPath $required)) { throw "Required build input was not found: $required" }
 }
 if (-not $vcRedist) { throw 'The VC++ 2015-2022 x64 redistributable was not found in Visual Studio.' }
 
 $stemTeXVersion = [Version]((Get-Content (Join-Path $StemTeXSourceDir 'runtime\VERSION') -Raw).Trim())
-if ($stemTeXVersion -lt [Version]'0.11.0') {
-    throw "LaTeX Blocks requires StemTeX 0.11.0 or newer; found $stemTeXVersion."
+if ($stemTeXVersion -lt [Version]'0.12.0') {
+    throw "LaTeX Blocks requires StemTeX 0.12.0 or newer; found $stemTeXVersion."
 }
 
 $rootPath = [IO.Path]::GetFullPath($root).TrimEnd('\') + '\'
-foreach ($path in @($stagingDir, $outputDir, $publishDir)) {
+foreach ($path in @($stagingDir, $outputDir, $publishDir, $powerPointPublishDir)) {
     $resolved = [IO.Path]::GetFullPath($path)
     if (-not $resolved.StartsWith($rootPath, [StringComparison]::OrdinalIgnoreCase)) {
         throw "Refusing to clean a path outside the repository: $resolved"
@@ -64,17 +68,31 @@ $applicationVersion = ($versionParts + @('0') | Select-Object -First 4) -join '.
 
 & $msbuild $project /t:Publish /p:Configuration=Release /p:VisualStudioVersion=18.0 `
     /p:IsWebBootstrapper=false /p:BootstrapperComponentsLocation=HomeSite `
-    '/p:PublishUrl=bin\Release\app.publish\' "/p:ApplicationVersion=$applicationVersion" /v:minimal
+    /p:EnableVstoProjectRegistration=false '/p:PublishUrl=bin\Release\app.publish\' `
+    "/p:ApplicationVersion=$applicationVersion" /v:minimal
 if ($LASTEXITCODE -ne 0) { throw "VSTO publish failed with exit code $LASTEXITCODE." }
 
-if (-not (Test-Path -LiteralPath (Join-Path $publishDir 'setup.exe'))) {
-    throw 'VSTO publish did not produce setup.exe.'
+& $msbuild $powerPointProject /t:Publish /p:Configuration=Release /p:VisualStudioVersion=18.0 `
+    /p:IsWebBootstrapper=false /p:BootstrapperComponentsLocation=HomeSite `
+    /p:EnableVstoProjectRegistration=false '/p:PublishUrl=bin\Release\app.publish\' `
+    "/p:ApplicationVersion=$applicationVersion" /v:minimal
+if ($LASTEXITCODE -ne 0) { throw "PowerPoint VSTO publish failed with exit code $LASTEXITCODE." }
+
+foreach ($requiredPublishOutput in @(
+    (Join-Path $publishDir 'setup.exe'),
+    (Join-Path $publishDir 'LaTeXBlocks.Word.AddIn.vsto'),
+    (Join-Path $powerPointPublishDir 'LaTeXBlocks.PowerPoint.AddIn.vsto')
+)) {
+    if (-not (Test-Path -LiteralPath $requiredPublishOutput)) {
+        throw "VSTO publish did not produce: $requiredPublishOutput"
+    }
 }
 
 [void](Export-Certificate -Cert $certificate -FilePath $certificatePath -Force)
 
 $iss = Join-Path $root 'installer\LaTeXBlocks.iss'
-& $iscc "/DMyAppVersion=$Version" "/DSourceDir=$publishDir" "/DStemTeXSourceDir=$StemTeXSourceDir" `
+& $iscc "/DMyAppVersion=$Version" "/DSourceDir=$publishDir" `
+    "/DPowerPointSourceDir=$powerPointPublishDir" "/DStemTeXSourceDir=$StemTeXSourceDir" `
     "/DCertPath=$certificatePath" "/DVcRedistPath=$($vcRedist.FullName)" `
     "/DVcMajor=$($vcRedist.VersionInfo.FileMajorPart)" "/DVcMinor=$($vcRedist.VersionInfo.FileMinorPart)" `
     "/DVcBuild=$($vcRedist.VersionInfo.FileBuildPart)" "/DVcRevision=$($vcRedist.VersionInfo.FilePrivatePart)" `
