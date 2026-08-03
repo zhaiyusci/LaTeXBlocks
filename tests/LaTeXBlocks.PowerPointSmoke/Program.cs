@@ -37,6 +37,10 @@ namespace LaTeXBlocks.PowerPointSmoke
             Assert(ribbonXml.IndexOf(PowerPointRibbonContract.FontSizeControlId,
                        StringComparison.Ordinal) >= 0,
                 "The PowerPoint Ribbon does not expose its TeX font-size control.");
+            Assert(ribbonXml.IndexOf("id=\"LaTeXBlocks.PowerPoint.Edit\"", StringComparison.Ordinal) >= 0 &&
+                   ribbonXml.IndexOf("imageMso=\"" + PowerPointRibbonContract.EditBlockImageMso + "\"",
+                       StringComparison.Ordinal) >= 0,
+                "The PowerPoint Edit Block command does not expose its edit icon.");
             Assert(PowerPointRibbonContract.TryParseFontSize("27.5", out var parsedSize) &&
                    Math.Abs(parsedSize - 27.5) < 0.001 &&
                    !PowerPointRibbonContract.TryParseFontSize("0", out _) &&

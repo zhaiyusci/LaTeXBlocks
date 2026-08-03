@@ -1,5 +1,5 @@
 #ifndef MyAppVersion
-  #define MyAppVersion "0.2.10"
+  #define MyAppVersion "0.2.13"
 #endif
 #ifndef SourceDir
   #error SourceDir must point to the ClickOnce publish directory

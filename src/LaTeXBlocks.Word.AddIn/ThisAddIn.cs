@@ -31,7 +31,10 @@ namespace LaTeXBlocks.Word
         private int programmaticMutationDepth;
         private bool shuttingDown;
         private const int NativeFontSizeControlId = 1731;
-        private const string SettingsKey = @"Software\LaTeXBlocks";
+        // A profile is a host-level preference: selecting a Word profile must
+        // not change the one PowerPoint starts with.
+        private const string SettingsKey = @"Software\LaTeXBlocks\Word";
+        private const string LegacySettingsKey = @"Software\LaTeXBlocks";
         internal WordInterop.Application WordApplication => Application;
 
         private StemTeXBackend Renderers => rendererPool ?? (rendererPool = new StemTeXBackend());
@@ -639,6 +642,10 @@ namespace LaTeXBlocks.Word
         {
             string saved = null;
             using (var key = Registry.CurrentUser.OpenSubKey(SettingsKey)) saved = key?.GetValue("Profile") as string;
+            // Upgrade from the former shared preference once. Subsequent saves
+            // always go to Word's own key and can no longer affect PowerPoint.
+            if (string.IsNullOrWhiteSpace(saved))
+                using (var key = Registry.CurrentUser.OpenSubKey(LegacySettingsKey)) saved = key?.GetValue("Profile") as string;
             foreach (var profile in pool.Profiles)
                 if (string.Equals(profile, saved, StringComparison.OrdinalIgnoreCase)) return profile;
             return pool.DefaultAvailableProfile;

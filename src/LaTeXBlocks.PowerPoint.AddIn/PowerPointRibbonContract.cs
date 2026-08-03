@@ -7,6 +7,8 @@ namespace LaTeXBlocks.PowerPoint
     {
         internal const string FontSizeControlId = "LaTeXBlocks.PowerPoint.FontSize";
         internal const string LayoutWidthControlId = "LaTeXBlocks.PowerPoint.LayoutWidth";
+        // Keep the same pencil/edit glyph used by the Word Edit Block command.
+        internal const string EditBlockImageMso = "EditText";
 
         internal static string BuildCustomUi()
         {
@@ -14,7 +16,8 @@ namespace LaTeXBlocks.PowerPoint
                    "<ribbon><tabs><tab id=\"LaTeXBlocks.PowerPoint.Tab\" label=\"LaTeX Blocks\">" +
                    "<group id=\"LaTeXBlocks.PowerPoint.Blocks\" label=\"LaTeX Blocks\">" +
                    "<button id=\"LaTeXBlocks.PowerPoint.Insert\" label=\"Insert Block\" size=\"large\" imageMso=\"TextBoxInsert\" onAction=\"OnInsertBlock\"/>" +
-                   "<button id=\"LaTeXBlocks.PowerPoint.Edit\" label=\"Edit Block\" size=\"large\" imageMso=\"ObjectEdit\" onAction=\"OnEditBlock\"/>" +
+                   "<button id=\"LaTeXBlocks.PowerPoint.Edit\" label=\"Edit Block\" size=\"large\" imageMso=\"" +
+                   EditBlockImageMso + "\" onAction=\"OnEditBlock\"/>" +
                    "<editBox id=\"" + LayoutWidthControlId + "\" label=\"Typesetting width (pt)\" sizeString=\"000.0\" getText=\"GetLayoutWidthText\" getEnabled=\"GetLayoutWidthEnabled\" onChange=\"OnLayoutWidthChanged\"/>" +
                    "<editBox id=\"" + FontSizeControlId + "\" label=\"TeX size (pt)\" sizeString=\"000.0\" getText=\"GetFontSizeText\" getEnabled=\"GetFontSizeEnabled\" onChange=\"OnFontSizeChanged\"/>" +
                    "</group></tab></tabs></ribbon></customUI>";

@@ -14,6 +14,7 @@ namespace LaTeXBlocks.WordSmoke
     internal static class Program
     {
         private const string StartupShutdownProbeChild = "LATEXBLOCKS_STARTUP_SHUTDOWN_PROBE_CHILD";
+        private const string WordJoiner = "\u2060";
 
         [STAThread]
         private static int Main()
@@ -95,14 +96,14 @@ namespace LaTeXBlocks.WordSmoke
                     "\\hbox to 10pt{\\vrule width.1pt height1pt depth0pt\\hfil}", 360, true);
                 var logicalBoxWidthPt = LaTeXBlockService.ReadSvgWidthPt(logicalBox.Bytes);
                 const double texPointToWordPoint = 72.0 / 72.27;
-                Assert(Math.Abs(logicalBoxWidthPt - (10 * texPointToWordPoint + 0.1)) < 0.01,
-                    "Auto-width SVG retained the profile's visible horizontal preview border " +
+                Assert(Math.Abs(logicalBoxWidthPt - (10 * texPointToWordPoint)) < 0.01,
+                    "Auto-width SVG added horizontal padding around the logical TeX box " +
                     "(width=" + logicalBoxWidthPt + "pt).");
                 var overhangingInk = renderer.RenderSvg(profile,
                     "\\hbox to 10pt{\\kern-2pt\\vrule width1pt height1pt depth0pt\\hfil}", 360, true);
                 var overhangingWidthPt = LaTeXBlockService.ReadSvgWidthPt(overhangingInk.Bytes);
-                Assert(Math.Abs(overhangingWidthPt - (12 * texPointToWordPoint + 0.1)) < 0.01,
-                    "Removing horizontal preview padding clipped a real TeX ink overhang " +
+                Assert(Math.Abs(overhangingWidthPt - (12 * texPointToWordPoint)) < 0.01,
+                    "Removing horizontal SVG padding clipped a real TeX ink overhang " +
                     "(width=" + overhangingWidthPt + "pt).");
                 var rhoGhSvg = renderer.RenderSvg(profile, "$\\rho gh$", 360, true, 11);
                 Assert(rhoGhSvg.Bytes.Length > 0 && rhoGhSvg.DepthPt > 0,
@@ -155,6 +156,10 @@ namespace LaTeXBlocks.WordSmoke
                        ribbonXml.IndexOf("getEnabled=\"GetWidthEnabled\"",
                            StringComparison.Ordinal) >= 0,
                     "The Word Ribbon does not expose the selection-aware width control.");
+                Assert(ribbonXml.IndexOf("id=\"LaTeXBlocks.Edit\"", StringComparison.Ordinal) >= 0 &&
+                       ribbonXml.IndexOf("imageMso=\"" + LaTeXBlocksRibbon.EditBlockImageMso + "\"",
+                           StringComparison.Ordinal) >= 0,
+                    "The Word Edit Block command does not expose its edit icon.");
                 Assert(!LaTeXBlockService.ShouldRefreshForHostFontSizeChange(11, 11, 10),
                     "Selecting and leaving an unchanged formula would spuriously rerender it at the host character size.");
                 Assert(LaTeXBlockService.ShouldRefreshForHostFontSizeChange(11, 12, 11),
@@ -330,19 +335,19 @@ namespace LaTeXBlocks.WordSmoke
                 var fractionDepth = (int)Math.Round(fractionRender.DepthPt,
                     MidpointRounding.AwayFromZero);
                 Assert(fractionDepth > 1 && fractionShape.Range.Font.Position == -fractionDepth,
-                    "Effect-extent normalization discarded the large inline formula's baseline position.");
+                    "U+2060 boundary insertion discarded the large inline formula's baseline position.");
                 Assert(Math.Abs((double)fractionShape.Range.Font.Size - 36) < 0.001,
-                    "Effect-extent normalization discarded the large inline formula's host font size.");
-                Assert(document.Range(fractionStart, fractionShape.Range.Start).Text == "What?",
+                    "U+2060 boundary insertion discarded the large inline formula's host font size.");
+                Assert(document.Range(fractionStart, fractionShape.Range.Start - 1).Text == "What?" &&
+                       document.Range(fractionShape.Range.Start - 1, fractionShape.Range.Start).Text == WordJoiner,
                     "Restoring the drawing run format duplicated adjacent running text.");
-                Assert(Regex.IsMatch(fractionShape.Range.WordOpenXML,
-                    "<wp:effectExtent\\b(?=[^>]*\\bb=\"0\")[^>]*/>"),
-                    "The large inline formula retained Word's host-only bottom effect extent.");
+                AssertInlineWordJoinerBoundary(fractionShape, 2, "Large inline formula");
                 var fractionFollowingStart = word.Selection.Start;
                 word.Selection.TypeText("abc");
                 var fractionFollowing = document.Range(fractionFollowingStart, fractionFollowingStart + 3);
                 Assert(fractionFollowing.Text == "abc" && fractionFollowing.Font.Position == 0 &&
-                    fractionFollowing.NoProofing == 0,
+                    fractionFollowing.NoProofing == 0 &&
+                    document.Range(fractionShape.Range.End, fractionShape.Range.End + 1).Text == WordJoiner,
                     "Text after a large inline formula inherited its compensated picture position.");
                 document.Range(fractionStart, document.Content.End - 1).Delete();
                 document.Range(document.Content.End - 1, document.Content.End - 1).Select();
@@ -361,7 +366,9 @@ namespace LaTeXBlocks.WordSmoke
                 word.Selection.TypeText(" think ");
                 var insertedRunning = document.Range(insertedRunningStart, insertedRunningStart + 7);
                 var untouchedFollowing = document.Range(insertedRunningStart + 7, insertedRunningStart + 14);
-                Assert(document.InlineShapes.Count == 1 && beforeExistingText.Range.End == insertedRunningStart &&
+                AssertInlineWordJoinerBoundary(beforeExistingText, 2,
+                    "Formula before existing running text");
+                Assert(document.InlineShapes.Count == 1 && beforeExistingText.Range.End + 1 == insertedRunningStart &&
                     insertedRunning.Text == " think " && insertedRunning.Font.Position == 0 &&
                     insertedRunning.NoProofing == 0 && untouchedFollowing.Text == "and we." &&
                     untouchedFollowing.Font.Position == 0 && untouchedFollowing.NoProofing == 0,
@@ -382,7 +389,8 @@ namespace LaTeXBlocks.WordSmoke
                 word.Selection.TypeText("x");
                 var raisedText = document.Range(raisedTextStart, raisedTextStart + 1);
                 Assert(raisedShape.Range.Font.Position == 2 - raisedDepth && raisedText.Font.Position == 0 &&
-                    raisedText.NoProofing == 0,
+                    raisedText.NoProofing == 0 &&
+                    document.Range(raisedShape.Range.End, raisedShape.Range.End + 1).Text == WordJoiner,
                     "Inline baseline compensation was not relative to the deliberate host position, or its " +
                     "picture-only formatting leaked into the paragraph insertion format.");
                 document.Range(raisedStart, document.Content.End - 1).Delete();
@@ -407,18 +415,17 @@ namespace LaTeXBlocks.WordSmoke
                     "The inserted formula's Word run size does not match its TeX design size.");
                 Assert(inserted.Range.Font.Position == -(int)Math.Round(firstMetadata.DepthPt, MidpointRounding.AwayFromZero),
                     "Word baseline compensation does not equal the rounded TeX depth.");
-                Assert(word.Selection.Start == word.Selection.End && word.Selection.Start == inserted.Range.End &&
+                AssertInlineWordJoinerBoundary(inserted, 2, "Inserted inline formula");
+                Assert(word.Selection.Start == word.Selection.End && word.Selection.Start == inserted.Range.End + 1 &&
                     word.Selection.Font.Position == 0 && word.Selection.NoProofing == 0,
                     "Inline insertion left the picture selected or leaked its character formatting into the caret.");
                 var runningTextStart = word.Selection.Start;
                 word.Selection.TypeText(" running");
                 var runningText = document.Range(runningTextStart, runningTextStart + 8);
                 Assert(document.InlineShapes.Count == 1 && runningText.Text == " running" &&
-                    runningText.Font.Position == 0 && runningText.NoProofing == 0,
+                    runningText.Font.Position == 0 && runningText.NoProofing == 0 &&
+                    document.Range(inserted.Range.End, inserted.Range.End + 1).Text == WordJoiner,
                     "Text typed after an inline formula inherited the picture run's baseline or no-proof formatting.");
-                Assert(Regex.IsMatch(inserted.Range.WordOpenXML,
-                    "<wp:effectExtent\\b(?=[^>]*\\bb=\"0\")[^>]*/>"),
-                    "Word's host-only bottom effect extent was not removed from the inline SVG.");
                 document.Range(0, 0).Select();
                 var hostSizeBeforeSelection = (double)inserted.Range.Font.Size;
                 inserted.Range.Select();
@@ -435,6 +442,9 @@ namespace LaTeXBlocks.WordSmoke
                 Assert(LaTeXBlockMetadata.TryParse(fixedBlock.Title, out var fixedMetadata) &&
                     fixedMetadata.Mode == LaTeXBlockLayoutMode.Fixed, "Fixed-width block mode was not persisted.");
                 Assert(fixedBlock.Width > 150, "Fixed-width block lost its requested canvas width.");
+                Assert(document.Range(fixedBlock.Range.Start - 1, fixedBlock.Range.Start).Text != WordJoiner &&
+                       document.Range(fixedBlock.Range.End, fixedBlock.Range.End + 1).Text != WordJoiner,
+                    "A fixed-width block unexpectedly received inline U+2060 boundaries.");
                 Assert(document.InlineShapes.Count == 2, "The two insertion modes did not produce two InlineShapes.");
                 document.SaveAs2(documentPath, WordInterop.WdSaveFormat.wdFormatXMLDocument);
                 document.Close(WordInterop.WdSaveOptions.wdSaveChanges);
@@ -449,9 +459,7 @@ namespace LaTeXBlocks.WordSmoke
                     "Block identity did not survive save and reopen.");
                 Assert(reopened.Range.Font.Position == -(int)Math.Round(reopenedMetadata.DepthPt, MidpointRounding.AwayFromZero),
                     "Baseline compensation did not survive save and reopen.");
-                Assert(Regex.IsMatch(reopened.Range.WordOpenXML,
-                    "<wp:effectExtent\\b(?=[^>]*\\bb=\"0\")[^>]*/>"),
-                    "The zero bottom effect extent did not survive save and reopen.");
+                AssertInlineWordJoinerBoundary(reopened, 2, "Reopened inline formula");
 
                 var updated = service.UpdateBlock(reopened, updatedSource, 420, LaTeXBlockLayoutMode.Auto, profile, 14);
                 Assert(document.InlineShapes.Count == 2, "Update changed the document's SVG count.");
@@ -466,17 +474,16 @@ namespace LaTeXBlocks.WordSmoke
                 Assert(updated.Range.Font.Position ==
                     -(int)Math.Round(updatedMetadata.DepthPt, MidpointRounding.AwayFromZero),
                     "Updating an inline formula discarded its baseline position.");
-                Assert(Regex.IsMatch(updated.Range.WordOpenXML,
-                    "<wp:effectExtent\\b(?=[^>]*\\bb=\"0\")[^>]*/>"),
-                    "Updating an inline formula restored Word's bottom effect extent.");
-                Assert(word.Selection.Start == word.Selection.End && word.Selection.Start == updated.Range.End &&
+                AssertInlineWordJoinerBoundary(updated, 2, "Updated inline formula");
+                Assert(word.Selection.Start == word.Selection.End && word.Selection.Start == updated.Range.End + 1 &&
                     word.Selection.Font.Position == 0 && word.Selection.NoProofing == 0,
                     "Updating an inline formula left its compensated picture run selected.");
                 var updatedRunningStart = word.Selection.Start;
                 word.Selection.TypeText(" updated");
                 var updatedRunning = document.Range(updatedRunningStart, updatedRunningStart + 8);
                 Assert(updatedRunning.Text == " updated" && updatedRunning.Font.Position == 0 &&
-                    updatedRunning.NoProofing == 0,
+                    updatedRunning.NoProofing == 0 &&
+                    document.Range(updated.Range.End, updated.Range.End + 1).Text == WordJoiner,
                     "Text typed after updating a formula inherited the picture run's formatting.");
                 document.Save();
                 document.Close(WordInterop.WdSaveOptions.wdSaveChanges);
@@ -492,9 +499,8 @@ namespace LaTeXBlocks.WordSmoke
                     reopenedUpdated.Range.Font.Position ==
                     -(int)Math.Round(reopenedUpdatedMetadata.DepthPt, MidpointRounding.AwayFromZero),
                     "The updated host font size or baseline position did not survive the second reopen.");
-                Assert(Regex.IsMatch(reopenedUpdated.Range.WordOpenXML,
-                    "<wp:effectExtent\\b(?=[^>]*\\bb=\"0\")[^>]*/>"),
-                    "The updated zero bottom effect extent did not survive the second reopen.");
+                AssertInlineWordJoinerBoundary(reopenedUpdated, 2,
+                    "Second-reopened inline formula");
                 document.Close(WordInterop.WdSaveOptions.wdDoNotSaveChanges);
                 Release(document);
                 document = null;
@@ -761,56 +767,41 @@ namespace LaTeXBlocks.WordSmoke
             {
                 var render = service.RenderPreview("$E=mc^2$", 360,
                     LaTeXBlockLayoutMode.Auto, profile, 16);
-                RunInlineSpacingFontMatrix(word, service, profile, render);
-                RunOneSidedInlineSpacingSmoke(word, service, profile,
-                    Path.Combine(Path.GetDirectoryName(documentPath),
-                        "LaTeXBlocks-One-Sided-Inline-Spacing-Smoke.docx"));
                 if (File.Exists(documentPath)) File.Delete(documentPath);
                 document = word.Documents.Add();
                 document.Range(0, 0).Text = "a b\rA xx B\rC,D";
                 document.Content.Font.Name = "Times New Roman";
                 document.Content.Font.Size = 16;
+                document.Repaginate();
                 var ordinarySpaceWidth = MeasureHorizontalAdvance(document.Range(1, 2));
                 Assert(ordinarySpaceWidth > 3 && ordinarySpaceWidth < 5,
                     "The isolated Word document did not produce an ordinary 16 pt space.");
-                var leftNaturalWidth = MeasureHorizontalAdvance(document.Range(5, 6));
-                var rightNaturalWidth = MeasureHorizontalAdvance(document.Range(8, 9));
 
                 // Replace "xx" in "A xx B" so both surrounding U+0020 characters can
-                // be measured in their normal pre-InlineShape layout.
+                // remain ordinary Word spaces outside the U+2060 boundaries.
                 document.Range(6, 8).Select();
                 var shape = service.InsertRendered("$E=mc^2$", 360, LaTeXBlockLayoutMode.Auto, render);
                 AssertExactSvgDrawingExtents(shape, render.SvgBytes,
                     "Initial inline formula");
-                var leftSpace = document.Range(shape.Range.Start - 1, shape.Range.Start);
-                var rightSpace = document.Range(shape.Range.End, shape.Range.End + 1);
+                AssertInlineWordJoinerBoundary(shape, 2, "Initial inline formula");
+                var leftSpace = document.Range(shape.Range.Start - 2, shape.Range.Start - 1);
+                var rightSpace = document.Range(shape.Range.End + 1, shape.Range.End + 2);
                 Assert(leftSpace.Text == " " && rightSpace.Text == " " &&
                        (double)leftSpace.Font.Scaling == 100 && (double)rightSpace.Font.Scaling == 100 &&
                        Math.Abs((double)leftSpace.Font.Spacing) < 0.001 &&
                        Math.Abs((double)rightSpace.Font.Spacing) < 0.001,
-                    "Inline spacing compensation changed the adjacent ordinary spaces.");
-
-                var effect = ReadEffectExtent(shape.Range.WordOpenXML);
-                var leftOverlapPt = -effect.Item1 / 12700.0;
-                var rightOverlapPt = -effect.Item2 / 12700.0;
+                    "U+2060 boundaries changed the adjacent ordinary spaces.");
                 var leftInlineWidth = MeasureHorizontalAdvance(leftSpace);
                 var rightInlineWidth = MeasureHorizontalAdvance(rightSpace);
-                Console.WriteLine("Inline spacing: natural=" + leftNaturalWidth.ToString("0.###") + "/" +
-                    rightNaturalWidth.ToString("0.###") + ", inline=" + leftInlineWidth.ToString("0.###") + "/" +
-                    rightInlineWidth.ToString("0.###") + ", overlap=" + leftOverlapPt.ToString("0.###") + "/" +
-                    rightOverlapPt.ToString("0.###"));
-                Assert(effect.Item1 < 0 && effect.Item2 < 0 && effect.Item3 == 0 &&
-                       Math.Abs(leftOverlapPt - (leftInlineWidth - leftNaturalWidth)) < 0.08 &&
-                       Math.Abs(rightOverlapPt - (rightInlineWidth - rightNaturalWidth)) < 0.08,
-                    "The SVG object did not absorb Word's duplicated adjacent-space advance.");
-                AssertEffectiveAdjacentGaps(shape, leftNaturalWidth, rightNaturalWidth,
-                    "Initial inline formula");
-                var layoutAdvance = MeasureHorizontalAdvance(shape.Range);
-                var expectedAdvance = (double)shape.Width - leftOverlapPt - rightOverlapPt;
+                Console.WriteLine("Inline U+2060 spacing: ordinary=" + ordinarySpaceWidth.ToString("0.###") +
+                    ", actual=" + leftInlineWidth.ToString("0.###") + "/" +
+                    rightInlineWidth.ToString("0.###"));
+                Assert(Math.Abs(leftInlineWidth - ordinarySpaceWidth) < 0.16 &&
+                       Math.Abs(rightInlineWidth - ordinarySpaceWidth) < 0.16,
+                    "A Word Joiner boundary did not restore the Times New Roman word spaces.");
                 var svgWidth = LaTeXBlockService.ReadSvgWidthPt(render.SvgBytes);
-                Assert(Math.Abs(layoutAdvance - expectedAdvance) < 0.35 &&
-                       Math.Abs((double)shape.Width - svgWidth) < 0.35,
-                    "Signed effect extents changed the SVG width or did not change its inline advance.");
+                Assert(Math.Abs((double)shape.Width - svgWidth) < 0.35,
+                    "The Word Joiner boundaries changed the SVG image's physical width.");
 
                 var updatedRender = service.RenderPreview("$x^2$", 360,
                     LaTeXBlockLayoutMode.Auto, profile, 16);
@@ -818,11 +809,17 @@ namespace LaTeXBlocks.WordSmoke
                     LaTeXBlockLayoutMode.Auto, updatedRender);
                 AssertExactSvgDrawingExtents(shape, updatedRender.SvgBytes,
                     "Updated inline formula");
-                var updatedEffect = ReadEffectExtent(shape.Range.WordOpenXML);
-                Assert(updatedEffect.Item1 == effect.Item1 && updatedEffect.Item2 == effect.Item2,
-                    "Replacing an inline formula lost its adjacent-space compensation.");
-                AssertEffectiveAdjacentGaps(shape, leftNaturalWidth, rightNaturalWidth,
-                    "Updated inline formula");
+                Assert(shape.AlternativeText == "$x^2$",
+                    "Updating the inline formula lost the authoritative TeX source.");
+                AssertInlineWordJoinerBoundary(shape, 2, "Updated inline formula");
+                Assert(word.Selection.Start == shape.Range.End + 1,
+                    "Update left the insertion caret before the trailing U+2060.");
+                var typedAfterUpdateStart = word.Selection.Start;
+                word.Selection.TypeText(" after");
+                var typedAfterUpdate = document.Range(typedAfterUpdateStart, typedAfterUpdateStart + 6);
+                Assert(typedAfterUpdate.Text == " after" &&
+                       document.Range(shape.Range.End, shape.Range.End + 1).Text == WordJoiner,
+                    "Typing after an inline formula split its trailing U+2060 boundary.");
 
                 var punctuationInsertion = (document.Content.Text ?? string.Empty)
                     .IndexOf("C,D", StringComparison.Ordinal) + 1;
@@ -830,10 +827,13 @@ namespace LaTeXBlocks.WordSmoke
                 document.Range(punctuationInsertion, punctuationInsertion).Select();
                 var punctuationShape = service.InsertRendered("$E=mc^2$", 360,
                     LaTeXBlockLayoutMode.Auto, render);
-                var punctuationEffect = ReadEffectExtent(punctuationShape.Range.WordOpenXML);
-                Assert(punctuationEffect.Item1 == 0 && punctuationEffect.Item2 == 0,
-                    "A formula without adjacent spaces received a horizontal overlap.");
-                punctuationShape.Delete();
+                AssertInlineWordJoinerBoundary(punctuationShape, 4,
+                    "No-space inline formula");
+                Assert(document.Range(punctuationShape.Range.Start - 2,
+                           punctuationShape.Range.Start - 1).Text == "C" &&
+                       document.Range(punctuationShape.Range.End + 1,
+                           punctuationShape.Range.End + 2).Text == ",",
+                    "The no-space U+2060 boundaries altered the surrounding punctuation.");
 
                 document.SaveAs2(documentPath, WordInterop.WdSaveFormat.wdFormatXMLDocument);
                 document.Close(WordInterop.WdSaveOptions.wdDoNotSaveChanges);
@@ -841,20 +841,13 @@ namespace LaTeXBlocks.WordSmoke
                 document = null;
 
                 document = word.Documents.Open(documentPath, ReadOnly: false);
-                Assert(document.InlineShapes.Count == 1,
-                    "The inline-spacing SVG did not survive save and reopen.");
+                Assert(document.InlineShapes.Count == 2,
+                    "The inline-spacing SVGs did not survive save and reopen.");
                 var reopened = document.InlineShapes[1];
-                var reopenedEffect = ReadEffectExtent(reopened.Range.WordOpenXML);
-                var reopenedLeft = document.Range(reopened.Range.Start - 1, reopened.Range.Start);
-                var reopenedRight = document.Range(reopened.Range.End, reopened.Range.End + 1);
-                Assert(reopenedEffect.Item1 == effect.Item1 && reopenedEffect.Item2 == effect.Item2 &&
-                       reopenedEffect.Item3 == 0 && reopenedLeft.Text == " " && reopenedRight.Text == " " &&
-                       (double)reopenedLeft.Font.Scaling == 100 && (double)reopenedRight.Font.Scaling == 100,
-                    "Signed inline spacing extents or the ordinary spaces did not survive save and reopen.");
-                AssertEffectiveAdjacentGaps(reopened, leftNaturalWidth, rightNaturalWidth,
-                    "Reopened inline formula");
+                AssertInlineWordJoinerBoundary(reopened, 4, "Reopened inline formula");
                 AssertExactSvgDrawingExtents(reopened, updatedRender.SvgBytes,
                     "Reopened inline formula");
+                RunInlineWordJoinerReuseSmoke(word, service, profile, render);
             }
             finally
             {
@@ -866,258 +859,80 @@ namespace LaTeXBlocks.WordSmoke
             }
         }
 
-        private static void RunOneSidedInlineSpacingSmoke(WordInterop.Application word,
-            LaTeXBlockService service, string profile, string documentPath)
-        {
-            WordInterop.Document document = null;
-            try
-            {
-                if (File.Exists(documentPath)) File.Delete(documentPath);
-                var render = service.RenderPreview("$E=mc^2$", 360,
-                    LaTeXBlockLayoutMode.Auto, profile, 11);
-                var svgWidthPt = LaTeXBlockService.ReadSvgWidthPt(render.SvgBytes);
-
-                document = word.Documents.Add();
-                document.Content.Text = "What is ?";
-                document.Content.Font.Name = "Times New Roman";
-                document.Content.Font.Size = 11;
-                document.Repaginate();
-
-                var questionPosition = (document.Content.Text ?? string.Empty)
-                    .IndexOf("?", StringComparison.Ordinal);
-                Assert(questionPosition > 0,
-                    "The one-sided inline-spacing phrase lost its question mark.");
-                var leftSpaceBeforeInsertion = document.Range(questionPosition - 1, questionPosition);
-                var naturalLeftPt = MeasureHorizontalAdvance(leftSpaceBeforeInsertion);
-                var leftWordEndBeforeInsertion = MeasureHorizontalPosition(document,
-                    leftSpaceBeforeInsertion.Start);
-                var insertionBefore = MeasureHorizontalPosition(document, questionPosition);
-                Console.WriteLine("TNR 11 one-sided fixture: natural=" +
-                    naturalLeftPt.ToString("0.###") + ", word-end=" +
-                    leftWordEndBeforeInsertion.ToString("0.###") + ", insertion=" +
-                    insertionBefore.ToString("0.###") + ", delta=" +
-                    (insertionBefore - leftWordEndBeforeInsertion).ToString("0.###"));
-                Assert(leftSpaceBeforeInsertion.Text == " " &&
-                       naturalLeftPt > 0 && naturalLeftPt < 11 &&
-                       Math.Abs(insertionBefore -
-                            (leftWordEndBeforeInsertion + naturalLeftPt)) < 0.08,
-                    "The TNR 11 one-sided fixture did not begin with a measurable natural space.");
-
-                document.Range(questionPosition, questionPosition).Select();
-                var shape = service.InsertRendered("$E=mc^2$", 360,
-                    LaTeXBlockLayoutMode.Auto, render);
-                var effect = ReadEffectExtent(shape.Range.WordOpenXML);
-                var insertedLeftSpace = document.Range(shape.Range.Start - 1, shape.Range.Start);
-                var insertedLeftPt = MeasureHorizontalAdvance(insertedLeftSpace);
-                var expectedLeftEffectEmu = -(long)Math.Round(
-                    Math.Max(0, insertedLeftPt - naturalLeftPt) * 12700.0,
-                    MidpointRounding.AwayFromZero);
-                Assert(Math.Abs(effect.Item1 - expectedLeftEffectEmu) <= 1016 &&
-                       effect.Item2 == 0 && effect.Item3 == 0,
-                    "A TNR 11 formula before punctuation did not receive only the measured " +
-                    "left-side effect extent.");
-                AssertOneSidedInlinePositions(shape, naturalLeftPt, svgWidthPt,
-                    "Initial one-sided inline formula");
-                AssertExactSvgDrawingExtents(shape, render.SvgBytes,
-                    "Initial one-sided inline formula");
-
-                document.SaveAs2(documentPath, WordInterop.WdSaveFormat.wdFormatXMLDocument);
-                document.Close(WordInterop.WdSaveOptions.wdDoNotSaveChanges);
-                Release(document);
-                document = null;
-
-                document = word.Documents.Open(documentPath, ReadOnly: false);
-                Assert(document.InlineShapes.Count == 1,
-                    "The one-sided inline formula did not survive save and reopen.");
-                var reopened = document.InlineShapes[1];
-                var reopenedEffect = ReadEffectExtent(reopened.Range.WordOpenXML);
-                Assert(reopenedEffect.Item1 == effect.Item1 && reopenedEffect.Item2 == 0 &&
-                       reopenedEffect.Item3 == 0,
-                    "The one-sided signed effect extent did not survive save and reopen.");
-                AssertOneSidedInlinePositions(reopened, naturalLeftPt, svgWidthPt,
-                    "Reopened one-sided inline formula");
-                AssertExactSvgDrawingExtents(reopened, render.SvgBytes,
-                    "Reopened one-sided inline formula");
-            }
-            finally
-            {
-                if (document != null)
-                {
-                    document.Close(WordInterop.WdSaveOptions.wdDoNotSaveChanges);
-                    Release(document);
-                }
-            }
-        }
-
-        private static void AssertOneSidedInlinePositions(WordInterop.InlineShape shape,
-            double naturalLeftPt, double svgWidthPt, string context)
-        {
-            var document = shape.Range.Document;
-            var leftSpace = document.Range(shape.Range.Start - 1, shape.Range.Start);
-            var punctuation = document.Range(shape.Range.End, shape.Range.End + 1);
-            Assert(leftSpace.Text == " " && punctuation.Text == "?",
-                context + " is no longer between one U+0020 and the question mark.");
-
-            var effect = ReadEffectExtent(shape.Range.WordOpenXML);
-            var leftWordEndX = MeasureHorizontalPosition(document, leftSpace.Start);
-            var shapeRangeStartX = MeasureHorizontalPosition(document, shape.Range.Start);
-            var punctuationStartX = MeasureHorizontalPosition(document, shape.Range.End);
-            // Word keeps Range.Start at the end of its expanded adjacent space. A signed
-            // left effect extent moves the actual drawing canvas relative to that range;
-            // a right extent changes only where following text begins.
-            var canvasLeftX = shapeRangeStartX + effect.Item1 / 12700.0;
-            var expectedCanvasLeftX = leftWordEndX + naturalLeftPt;
-            var expectedPunctuationStartX = canvasLeftX + svgWidthPt;
-            Console.WriteLine(context + " page positions: word-end=" +
-                leftWordEndX.ToString("0.###") + ", range-start=" +
-                shapeRangeStartX.ToString("0.###") + ", effect-left=" +
-                (effect.Item1 / 12700.0).ToString("0.###") + ", canvas-left=" +
-                canvasLeftX.ToString("0.###") + ", punctuation=" +
-                punctuationStartX.ToString("0.###") + ", SVG-width=" +
-                svgWidthPt.ToString("0.###"));
-            // The canvas-left equation uses the exact effect extent and remains strict.
-            // The following-character position comes from Word's Range.Information layout
-            // surface, which can differ from the exact DrawingML extent by roughly one
-            // sub-point layout quantum (0.238 pt in Office 2024 for this TNR 11 fixture).
-            Assert(effect.Item2 == 0 &&
-                   Math.Abs(canvasLeftX - expectedCanvasLeftX) < 0.08 &&
-                   Math.Abs(punctuationStartX - expectedPunctuationStartX) < 0.35,
-                context + " does not place the SVG canvas after one natural Word space " +
-                "and the following punctuation immediately after the SVG width.");
-        }
-
-        private static void RunInlineSpacingFontMatrix(WordInterop.Application word,
+        private static void RunInlineWordJoinerReuseSmoke(WordInterop.Application word,
             LaTeXBlockService service, string profile, LaTeXBlockRender render)
         {
             WordInterop.Document document = null;
             try
             {
                 document = word.Documents.Add();
-                var collapsedRender = service.RenderPreview("$E=mc^2$", 360,
-                    LaTeXBlockLayoutMode.Auto, profile, 11);
-                foreach (var fontName in new[]
+                document.Content.Font.Name = "Times New Roman";
+                document.Content.Font.Size = 16;
+
+                // An existing pair is the normal update/migration case. The plugin must
+                // reuse both characters rather than turning it into four joiners.
+                document.Content.Text = "A " + WordJoiner + "xx" + WordJoiner + " B";
+                document.Range(3, 5).Select();
+                var shape = service.InsertRendered("$E=mc^2$", 360,
+                    LaTeXBlockLayoutMode.Auto, render);
+                AssertInlineWordJoinerBoundary(shape, 2, "Existing two-sided U+2060 boundary");
+                for (var iteration = 0; iteration < 3; iteration++)
                 {
-                    "Times New Roman", "Arial", "Calibri", "Cambria", "Aptos", "Microsoft YaHei", "SimSun"
-                })
-                {
-                    document.Content.Text = "a b\rA xx B";
-                    document.Content.Font.Name = fontName;
-                    document.Content.Font.Size = 16;
-                    var leftNatural = MeasureHorizontalAdvance(document.Range(5, 6));
-                    var rightNatural = MeasureHorizontalAdvance(document.Range(8, 9));
-                    document.Range(6, 8).Select();
-                    var shape = service.InsertRendered("$E=mc^2$", 360,
-                        LaTeXBlockLayoutMode.Auto, render);
-                    var leftSpace = document.Range(shape.Range.Start - 1, shape.Range.Start);
-                    var rightSpace = document.Range(shape.Range.End, shape.Range.End + 1);
-                    var leftInline = MeasureHorizontalAdvance(leftSpace);
-                    var rightInline = MeasureHorizontalAdvance(rightSpace);
-                    var effect = ReadEffectExtent(shape.Range.WordOpenXML);
-                    var expectedLeft = Math.Max(0, leftInline - leftNatural);
-                    var expectedRight = Math.Max(0, rightInline - rightNatural);
-                    Console.WriteLine(fontName + " inline spacing derivation: natural=" +
-                        leftNatural.ToString("0.###") + "/" + rightNatural.ToString("0.###") +
-                        ", inline=" + leftInline.ToString("0.###") + "/" +
-                        rightInline.ToString("0.###") + ", expected-effect=" +
-                        expectedLeft.ToString("0.###") + "/" + expectedRight.ToString("0.###") +
-                        ", actual-effect=" + (-effect.Item1 / 12700.0).ToString("0.###") + "/" +
-                        (-effect.Item2 / 12700.0).ToString("0.###") + ", font=" +
-                        (leftSpace.Font.Name ?? "") + "/" + (rightSpace.Font.Name ?? "") +
-                        ", size=" + ((double)leftSpace.Font.Size).ToString("0.###") + "/" +
-                        ((double)rightSpace.Font.Size).ToString("0.###"));
-                    Assert(Math.Abs(-effect.Item1 / 12700.0 - expectedLeft) < 0.08 &&
-                           Math.Abs(-effect.Item2 / 12700.0 - expectedRight) < 0.08 &&
-                           leftSpace.Text == " " && rightSpace.Text == " " &&
-                           (double)leftSpace.Font.Scaling == 100 && (double)rightSpace.Font.Scaling == 100,
-                        "Inline spacing was not derived from the actual " + fontName + " space metrics.");
-                    AssertEffectiveAdjacentGaps(shape, leftNatural, rightNatural,
-                        fontName + " inline formula");
-
-                    if (fontName == "Times New Roman" || fontName == "Aptos" || fontName == "SimSun")
-                    {
-                        // Reproduce the user's ordinary caret insertion between two
-                        // prepared spaces. Word reports each touching space at roughly
-                        // twice an ordinary interword space even before the image exists,
-                        // so those two boundary advances are diagnostic values, not the
-                        // desired visual gaps. The isolated space in "What does" is an
-                        // independent same-line reference for normal running-text spacing.
-                        document.Content.Text = "What does  stand for?";
-                        document.Content.Font.Name = fontName;
-                        document.Content.Font.Size = 11;
-                        var doubleSpace = (document.Content.Text ?? string.Empty)
-                            .IndexOf("  ", StringComparison.Ordinal);
-                        Assert(doubleSpace >= 0,
-                            "The collapsed-space regression phrase lost its two U+0020 characters.");
-                        var collapsedInsertion = doubleSpace + 1;
-                        var collapsedLeftNatural = MeasureHorizontalAdvance(document.Range(
-                            collapsedInsertion - 1, collapsedInsertion));
-                        var collapsedRightNatural = MeasureHorizontalAdvance(document.Range(
-                            collapsedInsertion, collapsedInsertion + 1));
-                        var ordinaryReferenceNatural = MeasureHorizontalAdvance(document.Range(4, 5));
-                        Console.WriteLine(fontName + " collapsed-space pre-insertion: adjacent=" +
-                            collapsedLeftNatural.ToString("0.###") + "/" +
-                            collapsedRightNatural.ToString("0.###") +
-                            ", ordinary-reference=" + ordinaryReferenceNatural.ToString("0.###"));
-                        document.Range(collapsedInsertion, collapsedInsertion).Select();
-                        var collapsedShape = service.InsertRendered("$E=mc^2$", 360,
-                            LaTeXBlockLayoutMode.Auto, collapsedRender);
-                        var collapsedLeft = document.Range(collapsedShape.Range.Start - 1,
-                            collapsedShape.Range.Start);
-                        var collapsedRight = document.Range(collapsedShape.Range.End,
-                            collapsedShape.Range.End + 1);
-                        Assert(collapsedLeft.Text == " " && collapsedRight.Text == " " &&
-                               (double)collapsedLeft.Font.Scaling == 100 &&
-                               (double)collapsedRight.Font.Scaling == 100,
-                            "A collapsed insertion between spaces did not recover the natural " +
-                            fontName + " space width without modifying the document spaces.");
-                        AssertEffectiveAdjacentGaps(collapsedShape, ordinaryReferenceNatural,
-                            ordinaryReferenceNatural, fontName + " collapsed-space inline formula");
-                        AssertExactSvgDrawingExtents(collapsedShape, collapsedRender.SvgBytes,
-                            fontName + " collapsed-space inline formula");
-                    }
-
-                    if (fontName == "Times New Roman")
-                    {
-                        // Measure the expected 32pt space before removing every isolated
-                        // reference from the document. Updating the formula below must
-                        // not reinterpret the old 16pt negative extent as a 32pt natural
-                        // space merely because both remaining spaces touch the image.
-                        document.Content.Text = "a b";
-                        document.Content.Font.Name = fontName;
-                        document.Content.Font.Size = 32;
-                        var resizedNatural = MeasureHorizontalAdvance(document.Range(1, 2));
-
-                        document.Content.Text = "A xx B";
-                        document.Content.Font.Name = fontName;
-                        document.Content.Font.Size = 16;
-                        document.Range(2, 4).Select();
-                        var original = service.InsertRendered("$E=mc^2$", 360,
-                            LaTeXBlockLayoutMode.Auto, render);
-                        var originalEffect = ReadEffectExtent(original.Range.WordOpenXML);
-                        document.Content.Font.Size = 32;
-                        var resizedRender = service.RenderPreview("$E=mc^2$", 360,
-                            LaTeXBlockLayoutMode.Auto, profile, 32);
-                        var resized = service.UpdateRendered(original, "$E=mc^2$", 360,
-                            LaTeXBlockLayoutMode.Auto, resizedRender, false);
-                        var resizedLeft = document.Range(resized.Range.Start - 1, resized.Range.Start);
-                        var resizedRight = document.Range(resized.Range.End, resized.Range.End + 1);
-                        var resizedEffect = ReadEffectExtent(resized.Range.WordOpenXML);
-                        var resizedExpectedLeft = Math.Max(0,
-                            MeasureHorizontalAdvance(resizedLeft) - resizedNatural);
-                        var resizedExpectedRight = Math.Max(0,
-                            MeasureHorizontalAdvance(resizedRight) - resizedNatural);
-                        Assert(Math.Abs(-resizedEffect.Item1 / 12700.0 - resizedExpectedLeft) < 0.08 &&
-                               Math.Abs(-resizedEffect.Item2 / 12700.0 - resizedExpectedRight) < 0.08 &&
-                               (resizedEffect.Item1 != originalEffect.Item1 ||
-                                resizedEffect.Item2 != originalEffect.Item2),
-                            "A no-reference inline formula update reused its old 16pt " +
-                            "space extent after the surrounding run changed to 32pt.");
-                        AssertEffectiveAdjacentGaps(resized, resizedNatural, resizedNatural,
-                            "32 pt updated inline formula");
-                        AssertExactSvgDrawingExtents(resized, resizedRender.SvgBytes,
-                            "32 pt updated inline formula");
-                    }
+                    shape = service.UpdateRendered(shape, "$x^2$", 360,
+                        LaTeXBlockLayoutMode.Auto, render, false);
+                    AssertInlineWordJoinerBoundary(shape, 2,
+                        "Repeated U+2060-boundary update " + iteration);
                 }
+
+                // Each side is idempotent independently, so an interrupted or manually
+                // edited boundary is repaired without duplicating the side that exists.
+                document.Content.Text = "A " + WordJoiner + "xx B";
+                document.Range(3, 5).Select();
+                shape = service.InsertRendered("$E=mc^2$", 360,
+                    LaTeXBlockLayoutMode.Auto, render);
+                AssertInlineWordJoinerBoundary(shape, 2, "Existing left U+2060 boundary");
+
+                document.Content.Text = "A xx" + WordJoiner + " B";
+                document.Range(2, 4).Select();
+                shape = service.InsertRendered("$E=mc^2$", 360,
+                    LaTeXBlockLayoutMode.Auto, render);
+                AssertInlineWordJoinerBoundary(shape, 2, "Existing right U+2060 boundary");
+
+                // Two adjacent formulas share the joiner between them. This exercises
+                // the normal typing-caret path as well as the no-duplicate invariant.
+                document.Content.Text = "A B";
+                document.Range(2, 2).Select();
+                var first = service.InsertRendered("$E=mc^2$", 360,
+                    LaTeXBlockLayoutMode.Auto, render);
+                var second = service.InsertRendered("$x^2$", 360,
+                    LaTeXBlockLayoutMode.Auto, render);
+                AssertInlineWordJoinerBoundary(first, 3, "First adjacent inline formula");
+                AssertInlineWordJoinerBoundary(second, 3, "Second adjacent inline formula");
+                first = service.UpdateRendered(first, "$C_{ij}$", 360,
+                    LaTeXBlockLayoutMode.Auto, render, false);
+                AssertInlineWordJoinerBoundary(first, 3, "Updated first adjacent inline formula");
+                AssertInlineWordJoinerBoundary(second, 3, "Second adjacent inline formula after neighbor update");
+
+                // Editing an auto formula into a fixed block removes its own boundary
+                // characters. The shared middle joiner remains only while it is needed
+                // by the neighboring auto formula.
+                var fixedRender = service.RenderPreview("$E=mc^2$", 360,
+                    LaTeXBlockLayoutMode.Fixed, profile, 16);
+                first = service.UpdateRendered(first, "$E=mc^2$", 360,
+                    LaTeXBlockLayoutMode.Fixed, fixedRender, false);
+                Assert(document.Range(first.Range.Start - 1, first.Range.Start).Text != WordJoiner &&
+                       document.Range(first.Range.End, first.Range.End + 1).Text == WordJoiner &&
+                       CountOccurrences(document.Content.Text ?? string.Empty, WordJoiner) == 2,
+                    "Changing the first auto formula to Fixed did not release only its unshared U+2060 boundary.");
+                AssertInlineWordJoinerBoundary(second, 2,
+                    "Neighboring auto formula after the first formula became Fixed");
+
+                second = service.UpdateRendered(second, "$E=mc^2$", 360,
+                    LaTeXBlockLayoutMode.Fixed, fixedRender, false);
+                Assert(CountOccurrences(document.Content.Text ?? string.Empty, WordJoiner) == 0 &&
+                       document.Range(second.Range.Start - 1, second.Range.Start).Text != WordJoiner &&
+                       document.Range(second.Range.End, second.Range.End + 1).Text != WordJoiner,
+                    "Changing the last adjacent auto formula to Fixed left U+2060 boundaries behind.");
             }
             finally
             {
@@ -1129,37 +944,48 @@ namespace LaTeXBlocks.WordSmoke
             }
         }
 
-        private static void AssertEffectiveAdjacentGaps(WordInterop.InlineShape shape,
-            double leftNaturalPt, double rightNaturalPt, string context)
+        private static void AssertInlineWordJoinerBoundary(WordInterop.InlineShape shape,
+            int expectedJoinerCount, string context)
         {
-            var effect = ReadEffectExtent(shape.Range.WordOpenXML);
-            var leftSpace = shape.Range.Document.Range(shape.Range.Start - 1, shape.Range.Start);
-            var rightSpace = shape.Range.Document.Range(shape.Range.End, shape.Range.End + 1);
-            Assert(leftSpace.Text == " " && rightSpace.Text == " ",
-                context + " is no longer surrounded by the two measured U+0020 characters.");
+            var document = shape.Range.Document;
+            var left = document.Range(shape.Range.Start - 1, shape.Range.Start);
+            var right = document.Range(shape.Range.End, shape.Range.End + 1);
+            Assert(left.Text == WordJoiner && right.Text == WordJoiner,
+                context + " is not directly bounded by one U+2060 on each side.");
+            AssertZeroEffectExtent(shape, context);
 
-            var leftRawPt = MeasureHorizontalAdvance(leftSpace);
-            var rightRawPt = MeasureHorizontalAdvance(rightSpace);
-            var leftEffectivePt = leftRawPt + effect.Item1 / 12700.0;
-            var rightEffectivePt = rightRawPt + effect.Item2 / 12700.0;
-            Console.WriteLine(context + " effective spaces: natural=" +
-                leftNaturalPt.ToString("0.###") + "/" + rightNaturalPt.ToString("0.###") +
-                ", raw=" + leftRawPt.ToString("0.###") + "/" + rightRawPt.ToString("0.###") +
-                ", effect=" + (effect.Item1 / 12700.0).ToString("0.###") + "/" +
-                (effect.Item2 / 12700.0).ToString("0.###") +
-                ", effective=" + leftEffectivePt.ToString("0.###") + "/" +
-                rightEffectivePt.ToString("0.###"));
-            // Range.Information is reported on Word's 0.15 pt layout grid. Permit one
-            // such quantum only when the raw result is already no wider than the
-            // ordinary space and therefore needs no negative overlap. Any compensated
-            // positive excess remains subject to the tighter 0.08 pt regression bound.
-            var leftTolerancePt = effect.Item1 == 0 && leftRawPt <= leftNaturalPt ? 0.16 : 0.08;
-            var rightTolerancePt = effect.Item2 == 0 && rightRawPt <= rightNaturalPt ? 0.16 : 0.08;
-            Assert(effect.Item3 == 0 &&
-                   Math.Abs(leftEffectivePt - leftNaturalPt) < leftTolerancePt &&
-                   Math.Abs(rightEffectivePt - rightNaturalPt) < rightTolerancePt,
-                context + " does not preserve the pre-insertion Word space advances " +
-                "after applying its signed effect extents.");
+            var content = document.Content.Text ?? string.Empty;
+            Assert(CountOccurrences(content, WordJoiner) == expectedJoinerCount &&
+                   content.IndexOf(WordJoiner + WordJoiner, StringComparison.Ordinal) < 0,
+                context + " duplicated a U+2060 boundary character.");
+        }
+
+        private static void AssertZeroEffectExtent(WordInterop.InlineShape shape, string context)
+        {
+            var effect = Regex.Match(shape.Range.WordOpenXML,
+                "<wp:effectExtent\\b(?=[^>]*\\bl=\"(?<left>-?[0-9]+)\")" +
+                "(?=[^>]*\\bt=\"(?<top>-?[0-9]+)\")" +
+                "(?=[^>]*\\br=\"(?<right>-?[0-9]+)\")" +
+                "(?=[^>]*\\bb=\"(?<bottom>-?[0-9]+)\")[^>]*/>",
+                RegexOptions.CultureInvariant);
+            Assert(effect.Success && effect.Groups["left"].Value == "0" &&
+                   effect.Groups["top"].Value == "0" && effect.Groups["right"].Value == "0" &&
+                   effect.Groups["bottom"].Value == "0",
+                context + " retained a non-zero wp:effectExtent.");
+        }
+
+        private static int CountOccurrences(string text, string value)
+        {
+            if (string.IsNullOrEmpty(text) || string.IsNullOrEmpty(value)) return 0;
+            var count = 0;
+            for (var index = 0; index <= text.Length - value.Length;)
+            {
+                var next = text.IndexOf(value, index, StringComparison.Ordinal);
+                if (next < 0) break;
+                count++;
+                index = next + value.Length;
+            }
+            return count;
         }
 
         private static void AssertExactSvgDrawingExtents(WordInterop.InlineShape shape,
@@ -1216,19 +1042,6 @@ namespace LaTeXBlocks.WordSmoke
                 ", pic transform " + transformWidthEmu + "x" + transformHeightEmu + ").");
         }
 
-        private static Tuple<long, long, long> ReadEffectExtent(string flatOpc)
-        {
-            var effect = Regex.Match(flatOpc,
-                "<wp:effectExtent\\b(?=[^>]*\\bl=\"(?<left>-?[0-9]+)\")" +
-                "(?=[^>]*\\br=\"(?<right>-?[0-9]+)\")(?=[^>]*\\bb=\"(?<bottom>-?[0-9]+)\")[^>]*/>",
-                RegexOptions.CultureInvariant);
-            Assert(effect.Success, "The inline SVG has no readable wp:effectExtent.");
-            return Tuple.Create(
-                long.Parse(effect.Groups["left"].Value),
-                long.Parse(effect.Groups["right"].Value),
-                long.Parse(effect.Groups["bottom"].Value));
-        }
-
         private static double MeasureHorizontalAdvance(WordInterop.Range range)
         {
             var start = range.Duplicate;
@@ -1240,13 +1053,6 @@ namespace LaTeXBlocks.WordSmoke
             var endX = Convert.ToDouble(end.get_Information(
                 WordInterop.WdInformation.wdHorizontalPositionRelativeToPage));
             return endX - startX;
-        }
-
-        private static double MeasureHorizontalPosition(WordInterop.Document document, int position)
-        {
-            var caret = document.Range(position, position);
-            return Convert.ToDouble(caret.get_Information(
-                WordInterop.WdInformation.wdHorizontalPositionRelativeToPage));
         }
 
         private static void Assert(bool condition, string message)

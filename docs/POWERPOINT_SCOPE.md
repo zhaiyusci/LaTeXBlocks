@@ -1,5 +1,9 @@
 # PowerPoint Scope
 
+This document defines the intentionally narrower PowerPoint host. The common rendering architecture is described in
+[ARCHITECTURE.md](ARCHITECTURE.md); Word's inline and numbered-equation rules are specified separately in
+[OBJECT_MODEL.md](OBJECT_MODEL.md).
+
 ## Product boundary
 
 The PowerPoint host supports LaTeX Blocks only. A block is one positioned slide object whose visual content is a
@@ -54,12 +58,15 @@ Double-clicking a recognized block opens the same editor. The Ribbon also expose
 the exact stored layout width sent to StemTeX; it never includes independently stored visual scale.
 Submitting either value rerenders that block asynchronously with the requested layout width or TeX design size. If the user changes slide
 or selection before rendering finishes, the replacement remains on the block's owning slide and does not steal the
-new selection. Source changes, width changes, size changes, and global-profile changes all use the long-lived
+new selection. Source changes, width changes, size changes, and PowerPoint-profile changes all use the long-lived
 asynchronous StemTeX backend; no render is performed synchronously on PowerPoint's UI thread. Live previews are
 latest-only, while document changes are merged per block and submitted through a durable FIFO path, so formatting a
 second block cannot cancel the first. A failed horizontal reflow restores the last valid SVG geometry instead of
 leaving stretched artwork. PowerPoint's native `AfterShapeSizeChange` event is used for direct manipulation; there is
 no resize polling loop or document-wide geometry watcher.
+
+The selected profile is a PowerPoint-host preference. It is persisted independently from Word, applies to subsequent
+PowerPoint preview, insert, and rerender operations, and is not stored on individual blocks.
 
 ## Shared infrastructure
 

@@ -18,6 +18,7 @@ namespace LaTeXBlocks.Word
         private const double EquationNumberReservePt = 36.0;
         private const double EquationNumberGapPt = 6.0;
         private const double EmusPerPoint = 12700.0;
+        private const string WordJoiner = "\u2060";
         private readonly WordInterop.Application application;
         private readonly StemTeXBackend renderers;
         private readonly string cacheDirectory;
@@ -167,7 +168,6 @@ namespace LaTeXBlocks.Word
             var target = application.Selection.Range.Duplicate;
             var metadata = LaTeXBlockMetadata.Create(widthPt, render.DepthPt, mode, render.FontSizePt,
                 LaTeXBlockRole.Content);
-            var naturalSpaces = MeasureNaturalAdjacentSpaces(target, metadata);
             var document = target.Document;
             var undoStarted = false;
             var documentMutated = false;
@@ -175,7 +175,7 @@ namespace LaTeXBlocks.Word
             {
                 application.UndoRecord.StartCustomRecord("Insert LaTeX Block");
                 undoStarted = true;
-                return InsertRenderedAt(target, source, mode, render, metadata, naturalSpaces, true,
+                return InsertRenderedAt(target, source, mode, render, metadata, true,
                     () => documentMutated = true);
             }
             catch
@@ -238,8 +238,7 @@ namespace LaTeXBlocks.Word
                 document.Range(scaffoldStart, scaffoldStart).Text = leadingBreak + "\t\t()" + trailingBreak;
                 var formulaPosition = scaffoldStart + leadingBreak.Length + 1;
                 var formulaTarget = document.Range(formulaPosition, formulaPosition);
-                var shape = InsertRenderedAt(formulaTarget, source, mode, render, metadata,
-                    default(InlineSpaceAdvances), false);
+                var shape = InsertRenderedAt(formulaTarget, source, mode, render, metadata, false);
                 var fieldPosition = shape.Range.End + 2; // after the second tab and literal '('
                 var field = document.Fields.Add(document.Range(fieldPosition, fieldPosition),
                     WordInterop.WdFieldType.wdFieldSequence,
@@ -272,7 +271,7 @@ namespace LaTeXBlocks.Word
 
         private WordInterop.InlineShape InsertRenderedAt(WordInterop.Range requestedTarget, string source,
             LaTeXBlockLayoutMode mode, LaTeXBlockRender render, LaTeXBlockMetadata metadata,
-            InlineSpaceAdvances naturalSpaces, bool select,
+            bool select,
             Action markDocumentMutated = null)
         {
             var target = requestedTarget.Duplicate;
@@ -286,12 +285,10 @@ namespace LaTeXBlocks.Word
             var shape = target.InlineShapes.AddPicture(insertionPath, LinkToFile: false, SaveWithDocument: true, Range: target);
             markDocumentMutated?.Invoke();
             ApplyContract(shape, source, metadata, hostPosition);
-            var sideEffects = MeasureInlineSpaceEffectExtents(shape, metadata, naturalSpaces);
-            shape = NormalizeWordInlineDrawing(shape, sideEffects, svgSize);
+            shape = NormalizeWordInlineDrawing(shape, svgSize);
+            EnsureInlineWordJoinerBoundaries(shape, metadata);
             ApplyHostRunFormat(shape, metadata, hostPosition);
-            shape = ReconcileInsertedInlineSpaceEffectExtents(shape, metadata, naturalSpaces,
-                sideEffects, svgSize, hostPosition);
-            if (select) MoveCaretAfterRange(shape.Range);
+            if (select) MoveCaretAfterInlineFormula(shape, metadata);
             return shape;
         }
 
@@ -409,9 +406,8 @@ namespace LaTeXBlocks.Word
             var target = oldShape.Range.Duplicate;
             var metadata = new LaTeXBlockMetadata(previous.Id, widthPt, render.DepthPt, mode, render.FontSizePt,
                 previous.Role);
+            var previousUsesInlineWordJoinerBoundaries = UsesInlineWordJoinerBoundaries(previous);
             var hostPosition = ResolveHostBaselinePosition(oldShape, previous);
-            var naturalSpaces = ResolveUpdatedNaturalAdjacentSpaces(oldShape, previous);
-            var sideEffects = MeasureInlineSpaceEffectExtents(oldShape, previous, naturalSpaces);
             var svgSize = ReadSvgPhysicalSize(render.SvgBytes);
             target.Collapse(WordInterop.WdCollapseDirection.wdCollapseStart);
             WordInterop.InlineShape replacement = null;
@@ -431,13 +427,20 @@ namespace LaTeXBlocks.Word
                 replacement = target.InlineShapes.AddPicture(insertionPath, LinkToFile: false, SaveWithDocument: true, Range: target);
                 documentMutated = true;
                 ApplyContract(replacement, source, metadata, hostPosition);
-                replacement = NormalizeWordInlineDrawing(replacement, sideEffects, svgSize);
-                ApplyHostRunFormat(replacement, metadata, hostPosition);
+                replacement = NormalizeWordInlineDrawing(replacement, svgSize);
                 oldShape.Delete();
+                // The replacement is initially inserted beside the old image. Delete the
+                // old image before ensuring the invisible boundaries so its existing
+                // U+2060 wrappers are reused rather than duplicated.
+                if (UsesInlineWordJoinerBoundaries(metadata))
+                    EnsureInlineWordJoinerBoundaries(replacement, metadata);
+                else if (previousUsesInlineWordJoinerBoundaries)
+                    RemoveInlineWordJoinerBoundaries(replacement);
+                ApplyHostRunFormat(replacement, metadata, hostPosition);
                 if (selectReplacement)
                 {
                     if (numbered) MoveCaretAfterNumberedEquation(numberedField);
-                    else MoveCaretAfterRange(replacement.Range);
+                    else MoveCaretAfterInlineFormula(replacement, metadata);
                 }
                 return replacement;
             }
@@ -924,6 +927,85 @@ namespace LaTeXBlocks.Word
             caret.Select();
         }
 
+        private static bool UsesInlineWordJoinerBoundaries(LaTeXBlockMetadata metadata)
+        {
+            return metadata != null && metadata.Mode == LaTeXBlockLayoutMode.Auto &&
+                   metadata.Role == LaTeXBlockRole.Content;
+        }
+
+        private static void EnsureInlineWordJoinerBoundaries(WordInterop.InlineShape shape,
+            LaTeXBlockMetadata metadata)
+        {
+            if (!UsesInlineWordJoinerBoundaries(metadata)) return;
+
+            // The order matters during an update: when the old image is deleted its
+            // trailing joiner can become the new image's trailing joiner. Check each
+            // immediate neighbor before inserting anything, and never coalesce joiners
+            // that were already present in the user's document.
+            EnsureInlineWordJoiner(shape, false);
+            EnsureInlineWordJoiner(shape, true);
+        }
+
+        private static void EnsureInlineWordJoiner(WordInterop.InlineShape shape, bool before)
+        {
+            if (IsWordJoiner(AdjacentCharacter(shape.Range, before))) return;
+            var insertion = shape.Range.Duplicate;
+            insertion.Collapse(before
+                ? WordInterop.WdCollapseDirection.wdCollapseStart
+                : WordInterop.WdCollapseDirection.wdCollapseEnd);
+            insertion.Text = WordJoiner;
+        }
+
+        private static void RemoveInlineWordJoinerBoundaries(WordInterop.InlineShape shape)
+        {
+            // A former auto formula may be edited into a fixed-width block. Remove the
+            // boundary characters that belonged only to it, but preserve a joiner that
+            // is simultaneously the boundary of an immediately adjacent auto formula.
+            RemoveInlineWordJoiner(shape, false);
+            RemoveInlineWordJoiner(shape, true);
+        }
+
+        private static void RemoveInlineWordJoiner(WordInterop.InlineShape shape, bool before)
+        {
+            var joiner = AdjacentCharacter(shape.Range, before);
+            if (!IsWordJoiner(joiner)) return;
+
+            var adjacentShapePosition = before ? joiner.Start - 1 : joiner.End;
+            if (IsAutoContentShapeAt(joiner.Document, adjacentShapePosition)) return;
+            joiner.Delete();
+        }
+
+        private static bool IsAutoContentShapeAt(WordInterop.Document document, int position)
+        {
+            if (document == null || position < document.Content.Start || position >= document.Content.End)
+                return false;
+            var candidate = document.Range(position, position + 1);
+            return candidate.InlineShapes.Count == 1 &&
+                   TryReadContract(candidate.InlineShapes[1], out var metadata, out _) &&
+                   UsesInlineWordJoinerBoundaries(metadata);
+        }
+
+        private static bool IsWordJoiner(WordInterop.Range character)
+        {
+            return character != null && string.Equals(character.Text, WordJoiner,
+                StringComparison.Ordinal);
+        }
+
+        private static void MoveCaretAfterInlineFormula(WordInterop.InlineShape shape,
+            LaTeXBlockMetadata metadata)
+        {
+            if (UsesInlineWordJoinerBoundaries(metadata))
+            {
+                var trailingJoiner = AdjacentCharacter(shape.Range, false);
+                if (IsWordJoiner(trailingJoiner))
+                {
+                    MoveCaretAfterRange(trailingJoiner);
+                    return;
+                }
+            }
+            MoveCaretAfterRange(shape.Range);
+        }
+
         private static void MoveCaretAfterNumberedEquation(WordInterop.Field field)
         {
             // A Word field occupies code/result delimiter characters that are not in
@@ -938,132 +1020,6 @@ namespace LaTeXBlocks.Word
             MoveCaretAfterRange(caret);
         }
 
-        private static InlineSpaceAdvances MeasureNaturalAdjacentSpaces(WordInterop.Range target,
-            LaTeXBlockMetadata metadata)
-        {
-            if (metadata.Mode != LaTeXBlockLayoutMode.Auto || metadata.Role != LaTeXBlockRole.Content)
-                return default(InlineSpaceAdvances);
-
-            var measured = new InlineSpaceAdvances(
-                MeasureNaturalSpaceBeforeInsertion(AdjacentCharacter(target, true)),
-                MeasureNaturalSpaceBeforeInsertion(AdjacentCharacter(target, false)));
-            return measured;
-        }
-
-        private static double MeasureNaturalSpaceBeforeInsertion(WordInterop.Range space)
-        {
-            if (!IsUnmodifiedOrdinarySpace(space)) return 0;
-            // A lone U+0020 has the natural advance we want to preserve. Two touching
-            // spaces are different: Word expands their Range.Information geometry before
-            // the formula even exists (for example, 5.40 pt instead of a 2.70 pt Times
-            // New Roman space at 11 pt). Use an equivalent isolated space or the same
-            // formatting in a scratch document for that collapsed-insertion case.
-            if (!HasInlineShapeNeighbor(space) && !HasOrdinarySpaceNeighbor(space) &&
-                TryMeasureHorizontalAdvance(space, out var directWidth))
-                return directWidth;
-            var referenceWidth = FindMatchingNaturalSpaceAdvance(space);
-            return referenceWidth > 0 ? referenceWidth : MeasureNaturalSpaceInScratchDocument(space);
-        }
-
-        private static InlineEffectExtents MeasureInlineSpaceEffectExtents(WordInterop.InlineShape shape,
-            LaTeXBlockMetadata metadata, InlineSpaceAdvances naturalSpaces)
-        {
-            if (metadata.Mode != LaTeXBlockLayoutMode.Auto || metadata.Role != LaTeXBlockRole.Content)
-                return default(InlineEffectExtents);
-
-            var left = AdjacentCharacter(shape.Range, true);
-            var right = AdjacentCharacter(shape.Range, false);
-            var measured = new InlineEffectExtents(
-                MeasureInlineSpaceExcess(left, naturalSpaces.LeftPt),
-                MeasureInlineSpaceExcess(right, naturalSpaces.RightPt));
-            return measured;
-        }
-
-        private static WordInterop.InlineShape ReconcileInsertedInlineSpaceEffectExtents(
-            WordInterop.InlineShape shape, LaTeXBlockMetadata metadata,
-            InlineSpaceAdvances preInsertionNaturalSpaces, InlineEffectExtents written,
-            SvgPhysicalSize svgSize, int hostPosition)
-        {
-            if (metadata.Mode != LaTeXBlockLayoutMode.Auto || metadata.Role != LaTeXBlockRole.Content)
-                return shape;
-
-            // The first pass preserves the exact pre-insertion space whenever Word exposes
-            // its geometry. Validate that result against the final DrawingML object as a
-            // postcondition. In a real interactive insertion Word can occasionally make the
-            // pre-insertion geometry unavailable even though the completed inline shape is
-            // measurable; in that case the first pass legitimately writes zero. Recover only
-            // those unavailable sides from an equivalent same-line space, the persisted extent,
-            // or the formatted scratch sample. A scratch sample is not allowed to replace an
-            // exact pre-insertion measurement: Word's contextual layout can give two spaces in
-            // the same formatted run slightly different advances (Arial around an "A xx B"
-            // fixture is one example). Rewrite only when the final measured effect differs, so
-            // the ordinary insertion path still performs one XML normalization and never waits,
-            // polls, or schedules document work.
-            var recoveredNaturalSpaces = ResolveUpdatedNaturalAdjacentSpaces(shape, metadata);
-            var finalNaturalSpaces = new InlineSpaceAdvances(
-                preInsertionNaturalSpaces.LeftPt > 0
-                    ? preInsertionNaturalSpaces.LeftPt
-                    : recoveredNaturalSpaces.LeftPt,
-                preInsertionNaturalSpaces.RightPt > 0
-                    ? preInsertionNaturalSpaces.RightPt
-                    : recoveredNaturalSpaces.RightPt);
-            var finalEffects = MeasureInlineSpaceEffectExtents(shape, metadata, finalNaturalSpaces);
-            if (finalEffects.LeftEmu == written.LeftEmu && finalEffects.RightEmu == written.RightEmu)
-                return shape;
-
-            shape = NormalizeWordInlineDrawing(shape, finalEffects, svgSize);
-            ApplyHostRunFormat(shape, metadata, hostPosition);
-            return shape;
-        }
-
-        private static InlineSpaceAdvances ResolveUpdatedNaturalAdjacentSpaces(
-            WordInterop.InlineShape shape, LaTeXBlockMetadata metadata)
-        {
-            if (metadata.Mode != LaTeXBlockLayoutMode.Auto || metadata.Role != LaTeXBlockRole.Content)
-                return default(InlineSpaceAdvances);
-
-            var existing = ReadInlineEffectExtents(shape.Range.WordOpenXML);
-            return new InlineSpaceAdvances(
-                ResolveUpdatedNaturalSpaceAdvance(AdjacentCharacter(shape.Range, true), existing.LeftEmu),
-                ResolveUpdatedNaturalSpaceAdvance(AdjacentCharacter(shape.Range, false), existing.RightEmu));
-        }
-
-        private static double ResolveUpdatedNaturalSpaceAdvance(WordInterop.Range space, long existingEmu)
-        {
-            if (!IsUnmodifiedOrdinarySpace(space)) return 0;
-            if (!TryMeasureHorizontalAdvance(space, out var inlineWidthPt))
-            {
-                var fallback = FindMatchingNaturalSpaceAdvance(space);
-                return fallback > 0 ? fallback : MeasureNaturalSpaceInScratchDocument(space);
-            }
-
-            var persistedNaturalWidthPt = existingEmu < 0
-                ? inlineWidthPt + existingEmu / EmusPerPoint
-                : 0;
-            var referenceWidthPt = FindMatchingNaturalSpaceAdvance(space);
-            // A real same-line space with identical formatting is authoritative. In
-            // particular, it repairs documents whose older extent persisted an incorrect
-            // proxy width even when the font size itself has not changed.
-            if (referenceWidthPt > 0) return referenceWidthPt;
-
-            // Persisted extents describe the old formatted space. They are a useful
-            // guard against Word's sub-point layout quantization for an unchanged
-            // edit, but they cannot reveal that the surrounding run changed font or
-            // size. With no isolated reference on this line, remeasure the current
-            // formatting in the scratch document and retain the persisted value only
-            // when both measurements still agree within one layout quantum.
-            referenceWidthPt = MeasureNaturalSpaceInScratchDocument(space);
-            var naturalWidthPt = persistedNaturalWidthPt;
-            // Range.Information is quantized by Word's layout surface. Preserve the
-            // side-specific persisted value across an ordinary edit when a nearby
-            // reference differs only by one layout quantum; use the reference when a
-            // real font/size change makes the difference material.
-            if (referenceWidthPt > 0 && (naturalWidthPt <= 0 ||
-                Math.Abs(referenceWidthPt - naturalWidthPt) > 0.35))
-                naturalWidthPt = referenceWidthPt;
-            return naturalWidthPt;
-        }
-
         private static WordInterop.Range AdjacentCharacter(WordInterop.Range shapeRange, bool before)
         {
             var adjacent = shapeRange.Duplicate;
@@ -1076,186 +1032,8 @@ namespace LaTeXBlocks.Word
             return Math.Abs(moved) == 1 ? adjacent : null;
         }
 
-        private static bool IsUnmodifiedOrdinarySpace(WordInterop.Range space)
-        {
-            if (space == null || space.Text != " ") return false;
-            var scaling = (double)space.Font.Scaling;
-            var spacing = (double)space.Font.Spacing;
-            return Math.Abs(scaling - 100) < 0.001 && Math.Abs(spacing) < 0.001;
-        }
-
-        private static long MeasureInlineSpaceExcess(WordInterop.Range space, double naturalWidthPt)
-        {
-            if (!(naturalWidthPt > 0) || !IsUnmodifiedOrdinarySpace(space) ||
-                !TryMeasureHorizontalAdvance(space, out var inlineWidthPt)) return 0;
-
-            var excessPt = inlineWidthPt - naturalWidthPt;
-            if (excessPt <= 0.05) return 0;
-            var fontSizePt = (double)space.Font.Size;
-            if (fontSizePt >= 1 && fontSizePt <= 200 && excessPt > fontSizePt) return 0;
-
-            // Word usually expands a U+0020 next to an InlineShape toward a half-em,
-            // but the ordinary width is font-dependent. Absorb only the measured delta
-            // from this exact formatted space; never assume a fixed ratio or point value.
-            return -(long)Math.Round(excessPt * EmusPerPoint, MidpointRounding.AwayFromZero);
-        }
-
-        private static double FindMatchingNaturalSpaceAdvance(WordInterop.Range space)
-        {
-            if (!IsUnmodifiedOrdinarySpace(space)) return 0;
-            try
-            {
-                var paragraph = space.Paragraphs[1].Range.Duplicate;
-                var first = Math.Max(paragraph.Start, space.Start - 512);
-                var last = Math.Min(paragraph.End, space.End + 512);
-                var page = Convert.ToInt32(space.Information[
-                    WordInterop.WdInformation.wdActiveEndPageNumber]);
-                var line = Convert.ToInt32(space.Information[
-                    WordInterop.WdInformation.wdFirstCharacterLineNumber]);
-                var candidate = paragraph.Duplicate;
-                var bestDistance = int.MaxValue;
-                var bestWidthPt = 0.0;
-                for (var position = first; position < last; position++)
-                {
-                    candidate.SetRange(position, position + 1);
-                    if (candidate.Start == space.Start || candidate.Text != " " ||
-                        HasInlineShapeNeighbor(candidate) || HasOrdinarySpaceNeighbor(candidate) ||
-                        !HasEquivalentSpaceMetrics(space, candidate)) continue;
-                    if (Convert.ToInt32(candidate.Information[
-                            WordInterop.WdInformation.wdActiveEndPageNumber]) != page ||
-                        Convert.ToInt32(candidate.Information[
-                            WordInterop.WdInformation.wdFirstCharacterLineNumber]) != line) continue;
-                    var distance = Math.Abs(position - space.Start);
-                    if (distance < bestDistance && TryMeasureHorizontalAdvance(candidate, out var widthPt) &&
-                        widthPt > 0)
-                    {
-                        bestDistance = distance;
-                        bestWidthPt = widthPt;
-                    }
-                }
-                return bestWidthPt;
-            }
-            catch (COMException) { }
-            return 0;
-        }
-
-        private static double MeasureNaturalSpaceInScratchDocument(WordInterop.Range formattedSpace)
-        {
-            WordInterop.Document scratch = null;
-            WordInterop.Document host = null;
-            try
-            {
-                host = formattedSpace.Document;
-                scratch = formattedSpace.Application.Documents.Add(Visible: false);
-                var sample = scratch.Range(0, 0);
-                sample.Text = "a b";
-                sample.Font = formattedSpace.Font.Duplicate;
-                sample.Font.Position = 0;
-                sample.ParagraphFormat.Alignment = WordInterop.WdParagraphAlignment.wdAlignParagraphLeft;
-                var sampleSpace = scratch.Range(1, 2);
-                return TryMeasureHorizontalAdvance(sampleSpace, out var widthPt) ? widthPt : 0;
-            }
-            catch (COMException)
-            {
-                return 0;
-            }
-            finally
-            {
-                if (scratch != null)
-                    try { scratch.Close(WordInterop.WdSaveOptions.wdDoNotSaveChanges); } catch { }
-                if (host != null)
-                    try { host.Activate(); } catch { }
-            }
-        }
-
-        private static bool HasInlineShapeNeighbor(WordInterop.Range range)
-        {
-            var left = AdjacentCharacter(range, true);
-            var right = AdjacentCharacter(range, false);
-            return (left != null && left.InlineShapes.Count > 0) ||
-                   (right != null && right.InlineShapes.Count > 0);
-        }
-
-        private static bool HasOrdinarySpaceNeighbor(WordInterop.Range range)
-        {
-            var left = AdjacentCharacter(range, true);
-            var right = AdjacentCharacter(range, false);
-            return (left != null && left.Text == " ") || (right != null && right.Text == " ");
-        }
-
-        private static bool HasEquivalentSpaceMetrics(WordInterop.Range first, WordInterop.Range second)
-        {
-            try
-            {
-                return Math.Abs((double)first.Font.Size - (double)second.Font.Size) < 0.001 &&
-                       (int)first.Font.Bold == (int)second.Font.Bold &&
-                       (int)first.Font.Italic == (int)second.Font.Italic &&
-                       (int)first.Font.Scaling == (int)second.Font.Scaling &&
-                       Math.Abs((double)first.Font.Spacing - (double)second.Font.Spacing) < 0.001 &&
-                       first.LanguageID == second.LanguageID &&
-                       first.LanguageIDFarEast == second.LanguageIDFarEast &&
-                       string.Equals(first.Font.Name, second.Font.Name, StringComparison.Ordinal) &&
-                       string.Equals(first.Font.NameAscii, second.Font.NameAscii, StringComparison.Ordinal) &&
-                       string.Equals(first.Font.NameFarEast, second.Font.NameFarEast, StringComparison.Ordinal);
-            }
-            catch (COMException)
-            {
-                return false;
-            }
-        }
-
-        private static InlineEffectExtents ReadInlineEffectExtents(string flatOpc)
-        {
-            var effect = Regex.Match(flatOpc ?? string.Empty,
-                "<wp:effectExtent\\b[^>]*/>", RegexOptions.CultureInvariant);
-            if (!effect.Success) return default(InlineEffectExtents);
-            return new InlineEffectExtents(
-                ReadLongXmlAttribute(effect.Value, "l"),
-                ReadLongXmlAttribute(effect.Value, "r"));
-        }
-
-        private static long ReadLongXmlAttribute(string element, string attribute)
-        {
-            var match = Regex.Match(element, "\\b" + Regex.Escape(attribute) + "=\"(?<value>-?[0-9]+)\"",
-                RegexOptions.CultureInvariant);
-            return match.Success && long.TryParse(match.Groups["value"].Value,
-                NumberStyles.Integer, CultureInfo.InvariantCulture, out var value) ? value : 0;
-        }
-
-        private static bool TryMeasureHorizontalAdvance(WordInterop.Range range, out double widthPt)
-        {
-            widthPt = 0;
-            try
-            {
-                var start = range.Duplicate;
-                start.Collapse(WordInterop.WdCollapseDirection.wdCollapseStart);
-                var end = range.Duplicate;
-                end.Collapse(WordInterop.WdCollapseDirection.wdCollapseEnd);
-                var startPage = Convert.ToInt32(start.Information[
-                    WordInterop.WdInformation.wdActiveEndPageNumber]);
-                var endPage = Convert.ToInt32(end.Information[
-                    WordInterop.WdInformation.wdActiveEndPageNumber]);
-                var startY = Convert.ToDouble(start.Information[
-                    WordInterop.WdInformation.wdVerticalPositionRelativeToPage]);
-                var endY = Convert.ToDouble(end.Information[
-                    WordInterop.WdInformation.wdVerticalPositionRelativeToPage]);
-                var startX = Convert.ToDouble(start.Information[
-                    WordInterop.WdInformation.wdHorizontalPositionRelativeToPage]);
-                var endX = Convert.ToDouble(end.Information[
-                    WordInterop.WdInformation.wdHorizontalPositionRelativeToPage]);
-                if (startPage != endPage || startX < 0 || endX < 0 || startY < 0 || endY < 0 ||
-                    Math.Abs(startY - endY) > 0.5 || endX <= startX) return false;
-                widthPt = endX - startX;
-                return true;
-            }
-            catch (COMException)
-            {
-                return false;
-            }
-        }
-
         private static WordInterop.InlineShape NormalizeWordInlineDrawing(WordInterop.InlineShape shape,
-            InlineEffectExtents sides, SvgPhysicalSize size)
+            SvgPhysicalSize size)
         {
             // Word imports the SVG through a CSS-pixel-sized drawing canvas. Its COM Width
             // and Height therefore lose the sub-pixel part of dvisvgm's physical point
@@ -1264,19 +1042,20 @@ namespace LaTeXBlocks.Word
             // picture transform. This is vector geometry expressed in EMUs; no DPI is
             // involved after this correction.
             //
-            // Word also expands an ordinary U+0020 immediately next to an InlineShape.
-            // Signed left/right effect extents absorb only the measured excess. Host-only
-            // effect extent on the bottom is cleared because it is not part of the SVG or
-            // the TeX box. Reinsert the otherwise unchanged Flat OPC package, preserving
-            // the SVG relationship, PNG fallback, metadata, and TeX depth.
+            // The SVG is a faithful TeX box. All effect extents are host-side drawing
+            // margins, so they must be zero; U+2060 boundary characters handle Word's
+            // adjacent-space behavior for ordinary inline formulas. Reinsert the
+            // otherwise unchanged Flat OPC package, preserving the SVG relationship,
+            // PNG fallback, metadata, and TeX depth.
             var flatOpc = shape.Range.WordOpenXML;
             var effect = Regex.Match(flatOpc,
                 "<wp:effectExtent\\b[^>]*/>", RegexOptions.CultureInvariant);
             if (!effect.Success)
                 throw new InvalidDataException("Word inline SVG has no wp:effectExtent element.");
 
-            var normalizedEffect = SetXmlAttribute(effect.Value, "l", sides.LeftEmu);
-            normalizedEffect = SetXmlAttribute(normalizedEffect, "r", sides.RightEmu);
+            var normalizedEffect = SetXmlAttribute(effect.Value, "l", 0);
+            normalizedEffect = SetXmlAttribute(normalizedEffect, "t", 0);
+            normalizedEffect = SetXmlAttribute(normalizedEffect, "r", 0);
             normalizedEffect = SetXmlAttribute(normalizedEffect, "b", 0);
             var patched = flatOpc.Remove(effect.Index, effect.Length)
                 .Insert(effect.Index, normalizedEffect);
@@ -1361,30 +1140,6 @@ namespace LaTeXBlocks.Word
                 match => match.Groups[1].Value + value.ToString(CultureInfo.InvariantCulture) +
                          match.Groups[2].Value,
                 RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
-        }
-
-        private struct InlineEffectExtents
-        {
-            internal InlineEffectExtents(long leftEmu, long rightEmu)
-            {
-                LeftEmu = leftEmu;
-                RightEmu = rightEmu;
-            }
-
-            internal long LeftEmu { get; }
-            internal long RightEmu { get; }
-        }
-
-        private struct InlineSpaceAdvances
-        {
-            internal InlineSpaceAdvances(double leftPt, double rightPt)
-            {
-                LeftPt = leftPt;
-                RightPt = rightPt;
-            }
-
-            internal double LeftPt { get; }
-            internal double RightPt { get; }
         }
 
         private struct SvgPhysicalSize

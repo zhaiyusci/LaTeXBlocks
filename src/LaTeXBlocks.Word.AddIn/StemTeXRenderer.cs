@@ -377,9 +377,11 @@ namespace LaTeXBlocks.Word
                 // glyph/rule ink bounds. Crop to their union with the logical TeX box.
                 // This removes preview.sty's generic 1pt horizontal page border while
                 // retaining genuine accents, operators, rules, and glyph overhangs.
-                const double vectorSafetyPt = 0.05;
-                var croppedX = Math.Min(startX, inkLeft) - vectorSafetyPt;
-                var croppedRight = Math.Max(endX, inkRight) + vectorSafetyPt;
+                // Do not add a renderer-side safety margin: an inline formula is a
+                // faithful TeX box, and its only horizontal space is either part of
+                // the user's TeX source or required by real ink outside that box.
+                var croppedX = Math.Min(startX, inkLeft);
+                var croppedRight = Math.Max(endX, inkRight);
                 var croppedWidth = croppedRight - croppedX;
                 var number = System.Globalization.CultureInfo.InvariantCulture;
                 var newViewBox = "viewBox='" + croppedX.ToString("0.######", number) + " " +

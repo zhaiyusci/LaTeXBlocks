@@ -13,7 +13,10 @@ namespace LaTeXBlocks.PowerPoint
 {
     public partial class ThisAddIn
     {
-        private const string SettingsKey = @"Software\LaTeXBlocks";
+        // A profile is a host-level preference: selecting a PowerPoint profile
+        // must not change the one Word starts with.
+        private const string SettingsKey = @"Software\LaTeXBlocks\PowerPoint";
+        private const string LegacySettingsKey = @"Software\LaTeXBlocks";
         private StemTeXBackend rendererPool;
         private PowerPointBlockService blocks;
         private string currentProfile;
@@ -466,6 +469,11 @@ namespace LaTeXBlocks.PowerPoint
             string saved = null;
             using (var key = Registry.CurrentUser.OpenSubKey(SettingsKey))
                 saved = key?.GetValue("Profile") as string;
+            // Upgrade from the former shared preference once. Subsequent saves
+            // always go to PowerPoint's own key and can no longer affect Word.
+            if (string.IsNullOrWhiteSpace(saved))
+                using (var key = Registry.CurrentUser.OpenSubKey(LegacySettingsKey))
+                    saved = key?.GetValue("Profile") as string;
             foreach (var profile in pool.Profiles)
                 if (string.Equals(profile, saved, StringComparison.OrdinalIgnoreCase))
                     return profile;

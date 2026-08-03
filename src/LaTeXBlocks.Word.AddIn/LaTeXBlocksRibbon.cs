@@ -10,6 +10,9 @@ namespace LaTeXBlocks.Word
     public sealed class LaTeXBlocksRibbon : Office.IRibbonExtensibility
     {
         internal const string WidthControlId = "LaTeXBlocks.WidthPt";
+        // EditText is Office's standard pencil/text-edit glyph and is available
+        // in both Word and PowerPoint Ribbon hosts.
+        internal const string EditBlockImageMso = "EditText";
         private readonly ThisAddIn addIn;
         private Office.IRibbonUI ribbonUi;
 
@@ -28,7 +31,8 @@ namespace LaTeXBlocks.Word
                    "<button id=\"LaTeXBlocks.InsertFormula\" label=\"Insert Formula\" size=\"large\" imageMso=\"EquationInsertNew\" onAction=\"OnInsertFormula\"/>" +
                    "<button id=\"LaTeXBlocks.InsertBlock\" label=\"Insert Block\" size=\"large\" imageMso=\"TextBoxInsert\" onAction=\"OnInsertBlock\"/>" +
                    "<button id=\"LaTeXBlocks.InsertNumberedEquation\" label=\"Numbered Equation\" size=\"large\" imageMso=\"CaptionInsert\" onAction=\"OnInsertNumberedEquation\"/>" +
-                   "<button id=\"LaTeXBlocks.Edit\" label=\"Edit Block\" size=\"large\" imageMso=\"ObjectEdit\" onAction=\"OnEdit\"/>" +
+                   "<button id=\"LaTeXBlocks.Edit\" label=\"Edit Block\" size=\"large\" imageMso=\"" +
+                   EditBlockImageMso + "\" onAction=\"OnEdit\"/>" +
                    "<button id=\"LaTeXBlocks.UpdateEquationNumbers\" label=\"Update Numbers\" imageMso=\"FieldsUpdate\" onAction=\"OnUpdateEquationNumbers\"/>" +
                    "<editBox id=\"" + WidthControlId +
                    "\" label=\"Typesetting width (pt)\" sizeString=\"000.0\" getText=\"GetWidthText\" getEnabled=\"GetWidthEnabled\" onChange=\"OnWidthChanged\"/>" +

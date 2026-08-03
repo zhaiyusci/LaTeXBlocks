@@ -1,0 +1,23 @@
+# Samples keep their reproducible source and explanatory Markdown, not generated Office proofs or build output.
+**/bin/
+**/obj/
+**/artifacts/
+**/qa/
+**/__pycache__/
+
+*.docx
+*.pdf
+*.png
+*.ttf
+*.odttf
+*.exe
+*.pdb
+*.cache
+*.aux
+*.log
+*.xdv
+*.synctex.gz
+
+font-glyph-spike/formula-glyph-metrics.json
+font-glyph-persistence/results.txt
+font-glyph-persistence/error.txt
