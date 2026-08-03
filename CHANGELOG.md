@@ -5,6 +5,27 @@ Word-and-PowerPoint package line.
 
 ## [Unreleased]
 
+## [0.2.22] — 2026-08-04
+
+### PowerPoint
+
+- Bundled a corrected StemTeX worker template for full-width request content: the worker now suppresses its own outer
+  paragraph indentation before starting the request minipage.
+- Moved PowerPoint block padding, background, border, and vertical placement out of TeX boxes and into the final SVG
+  shell. Typography (leading and text color) remains in TeX. SVG borders are four in-viewport filled strips, so the
+  trailing edge cannot be clipped by a centered stroke or an incorrect TeX box viewport.
+- Added a regression check that verifies every generated frame rectangle fits inside the emitted SVG `viewBox`.
+
+## [0.2.16] — 2026-08-04
+
+### Reliability
+
+- PowerPoint now defers the embedded preview browser until the Ribbon callback has returned and retries transient OLE
+  `RPC_E_SERVERCALL_RETRYLATER` / call-rejected responses. A temporarily busy PowerPoint instance no longer reports a
+  successful TeX render as a preview failure.
+
+## [0.2.15] — 2026-08-04
+
 ### PowerPoint
 
 - Unified every native PowerPoint resize handle under one host-frame contract. Every actual size change now queues a
@@ -13,6 +34,9 @@ Word-and-PowerPoint package line.
   stretched or cropped.
 - Removed the `VisualScale` concept entirely. Actual formula size is controlled only by **TeX size (pt)** and always
   rerenders.
+- Added per-block styling in the PowerPoint editor: ordinary-paragraph line spacing, uniform padding,
+  Top/Middle/Bottom placement, text color, background fill, and border color/width. The original author source
+  remains in Alternative Text.
 
 ## [0.2.14] — 2026-08-03
 

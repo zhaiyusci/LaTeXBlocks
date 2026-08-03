@@ -1,7 +1,10 @@
 using System;
 using System.Diagnostics;
+using System.Drawing;
+using System.Globalization;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Text;
 using LaTeXBlocks.PowerPoint;
 using Office = Microsoft.Office.Core;
 using PowerPointInterop = Microsoft.Office.Interop.PowerPoint;
@@ -46,6 +49,13 @@ namespace LaTeXBlocks.PowerPointSmoke
                    !PowerPointRibbonContract.TryParseFontSize("0", out _) &&
                    !PowerPointRibbonContract.TryParseFontSize("not-a-size", out _),
                 "The PowerPoint TeX font-size control did not validate point sizes.");
+            Assert(LaTeXBlockEditorForm.IsTransientPreviewNavigationFailure(
+                       new COMException("busy", unchecked((int)0x8001010A))) &&
+                   LaTeXBlockEditorForm.IsTransientPreviewNavigationFailure(
+                       new COMException("rejected", unchecked((int)0x80010001))) &&
+                   !LaTeXBlockEditorForm.IsTransientPreviewNavigationFailure(
+                       new COMException("other", unchecked((int)0x80004005))),
+                "The PowerPoint preview did not classify OLE busy responses as retryable.");
             Assert(ribbonXml.IndexOf(PowerPointRibbonContract.LayoutWidthControlId,
                        StringComparison.Ordinal) >= 0 &&
                    PowerPointRibbonContract.TryParseLayoutWidthPt("360.5",
@@ -179,6 +189,127 @@ namespace LaTeXBlocks.PowerPointSmoke
                     PowerPointBlockService.ReadSvgWidthPt(render.SvgBytes),
                     PowerPointBlockService.ReadSvgHeightPt(render.SvgBytes),
                     "The inserted PowerPoint block");
+                // TeX owns content colour and leading. The SVG owns padding, fill,
+                // border and vertical placement; PowerPoint still receives one
+                // ordinary picture whose author-facing source remains unchanged.
+                const string styledSource = "First styled line.\\par Second styled line with $E=mc^2$.";
+                var styledStyle = new LaTeXBlockStyle(1.5, 8,
+                    LaTeXBlockVerticalAlignment.Middle, Color.FromArgb(24, 55, 102),
+                    true, Color.FromArgb(241, 245, 255), 1.25,
+                    Color.FromArgb(51, 98, 162));
+                Assert(LaTeXBlockStyle.ReadFromTag(styledStyle.ToString()).Equals(styledStyle) &&
+                       LaTeXBlockStyle.ReadFromTag(null).Equals(LaTeXBlockStyle.Default) &&
+                       LaTeXBlockStyle.ReadFromTag("LaTeXBlocksStyle/1;leading=not-a-number;" +
+                           "padding=not-a-number;border=not-a-number")
+                           .Equals(LaTeXBlockStyle.Default),
+                    "PowerPoint TeX style tags did not round-trip or safely recover from malformed values.");
+                var styledWrapper = styledStyle.WrapSource(styledSource, inheritedSize);
+                Assert(styledWrapper.IndexOf("\\global\\PreviewBorder=0pt",
+                           StringComparison.Ordinal) >= 0 &&
+                       styledWrapper.IndexOf("\\renewcommand{\\baselinestretch}{1.5}",
+                           StringComparison.Ordinal) >= 0 &&
+                       styledWrapper.IndexOf("\\fbox", StringComparison.Ordinal) < 0 &&
+                       styledWrapper.IndexOf("\\colorbox", StringComparison.Ordinal) < 0 &&
+                       styledWrapper.IndexOf("\\vbox to ", StringComparison.Ordinal) < 0 &&
+                       styledWrapper.IndexOf(styledSource, StringComparison.Ordinal) >= 0,
+                    "The PowerPoint TeX wrapper still contains outer-box styling.");
+                var styledRender = service.RenderPreviewAsync(styledSource, 288, profile,
+                    inheritedSize, styledStyle, 126).GetAwaiter().GetResult();
+                Assert(styledRender.SvgBytes.Length > 0,
+                    "StemTeX could not render a PowerPoint TeX-styled block.");
+                Assert(Math.Abs(PowerPointBlockService.ReadSvgWidthPt(styledRender.SvgBytes) -
+                           288) < 0.05 &&
+                       Math.Abs(PowerPointBlockService.ReadSvgHeightPt(styledRender.SvgBytes) -
+                           126) < 0.05,
+                    "A styled SVG block did not make its requested PowerPoint frame.");
+                var styledSvg = Encoding.UTF8.GetString(styledRender.SvgBytes);
+                Assert(styledSvg.IndexOf("#f1f5ff", StringComparison.OrdinalIgnoreCase) >= 0 &&
+                       styledSvg.IndexOf("#183766", StringComparison.OrdinalIgnoreCase) >= 0 &&
+                       styledSvg.IndexOf("#3362a2", StringComparison.OrdinalIgnoreCase) >= 0,
+                    "The styled SVG did not contain its text, fill, and border colors.");
+                Assert(styledSvg.IndexOf("data-latexblocks-frame='1'",
+                           StringComparison.Ordinal) >= 0 &&
+                       styledSvg.IndexOf("data-latexblocks-border='1'",
+                           StringComparison.Ordinal) >= 0,
+                    "The styled SVG did not contain its PowerPoint-composed frame.");
+                AssertSvgRectanglePaintFitsViewport(styledRender.SvgBytes,
+                    "A PowerPoint-composed SVG border was clipped by its viewport.");
+                var topStyle = new LaTeXBlockStyle(1.5, 8,
+                    LaTeXBlockVerticalAlignment.Top, styledStyle.TextColor, true,
+                    styledStyle.BackgroundColor, styledStyle.BorderThicknessPt,
+                    styledStyle.BorderColor);
+                var bottomStyle = new LaTeXBlockStyle(1.5, 8,
+                    LaTeXBlockVerticalAlignment.Bottom, styledStyle.TextColor, true,
+                    styledStyle.BackgroundColor, styledStyle.BorderThicknessPt,
+                    styledStyle.BorderColor);
+                var topRender = service.RenderPreviewAsync(styledSource, 288, profile,
+                    inheritedSize, topStyle, 150).GetAwaiter().GetResult();
+                var bottomRender = service.RenderPreviewAsync(styledSource, 288, profile,
+                    inheritedSize, bottomStyle, 150).GetAwaiter().GetResult();
+                Assert(Math.Abs(PowerPointBlockService.ReadSvgHeightPt(topRender.SvgBytes) -
+                           150) < 0.05 &&
+                       Math.Abs(PowerPointBlockService.ReadSvgHeightPt(bottomRender.SvgBytes) -
+                           150) < 0.05 &&
+                       ReadSvgViewBoxY(topRender.SvgBytes) >
+                           ReadSvgViewBoxY(bottomRender.SvgBytes) + 0.1 &&
+                       !string.Equals(Convert.ToBase64String(topRender.SvgBytes),
+                           Convert.ToBase64String(bottomRender.SvgBytes),
+                           StringComparison.Ordinal),
+                    "Top and bottom SVG vertical alignment did not produce distinct fixed-height boxes.");
+                const string leadingSource = "A deliberately long ordinary sentence wraps over several lines " +
+                    "inside this narrow TeX block so the selected line spacing is measurable.";
+                var tightLeading = service.RenderPreviewAsync(leadingSource, 110, profile,
+                    inheritedSize, new LaTeXBlockStyle(1.0), null).GetAwaiter().GetResult();
+                var looseLeading = service.RenderPreviewAsync(leadingSource, 110, profile,
+                    inheritedSize, new LaTeXBlockStyle(1.8), null).GetAwaiter().GetResult();
+                Assert(PowerPointBlockService.ReadSvgHeightPt(looseLeading.SvgBytes) >
+                       PowerPointBlockService.ReadSvgHeightPt(tightLeading.SvgBytes) + 8,
+                    "The TeX line-spacing control did not change ordinary paragraph leading.");
+                var constrainedStyle = new LaTeXBlockStyle(1.2, 6,
+                    LaTeXBlockVerticalAlignment.Bottom, Color.Black, true,
+                    Color.FromArgb(250, 250, 250), 0.75, Color.Black);
+                var constrainedRender = service.RenderPreviewAsync(leadingSource, 110,
+                    profile, inheritedSize, constrainedStyle, 24).GetAwaiter().GetResult();
+                Assert(PowerPointBlockService.ReadSvgHeightPt(constrainedRender.SvgBytes) >
+                       100,
+                    "An SVG-styled block cropped content when its requested height was too small.");
+                // Styled requests set PreviewBorder to zero at TeX shipout. A later
+                // ordinary block must restore the profile's historical border rather
+                // than inherit that temporary renderer state.
+                var restoredDefaultRender = service.RenderPreviewAsync(source, 288, profile,
+                    inheritedSize).GetAwaiter().GetResult();
+                Assert(Math.Abs(PowerPointBlockService.ReadSvgWidthPt(
+                           restoredDefaultRender.SvgBytes) -
+                               PowerPointBlockService.ReadSvgWidthPt(render.SvgBytes)) < 0.02 &&
+                       Math.Abs(PowerPointBlockService.ReadSvgHeightPt(
+                           restoredDefaultRender.SvgBytes) -
+                               PowerPointBlockService.ReadSvgHeightPt(render.SvgBytes)) < 0.02,
+                    "A TeX-styled render leaked PreviewBorder state into an ordinary PowerPoint block.");
+                var styledBlock = service.InsertRendered(styledSource, 288, styledRender,
+                    styledStyle);
+                Assert(PowerPointBlockService.TryReadContract(styledBlock, out _,
+                           out var storedStyledSource) && storedStyledSource == styledSource &&
+                       PowerPointBlockService.ReadStyle(styledBlock).Equals(styledStyle) &&
+                       string.Equals(styledBlock.Tags[LaTeXBlockStyle.TagName],
+                           styledStyle.ToString(), StringComparison.Ordinal),
+                    "A TeX-styled PowerPoint block did not retain its raw source and style metadata.");
+                var styledUpdatedRender = service.RenderPreviewAsync(styledSource, 288,
+                    profile, inheritedSize, styledStyle, 150, 330).GetAwaiter().GetResult();
+                styledBlock = service.UpdateRendered(styledBlock, styledSource, 288,
+                    styledUpdatedRender, false, 150, 330, styledStyle);
+                Assert(PowerPointBlockService.ReadStyle(styledBlock).Equals(styledStyle) &&
+                       styledBlock.AlternativeText == styledSource,
+                    "An SVG-styled PowerPoint block lost its style or raw source during a re-render.");
+                AssertHostFrameGeometry(styledBlock, 330, 150,
+                    "A styled PowerPoint host-frame update");
+                var styledBlockId = Guid.Empty;
+                if (PowerPointBlockService.TryReadContract(styledBlock,
+                    out var styledMetadata, out _))
+                    styledBlockId = styledMetadata.Id;
+                Assert(styledBlockId != Guid.Empty,
+                    "A TeX-styled PowerPoint block lost its identity before persistence.");
+                Release(styledBlock);
+
                 var duplicatedRange = block.Duplicate();
                 var duplicatedBlock = duplicatedRange[1];
                 Assert(PowerPointBlockService.TryReadContract(duplicatedBlock,
@@ -458,13 +589,16 @@ namespace LaTeXBlocks.PowerPointSmoke
                     Office.MsoTriState.msoFalse);
                 slide = presentation.Slides[1];
                 PowerPointInterop.Shape reopened = null;
+                PowerPointInterop.Shape reopenedStyled = null;
                 foreach (PowerPointInterop.Shape candidate in slide.Shapes)
                 {
                     if (PowerPointBlockService.TryReadContract(candidate, out var candidateMetadata,
-                            out _) && candidateMetadata.Id == originalId)
+                            out _))
                     {
-                        reopened = candidate;
-                        break;
+                        if (candidateMetadata.Id == originalId)
+                            reopened = candidate;
+                        else if (candidateMetadata.Id == styledBlockId)
+                            reopenedStyled = candidate;
                     }
                 }
                 Assert(reopened != null &&
@@ -475,7 +609,17 @@ namespace LaTeXBlocks.PowerPointSmoke
                     "The PowerPoint LaTeX Block contract did not survive PPTX save/reopen.");
                 AssertHostFrameGeometry(reopened, expectedWidth, expectedHeight,
                     "A reopened PowerPoint host frame");
+                Assert(reopenedStyled != null &&
+                       PowerPointBlockService.TryReadContract(reopenedStyled,
+                           out var reopenedStyledMetadata, out var reopenedStyledSource) &&
+                       reopenedStyledMetadata.Id == styledBlockId &&
+                       reopenedStyledSource == styledSource &&
+                       PowerPointBlockService.ReadStyle(reopenedStyled).Equals(styledStyle) &&
+                       string.Equals(reopenedStyled.Tags[LaTeXBlockStyle.TagName],
+                           styledStyle.ToString(), StringComparison.Ordinal),
+                    "A TeX-styled PowerPoint block did not preserve raw source and style after PPTX save/reopen.");
                 Release(reopened);
+                Release(reopenedStyled);
             }
             finally
             {
@@ -523,6 +667,71 @@ namespace LaTeXBlocks.PowerPointSmoke
                 context + " did not retain the expected renderer-root host-frame dimensions.");
             Assert(string.IsNullOrEmpty(ReadTag(shape, "LATEXBLOCKS_VISUAL_SCALE")),
                 context + " retained obsolete visual-scale metadata.");
+        }
+
+        private static void AssertSvgRectanglePaintFitsViewport(byte[] svgBytes, string message)
+        {
+            if (svgBytes == null || svgBytes.Length == 0)
+                throw new InvalidOperationException(message + " SVG output was empty.");
+
+            var document = new System.Xml.XmlDocument();
+            using (var stream = new MemoryStream(svgBytes)) document.Load(stream);
+            var root = document.DocumentElement;
+            var viewBoxParts = (root?.GetAttribute("viewBox") ?? string.Empty).Split(
+                new[] { ' ', '\t', '\r', '\n', ',' }, StringSplitOptions.RemoveEmptyEntries);
+            if (viewBoxParts.Length != 4)
+                throw new InvalidOperationException(message + " SVG root had no usable viewBox.");
+
+            var viewLeft = ParseSvgNumber(viewBoxParts[0]);
+            var viewTop = ParseSvgNumber(viewBoxParts[1]);
+            var viewWidth = ParseSvgNumber(viewBoxParts[2]);
+            var viewHeight = ParseSvgNumber(viewBoxParts[3]);
+            var viewRight = viewLeft + viewWidth;
+            var viewBottom = viewTop + viewHeight;
+            const double tolerance = 0.05;
+            var rectCount = 0;
+            foreach (System.Xml.XmlNode node in document.GetElementsByTagName("rect"))
+            {
+                var element = node as System.Xml.XmlElement;
+                if (element == null || !element.HasAttribute("x") || !element.HasAttribute("width") ||
+                    !element.HasAttribute("y") || !element.HasAttribute("height"))
+                    continue;
+                var left = ParseSvgNumber(element.GetAttribute("x"));
+                var right = left + ParseSvgNumber(element.GetAttribute("width"));
+                var top = ParseSvgNumber(element.GetAttribute("y"));
+                var bottom = top + ParseSvgNumber(element.GetAttribute("height"));
+                ++rectCount;
+                Assert(left >= viewLeft - tolerance && right <= viewRight + tolerance &&
+                       top >= viewTop - tolerance && bottom <= viewBottom + tolerance,
+                    message + " Paint extends outside viewBox: " + left.ToString("0.###", CultureInfo.InvariantCulture) +
+                    ".." + right.ToString("0.###", CultureInfo.InvariantCulture) + ", " +
+                    top.ToString("0.###", CultureInfo.InvariantCulture) + ".." +
+                    bottom.ToString("0.###", CultureInfo.InvariantCulture) + " vs " +
+                    viewLeft.ToString("0.###", CultureInfo.InvariantCulture) + ".." +
+                    viewRight.ToString("0.###", CultureInfo.InvariantCulture) + ", " +
+                    viewTop.ToString("0.###", CultureInfo.InvariantCulture) + ".." +
+                    viewBottom.ToString("0.###", CultureInfo.InvariantCulture) + ".");
+            }
+            Assert(rectCount > 0, message + " No rectangle paint was emitted.");
+        }
+
+        private static double ParseSvgNumber(string value)
+        {
+            if (!double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture,
+                    out var result))
+                throw new InvalidOperationException("SVG contained an invalid numeric attribute: " + value);
+            return result;
+        }
+
+        private static double ReadSvgViewBoxY(byte[] svgBytes)
+        {
+            var document = new System.Xml.XmlDocument();
+            using (var stream = new MemoryStream(svgBytes)) document.Load(stream);
+            var parts = (document.DocumentElement?.GetAttribute("viewBox") ?? string.Empty)
+                .Split(new[] { ' ', '\t', '\r', '\n', ',' }, StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length != 4)
+                throw new InvalidOperationException("SVG root had no usable viewBox.");
+            return ParseSvgNumber(parts[1]);
         }
 
         private static string ReadTag(PowerPointInterop.Shape shape, string name)

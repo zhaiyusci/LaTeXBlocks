@@ -17,6 +17,7 @@ Git submodule of this repository; see [StemTeX integration](docs/STEMTEX_INTEGRA
 | Edit source on the visual object | Yes | Yes |
 | Source storage | SVG `AlternativeText` | Shape `AlternativeText` |
 | Host font-size integration | Selection-aware inline refresh | Snapshot text size at insertion; explicit block-size control thereafter |
+| Block styling | Not exposed | Line spacing, padding, vertical placement, text/fill/border color, and border width |
 
 Word auto-width content formulas are the only objects surrounded by U+2060 WORD JOINER characters. This keeps a
 user-authored ordinary space out of Word's special inline-image spacing path without putting padding or negative
@@ -47,6 +48,15 @@ derives a new typesetting measure, while a height-only change rerenders at the c
 Moving or rotating the shape does not render. SVG artwork is never visually scaled or cropped. If fixed-size TeX
 cannot satisfy a constrained dimension after reflow, the frame retains the natural safe extent on that axis. Use
 **TeX size (pt)** when the formula itself should become larger or smaller.
+
+The block editor also exposes **Line spacing**, uniform **Padding**, **Top / Middle / Bottom** vertical placement,
+text color, background fill, and border color/width. StemTeX owns the typographic portion (leading and text color);
+the add-in composes padding, background, border, and vertical placement directly into the final SVG. It does not use
+PowerPoint's Fill or Line properties, and it does not ask TeX to draw a full-size outer frame. The original author
+source remains unchanged in Alternative Text and the block's declarative style is stored separately on the shape.
+Vertical placement becomes visible when the block has a fixed frame height; an auto-height block naturally fits its
+content. Line spacing affects ordinary paragraph leading; TeX environments such as `align` and `gather` retain their
+own math-row spacing.
 
 PowerPoint and Word save their profile choices independently.
 

@@ -31,6 +31,7 @@ when StemTeX is unavailable; StemTeX is needed only to insert or rerender a bloc
 | Text integration | Inline formulas, fixed blocks, and numbered equation lines | Free-standing blocks only |
 | Source | `InlineShape.AlternativeText` | Shape Alternative Text |
 | Identity | Compact metadata in `Title` | Metadata in `Title` plus a dedicated shape tag |
+| Block decoration | None beyond TeX source | A PowerPoint-only style tag: TeX renders typography; the SVG layer renders the outer shell |
 | Layout | Baseline, paragraph, tabs, and document line layout | Position plus one native host frame; every native size change queues TeX reflow |
 
 The shared rendering and metadata code does not imply shared host layout code. Word-specific baseline, U+2060,
@@ -71,6 +72,10 @@ The visual SVG and its source are one semantic object, not an image plus a dupli
 - The SVG is portable display output.
 - Alternative Text is the authoritative TeX source, normalized to LF line endings.
 - Title metadata stores only identity and rendering/layout facts needed to edit the object.
+- PowerPoint-only style values live in a separate versioned shape tag. Before a styled preview or committed render,
+  the PowerPoint service constructs a scoped TeX wrapper only for leading and text color, then composes padding,
+  background, border, and vertical placement into the SVG root. It never rewrites Alternative Text or relies on
+  PowerPoint fill/line formatting for a block's visible decoration.
 - A successful edit creates and annotates a replacement SVG before removing the old visual object.
 
 The detailed Word representation is normative in [OBJECT_MODEL.md](OBJECT_MODEL.md). PowerPoint's deliberately

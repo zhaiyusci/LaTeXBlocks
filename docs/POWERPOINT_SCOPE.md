@@ -36,6 +36,7 @@ parts of that one shape:
 | Display | Embedded, self-contained SVG |
 | Authoritative source | Shape Alternative Text |
 | Identification and renderer metadata | Shape title plus a dedicated LaTeX Blocks shape tag |
+| Block style | A separate, versioned PowerPoint shape tag |
 | Placement and size | Native PowerPoint host-frame geometry; the SVG content remains 1:1 inside that frame |
 
 Selecting a recognized block and invoking **Edit LaTeX Block** reopens its source. A successful render replaces the SVG
@@ -73,6 +74,25 @@ resize polling loop or document-wide geometry watcher.
 
 The selected profile is a PowerPoint-host preference. It is persisted independently from Word, applies to subsequent
 PowerPoint preview, insert, and rerender operations, and is not stored on individual blocks.
+
+## Block styling
+
+The PowerPoint editor offers a compact per-block style surface: ordinary-paragraph line spacing, uniform padding,
+Top/Middle/Bottom vertical placement, text color, background fill, and border color/width. This is not a facade over
+PowerPoint's picture formatting. The add-in keeps the author source verbatim in Alternative Text and serializes only
+the style values in a versioned PowerPoint-only tag. At render time, StemTeX applies the typographic part of the style
+(leading and text color), while the add-in composes padding, background, border, and vertical placement into the
+finished SVG. This avoids treating a TeX `\\fbox` as the outer PowerPoint frame, whose paint can otherwise lie outside
+dvisvgm's SVG viewport.
+
+New auto-height blocks fit their content, so vertical placement has no spare height to distribute. Once a block has a
+fixed native frame height, the SVG viewport supplies the extra room and places the unchanged TeX content at the
+selected Top, Middle, or Bottom position. If the content cannot fit, its natural TeX height wins: the add-in does not
+crop or scale the SVG. The line-spacing control applies to ordinary paragraph leading. It deliberately does not
+redefine the row spacing of math environments such as `align` or `gather`; those have their own TeX layout controls.
+
+These settings belong exclusively to PowerPoint blocks. Word's object model and inline-baseline contract do not use
+this style tag or this UI.
 
 ## Shared infrastructure
 

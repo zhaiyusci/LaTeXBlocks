@@ -114,7 +114,7 @@ namespace LaTeXBlocks.PowerPoint
             using (var editor = new LaTeXBlockEditorForm(Blocks, "\\[\nE=mc^2\n\\]",
                 widthPt, fontSizePt,
                 currentProfile ?? Renderers.DefaultAvailableProfile,
-                SetCurrentProfile, false))
+                SetCurrentProfile, false, LaTeXBlockStyle.Default))
             {
                 if (editor.ShowDialog(new LaTeXBlocksRibbon.PowerPointWindow(Application)) ==
                     DialogResult.OK)
@@ -123,7 +123,8 @@ namespace LaTeXBlocks.PowerPoint
                         throw new InvalidOperationException(
                             "The accepted LaTeX preview is unavailable.");
                     RunShapeMutation(() => Blocks.InsertRendered(editor.AcceptedSource,
-                        editor.AcceptedWidthPt, editor.AcceptedRender));
+                        editor.AcceptedWidthPt, editor.AcceptedRender,
+                        editor.AcceptedStyle));
                 }
             }
         }
@@ -134,10 +135,13 @@ namespace LaTeXBlocks.PowerPoint
             if (!Blocks.TryGetSelectedBlock(out var shape, out var metadata))
                 throw new InvalidOperationException("Select a LaTeX Block first.");
             var source = shape.AlternativeText;
+            var style = PowerPointBlockService.ReadStyle(shape);
+            var frameHeightPt = PowerPointBlockService.ReadFrameHeightPt(shape);
+            var frameWidthPt = PowerPointBlockService.ReadFrameWidthPt(shape);
             using (var editor = new LaTeXBlockEditorForm(Blocks, source, metadata.WidthPt,
                 metadata.FontSizePt,
                 currentProfile ?? Renderers.DefaultAvailableProfile,
-                SetCurrentProfile, true))
+                SetCurrentProfile, true, style, frameHeightPt, frameWidthPt))
             {
                 if (editor.ShowDialog(new LaTeXBlocksRibbon.PowerPointWindow(Application)) ==
                     DialogResult.OK)
@@ -147,7 +151,8 @@ namespace LaTeXBlocks.PowerPoint
                             "The accepted LaTeX preview is unavailable.");
                     RunShapeMutation(() => Blocks.UpdateRendered(shape,
                         editor.AcceptedSource, editor.AcceptedWidthPt,
-                        editor.AcceptedRender));
+                        editor.AcceptedRender, true, null, null,
+                        editor.AcceptedStyle));
                 }
             }
         }
@@ -204,6 +209,7 @@ namespace LaTeXBlocks.PowerPoint
         {
             var key = PowerPointBlockService.GetShapeKey(shape);
             var source = PowerPointBlockService.NormalizeSourceText(shape.AlternativeText);
+            var style = PowerPointBlockService.ReadStyle(shape);
             var profile = currentProfile ?? Renderers.DefaultAvailableProfile;
             var targetWidthPt = metadata.WidthPt;
             var targetFontSizePt = metadata.FontSizePt;
@@ -230,7 +236,7 @@ namespace LaTeXBlocks.PowerPoint
             var hasExplicitFormatIntent = widthPt.HasValue || fontSizePt.HasValue;
             var autoReflowAttempts = 0;
             if (pendingBlockFormats.TryGetValue(key, out var existing) &&
-                SameBaseState(existing, metadata, source, profile))
+                SameBaseState(existing, metadata, source, style, profile))
             {
                 targetWidthPt = existing.TargetWidthPt;
                 targetFontSizePt = existing.TargetFontSizePt;
@@ -293,7 +299,7 @@ namespace LaTeXBlocks.PowerPoint
                 targetWidthPt, targetFontSizePt, targetFrameWidthPt, targetFrameHeightPt,
                 constrainFrameWidth, constrainFrameHeight, sequence,
                 targetNativeFrameGestureSequence, hasExplicitFormatIntent,
-                autoReflowAttempts);
+                autoReflowAttempts, style);
             pendingBlockFormats[key] = pending;
             StartNextBlockFormat(key);
         }
@@ -313,7 +319,9 @@ namespace LaTeXBlocks.PowerPoint
             {
                 var render = await service.RenderCommittedAsync(pending.Source,
                     pending.TargetWidthPt, pending.Profile,
-                    pending.TargetFontSizePt).ConfigureAwait(false);
+                    pending.TargetFontSizePt, pending.Style,
+                    pending.TargetFrameHeightPt, pending.TargetFrameWidthPt)
+                    .ConfigureAwait(false);
                 PostToPowerPointUi(() => CompleteBlockFormat(service, pending, render));
             }
             catch (TaskCanceledException)
@@ -347,6 +355,7 @@ namespace LaTeXBlocks.PowerPoint
                         out var current, out var currentSource) ||
                     !SameMetadataState(current, pending.BaseMetadata) ||
                     currentSource != pending.Source ||
+                    !pending.Style.Equals(PowerPointBlockService.ReadStyle(shape)) ||
                     !string.Equals(pending.Profile, currentProfile,
                         StringComparison.OrdinalIgnoreCase))
                 {
@@ -367,7 +376,7 @@ namespace LaTeXBlocks.PowerPoint
                     .Equals(pending.Key);
                 RunShapeMutation(() => service.UpdateRendered(shape, pending.Source,
                     pending.TargetWidthPt, render, keepSelected, pending.TargetFrameHeightPt,
-                    pending.TargetFrameWidthPt));
+                    pending.TargetFrameWidthPt, pending.Style));
                 pendingBlockFormats.Remove(pending.Key);
                 ribbon?.InvalidateBlockControls();
             }
@@ -435,7 +444,7 @@ namespace LaTeXBlocks.PowerPoint
                 pending.TargetFrameHeightPt, pending.ConstrainFrameWidth,
                 pending.ConstrainFrameHeight, Interlocked.Increment(ref blockFormatSequence),
                 pending.NativeFrameGestureSequence, pending.HasExplicitFormatIntent,
-                pending.AutoReflowAttempts + 1);
+                pending.AutoReflowAttempts + 1, pending.Style);
             return true;
         }
 
@@ -488,10 +497,12 @@ namespace LaTeXBlocks.PowerPoint
         }
 
         private static bool SameBaseState(PendingBlockFormat pending,
-            LaTeXBlockMetadata metadata, string source, string profile)
+            LaTeXBlockMetadata metadata, string source, LaTeXBlockStyle style,
+            string profile)
         {
             return SameMetadataState(pending.BaseMetadata, metadata) &&
-                   pending.Source == source && string.Equals(pending.Profile, profile,
+                   pending.Source == source && pending.Style.Equals(style) &&
+                   string.Equals(pending.Profile, profile,
                        StringComparison.OrdinalIgnoreCase);
         }
 
@@ -691,7 +702,7 @@ namespace LaTeXBlocks.PowerPoint
                     pendingFormat.Profile, pendingFormat.TargetWidthPt,
                     pendingFormat.TargetFontSizePt, frameWidthPt, frameHeightPt,
                     false, false, Interlocked.Increment(ref blockFormatSequence),
-                    null, true, 0);
+                    null, true, 0, pendingFormat.Style);
                 pendingBlockFormats[key] = replacement;
                 StartNextBlockFormat(key);
             }
@@ -858,7 +869,7 @@ namespace LaTeXBlocks.PowerPoint
                 double targetFrameHeightPt, bool constrainFrameWidth,
                 bool constrainFrameHeight, long sequence,
                 long? nativeFrameGestureSequence, bool hasExplicitFormatIntent,
-                int autoReflowAttempts)
+                int autoReflowAttempts, LaTeXBlockStyle style)
             {
                 Key = key;
                 Shape = shape;
@@ -875,6 +886,7 @@ namespace LaTeXBlocks.PowerPoint
                 NativeFrameGestureSequence = nativeFrameGestureSequence;
                 HasExplicitFormatIntent = hasExplicitFormatIntent;
                 AutoReflowAttempts = autoReflowAttempts;
+                Style = style ?? LaTeXBlockStyle.Default;
             }
 
             internal PowerPointShapeKey Key { get; }
@@ -892,6 +904,7 @@ namespace LaTeXBlocks.PowerPoint
             internal long? NativeFrameGestureSequence { get; }
             internal bool HasExplicitFormatIntent { get; }
             internal int AutoReflowAttempts { get; }
+            internal LaTeXBlockStyle Style { get; }
         }
     }
 }

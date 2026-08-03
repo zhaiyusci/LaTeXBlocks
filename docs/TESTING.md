@@ -38,7 +38,7 @@ PowerPoint executable.
 | Test | Office behavior | Main coverage |
 | --- | --- | --- |
 | Word smoke | Starts a separate hidden Word instance and closes it when complete. It rejects an accidental attachment to an existing visible Word instance. | StemTeX startup/shutdown, rendering, SVG insertion and replacement, metadata, baseline/inline behavior, numbered equations, and DOCX persistence. |
-| PowerPoint smoke | Requires PowerPoint to be closed, then starts a visible temporary PowerPoint instance and closes it when complete. | Rendering, block insertion and editing, profile/TeX-size/width controls, unified host-frame resize handling, and PPTX persistence. |
+| PowerPoint smoke | Requires PowerPoint to be closed, then starts a visible temporary PowerPoint instance and closes it when complete. | Rendering, block insertion and editing, SVG-shell style rendering/persistence, profile/TeX-size/width controls, unified host-frame resize handling, and PPTX persistence. |
 
 The tests leave diagnostic documents under ignored `artifacts` directories. They are useful when diagnosing a failed
 Office assertion but are not release artifacts.
