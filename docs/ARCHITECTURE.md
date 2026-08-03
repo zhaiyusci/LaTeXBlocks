@@ -31,10 +31,23 @@ when StemTeX is unavailable; StemTeX is needed only to insert or rerender a bloc
 | Text integration | Inline formulas, fixed blocks, and numbered equation lines | Free-standing blocks only |
 | Source | `InlineShape.AlternativeText` | Shape Alternative Text |
 | Identity | Compact metadata in `Title` | Metadata in `Title` plus a dedicated shape tag |
-| Layout | Baseline, paragraph, tabs, and document line layout | Position, visual scale, and slide shape geometry |
+| Layout | Baseline, paragraph, tabs, and document line layout | Position plus one native host frame; every native size change queues TeX reflow |
 
 The shared rendering and metadata code does not imply shared host layout code. Word-specific baseline, U+2060,
 paragraph, and tab-stop behavior must never leak into PowerPoint.
+
+### PowerPoint host-frame contract
+
+Every PowerPoint LaTeX Block is one native host frame around unscaled TeX SVG content. All PowerPoint resize handles
+use the same contract; there is no side-handle, corner-handle, or vertical-handle zoom mode. A width or height change
+is debounced and sent through the asynchronous StemTeX layout path. A changed width derives a fresh typesetting
+measure from the prior real SVG root; a height-only change still rerenders the current measure. Translation and
+rotation do not enter that path. The TeX coordinates, aspect ratio, and physical scale remain 1:1; if no fixed-size
+TeX layout can meet a constrained dimension, the frame grows to the natural safe extent rather than stretching or
+cropping content.
+
+`VisualScale` is deliberately absent from the model. The persisted native shape geometry is the host frame, while
+the rendering metadata records the TeX layout width and design size that produced its content.
 
 ## Rendering lifecycle
 
@@ -43,8 +56,8 @@ renderer creation, rendering, disposal, and profile changes occur off the Office
 
 - **Preview work** is latest-only. The editor debounces source changes, skips superseded queued work, and discards a
   result if its UI request ID is stale.
-- **Document mutations** are durable. A completed insert, edit, width change, or font-size refresh is queued so that
-  a later preview cannot silently cancel it.
+- **Document mutations** are durable. A completed insert, edit, explicit typesetting-width change, font-size refresh,
+  or host-frame update is queued so that a later preview cannot silently cancel it.
 - **Office shutdown** invalidates managed work and returns without joining a native-renderer thread on the Office UI
   thread. A background reaper handles only worker processes owned by that host.
 

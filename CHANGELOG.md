@@ -5,6 +5,15 @@ Word-and-PowerPoint package line.
 
 ## [Unreleased]
 
+### PowerPoint
+
+- Unified every native PowerPoint resize handle under one host-frame contract. Every actual size change now queues a
+  real asynchronous StemTeX layout pass: width changes derive a new stored typesetting measure, while height-only
+  changes rerender the current measure. Translation and rotation do not reflow. The TeX SVG remains 1:1 and is never
+  stretched or cropped.
+- Removed the `VisualScale` concept entirely. Actual formula size is controlled only by **TeX size (pt)** and always
+  rerenders.
+
 ## [0.2.14] — 2026-08-03
 
 ### Reliability

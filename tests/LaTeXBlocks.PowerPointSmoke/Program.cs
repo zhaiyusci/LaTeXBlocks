@@ -173,10 +173,12 @@ namespace LaTeXBlocks.PowerPointSmoke
                        Math.Abs(block.Height - PowerPointBlockService.ReadSvgHeightPt(
                            render.SvgBytes)) < 0.02,
                     "PowerPoint did not preserve the SVG's physical point dimensions.");
-                Assert(block.LockAspectRatio == Office.MsoTriState.msoFalse &&
-                       Math.Abs(PowerPointBlockService.ReadPositiveTag(block,
-                            PowerPointBlockService.VisualScaleTag, 0) - 1) < 0.001,
-                    "The inserted block did not expose separate layout-width and visual-scale gestures.");
+                Assert(block.LockAspectRatio == Office.MsoTriState.msoFalse,
+                    "The inserted PowerPoint block did not expose an editable host frame.");
+                AssertHostFrameGeometry(block,
+                    PowerPointBlockService.ReadSvgWidthPt(render.SvgBytes),
+                    PowerPointBlockService.ReadSvgHeightPt(render.SvgBytes),
+                    "The inserted PowerPoint block");
                 var duplicatedRange = block.Duplicate();
                 var duplicatedBlock = duplicatedRange[1];
                 Assert(PowerPointBlockService.TryReadContract(duplicatedBlock,
@@ -189,50 +191,195 @@ namespace LaTeXBlocks.PowerPointSmoke
                 Release(duplicatedBlock);
                 Release(duplicatedRange);
 
-                // This section tests the resize classifier directly. An installed copy
-                // of the add-in can be auto-loaded into this COM PowerPoint instance and
-                // otherwise consume AfterShapeSizeChange first, restoring the old SVG
-                // before the smoke test can inspect the drag geometry. Temporarily hide
-                // only this test shape from the production event handler; the installed-
-                // host integration test covers the complete asynchronous reflow path.
+                // Test all native handles through the one host-frame contract. An installed
+                // copy of the add-in can be auto-loaded into this COM PowerPoint instance
+                // and otherwise consume AfterShapeSizeChange first. Temporarily hide only
+                // this test shape from that production handler while capturing a gesture;
+                // each captured gesture is then committed through UpdateRendered below.
                 block.Tags.Delete(PowerPointBlockService.KindTag);
+                PowerPointFrameUpdate horizontalFrame = null;
                 try
                 {
                     var originalBlockWidth = block.Width;
                     var originalBlockLeft = block.Left;
                     var eventsBeforeResize = sizeChangeEvents;
-                    block.Width = originalBlockWidth * 0.8f;
+                    var requestedHorizontalWidth = originalBlockWidth * 1.2f;
+                    block.Width = requestedHorizontalWidth;
                     WaitFor(() => sizeChangeEvents > eventsBeforeResize, 2000,
                         () => "PowerPoint did not raise AfterShapeSizeChange after a block resize.");
-                    var horizontalResize = PowerPointBlockService.ClassifyResize(block, metadata);
-                    Assert(horizontalResize.Kind == PowerPointResizeKind.LayoutWidth &&
-                           Math.Abs(horizontalResize.LayoutWidthPt - metadata.WidthPt * 0.8) < 0.05,
-                        "A horizontal PowerPoint handle resize was not classified as TeX reflow.");
+                    horizontalFrame = PowerPointBlockService.CaptureFrameResize(block, metadata);
+                    Assert(horizontalFrame.HasChange && horizontalFrame.WidthChanged &&
+                           !horizontalFrame.HeightChanged &&
+                           Math.Abs(horizontalFrame.FrameWidthPt - requestedHorizontalWidth) < 0.05,
+                        "A horizontal PowerPoint handle resize was not captured as a host-frame width update.");
                     PowerPointBlockService.RestoreStoredGeometry(block, metadata);
                     Assert(Math.Abs(block.Width - originalBlockWidth) < 0.02 &&
                            Math.Abs(block.Left - originalBlockLeft) < 0.02,
-                        "A failed horizontal reflow could not restore valid SVG geometry.");
-                    block.Width *= 1.1f;
-                    block.Height *= 1.1f;
-                    var scaleResize = PowerPointBlockService.ClassifyResize(block, metadata);
-                    Assert(scaleResize.Kind == PowerPointResizeKind.VisualScale &&
-                           Math.Abs(scaleResize.VisualScale - 1.1) < 0.01,
-                        "A proportional PowerPoint resize was not classified as visual scale.");
-                    PowerPointBlockService.NormalizeVisualScale(block, scaleResize.VisualScale);
-                    Assert(Math.Abs(block.Width / block.Height -
-                               PowerPointBlockService.ReadSvgWidthPt(render.SvgBytes) /
-                               PowerPointBlockService.ReadSvgHeightPt(render.SvgBytes)) < 0.01,
-                        "Visual-scale normalization distorted the SVG.");
-                    Assert(Math.Abs(PowerPointBlockService.LayoutWidthForVisibleWidth(block,
-                               metadata, block.Width) - metadata.WidthPt) < 0.05,
-                        "Slide-relative visible width was confused with the block's independent visual scale.");
-                    PowerPointBlockService.NormalizeVisualScale(block, 1.0);
+                        "Capturing a horizontal host-frame update could not restore stored geometry.");
                 }
                 finally
                 {
                     block.Tags.Add(PowerPointBlockService.KindTag,
                         PowerPointBlockService.KindValue);
                 }
+
+                var horizontalRender = service.RenderPreviewAsync(source,
+                    metadata.WidthPt, profile, metadata.FontSizePt)
+                    .GetAwaiter().GetResult();
+                var horizontalNaturalWidth = PowerPointBlockService.ReadSvgWidthPt(
+                    horizontalRender.SvgBytes);
+                var horizontalNaturalHeight = PowerPointBlockService.ReadSvgHeightPt(
+                    horizontalRender.SvgBytes);
+                block = service.UpdateRendered(block, source, metadata.WidthPt,
+                    horizontalRender, false, horizontalFrame.FrameHeightPt,
+                    horizontalFrame.FrameWidthPt);
+                Assert(PowerPointBlockService.TryReadContract(block, out metadata, out _) &&
+                       Math.Abs(metadata.WidthPt - 288) < 0.05,
+                    "A native host-frame update changed the stored TeX layout width.");
+                AssertHostFrameGeometry(block,
+                    Math.Max(horizontalNaturalWidth, horizontalFrame.FrameWidthPt),
+                    Math.Max(horizontalNaturalHeight, horizontalFrame.FrameHeightPt),
+                    "A horizontal host-frame update");
+
+                // A frame smaller than the unchanged TeX box is clamped rather
+                // than being treated as an instruction to scale or crop the SVG.
+                var requestedShortWidth = Math.Max(1, horizontalNaturalWidth / 2.0);
+                PowerPointFrameUpdate shortWidthFrame = null;
+                block.Tags.Delete(PowerPointBlockService.KindTag);
+                try
+                {
+                    var originalBlockWidth = block.Width;
+                    var originalBlockHeight = block.Height;
+                    block.Width = (float)requestedShortWidth;
+                    shortWidthFrame = PowerPointBlockService.CaptureFrameResize(block,
+                        metadata);
+                    Assert(shortWidthFrame.HasChange && shortWidthFrame.WidthChanged &&
+                           !shortWidthFrame.HeightChanged &&
+                           Math.Abs(shortWidthFrame.FrameWidthPt - requestedShortWidth) < 0.05 &&
+                           shortWidthFrame.FrameWidthPt < originalBlockWidth - 1,
+                        "A narrow horizontal handle resize was not captured as a host-frame request.");
+                    PowerPointBlockService.RestoreStoredGeometry(block, metadata);
+                    Assert(Math.Abs(block.Height - originalBlockHeight) < 0.02,
+                        "Capturing a narrow horizontal host-frame update changed stored height.");
+                }
+                finally
+                {
+                    block.Tags.Add(PowerPointBlockService.KindTag,
+                        PowerPointBlockService.KindValue);
+                }
+                var shortWidthRender = service.RenderPreviewAsync(source, metadata.WidthPt,
+                    profile, metadata.FontSizePt).GetAwaiter().GetResult();
+                var shortWidthNatural = PowerPointBlockService.ReadSvgWidthPt(
+                    shortWidthRender.SvgBytes);
+                var shortWidthNaturalHeight = PowerPointBlockService.ReadSvgHeightPt(
+                    shortWidthRender.SvgBytes);
+                block = service.UpdateRendered(block, source, metadata.WidthPt, shortWidthRender,
+                    false, shortWidthFrame.FrameHeightPt, shortWidthFrame.FrameWidthPt);
+                AssertHostFrameGeometry(block, shortWidthNatural,
+                    Math.Max(shortWidthNaturalHeight, shortWidthFrame.FrameHeightPt),
+                    "A too-narrow host-frame update");
+                Assert(block.Width >= shortWidthNatural - 0.05,
+                    "A host frame narrower than the natural TeX SVG clipped the content.");
+
+                var verticalRender = service.RenderPreviewAsync(source, metadata.WidthPt,
+                    profile, metadata.FontSizePt).GetAwaiter().GetResult();
+                var verticalNaturalWidth = PowerPointBlockService.ReadSvgWidthPt(verticalRender.SvgBytes);
+                var verticalNaturalHeight = PowerPointBlockService.ReadSvgHeightPt(verticalRender.SvgBytes);
+                var requestedVerticalHeight = Math.Max(verticalNaturalHeight + 42, block.Height + 42);
+                PowerPointFrameUpdate verticalFrame = null;
+                block.Tags.Delete(PowerPointBlockService.KindTag);
+                try
+                {
+                    var originalBlockWidth = block.Width;
+                    block.Height = (float)requestedVerticalHeight;
+                    verticalFrame = PowerPointBlockService.CaptureFrameResize(block, metadata);
+                    Assert(verticalFrame.HasChange && !verticalFrame.WidthChanged &&
+                           verticalFrame.HeightChanged &&
+                           Math.Abs(verticalFrame.FrameHeightPt - requestedVerticalHeight) < 0.05,
+                        "A vertical PowerPoint handle resize was not captured as a host-frame height update.");
+                    PowerPointBlockService.RestoreStoredGeometry(block, metadata);
+                    Assert(Math.Abs(block.Width - originalBlockWidth) < 0.02,
+                        "Capturing a vertical host-frame update changed the stored width.");
+                }
+                finally
+                {
+                    block.Tags.Add(PowerPointBlockService.KindTag,
+                        PowerPointBlockService.KindValue);
+                }
+                block = service.UpdateRendered(block, source, metadata.WidthPt, verticalRender,
+                    false, verticalFrame.FrameHeightPt, verticalFrame.FrameWidthPt);
+                AssertHostFrameGeometry(block,
+                    Math.Max(verticalNaturalWidth, verticalFrame.FrameWidthPt),
+                    Math.Max(verticalNaturalHeight, verticalFrame.FrameHeightPt),
+                    "A vertical host-frame update");
+                Assert(block.Height > verticalNaturalHeight + 30,
+                    "A vertical host-frame update did not add an empty SVG frame around the natural TeX content.");
+
+                var shortFrameHeight = Math.Max(1, verticalNaturalHeight / 2.0);
+                PowerPointFrameUpdate shortFrame = null;
+                block.Tags.Delete(PowerPointBlockService.KindTag);
+                try
+                {
+                    block.Height = (float)shortFrameHeight;
+                    shortFrame = PowerPointBlockService.CaptureFrameResize(block, metadata);
+                    Assert(shortFrame.HasChange && !shortFrame.WidthChanged &&
+                           shortFrame.HeightChanged &&
+                           shortFrame.FrameHeightPt < verticalNaturalHeight - 1,
+                        "A short vertical handle resize was not captured as a host-frame request.");
+                    PowerPointBlockService.RestoreStoredGeometry(block, metadata);
+                }
+                finally
+                {
+                    block.Tags.Add(PowerPointBlockService.KindTag,
+                        PowerPointBlockService.KindValue);
+                }
+                var shortRender = service.RenderPreviewAsync(source, metadata.WidthPt, profile,
+                    metadata.FontSizePt).GetAwaiter().GetResult();
+                var shortNaturalWidth = PowerPointBlockService.ReadSvgWidthPt(shortRender.SvgBytes);
+                var shortNaturalHeight = PowerPointBlockService.ReadSvgHeightPt(shortRender.SvgBytes);
+                block = service.UpdateRendered(block, source, metadata.WidthPt, shortRender,
+                    false, shortFrame.FrameHeightPt, shortFrame.FrameWidthPt);
+                AssertHostFrameGeometry(block,
+                    Math.Max(shortNaturalWidth, shortFrame.FrameWidthPt), shortNaturalHeight,
+                    "A too-short host-frame update");
+                Assert(block.Height >= shortNaturalHeight - 0.05,
+                    "A host frame shorter than the natural TeX SVG clipped the content.");
+
+                PowerPointFrameUpdate cornerFrame = null;
+                var requestedCornerWidth = block.Width * 1.15f;
+                var requestedCornerHeight = block.Height + 48;
+                block.Tags.Delete(PowerPointBlockService.KindTag);
+                try
+                {
+                    block.Width = requestedCornerWidth;
+                    block.Height = requestedCornerHeight;
+                    cornerFrame = PowerPointBlockService.CaptureFrameResize(block, metadata);
+                    Assert(cornerFrame.HasChange && cornerFrame.WidthChanged &&
+                           cornerFrame.HeightChanged &&
+                           Math.Abs(cornerFrame.FrameWidthPt - requestedCornerWidth) < 0.08 &&
+                           Math.Abs(cornerFrame.FrameHeightPt - requestedCornerHeight) < 0.05,
+                        "A corner PowerPoint handle resize was not captured as one host-frame update.");
+                    PowerPointBlockService.RestoreStoredGeometry(block, metadata);
+                }
+                finally
+                {
+                    block.Tags.Add(PowerPointBlockService.KindTag,
+                        PowerPointBlockService.KindValue);
+                }
+                var cornerRender = service.RenderPreviewAsync(source, metadata.WidthPt,
+                    profile, metadata.FontSizePt).GetAwaiter().GetResult();
+                var cornerNaturalWidth = PowerPointBlockService.ReadSvgWidthPt(cornerRender.SvgBytes);
+                var cornerNaturalHeight = PowerPointBlockService.ReadSvgHeightPt(cornerRender.SvgBytes);
+                block = service.UpdateRendered(block, source, metadata.WidthPt,
+                    cornerRender, false, cornerFrame.FrameHeightPt,
+                    cornerFrame.FrameWidthPt);
+                Assert(PowerPointBlockService.TryReadContract(block, out metadata, out _) &&
+                       Math.Abs(metadata.WidthPt - 288) < 0.05,
+                    "A corner host-frame update changed the stored TeX layout width.");
+                AssertHostFrameGeometry(block,
+                    Math.Max(cornerNaturalWidth, cornerFrame.FrameWidthPt),
+                    Math.Max(cornerNaturalHeight, cornerFrame.FrameHeightPt),
+                    "A corner host-frame update");
 
                 var ordinarySvg = slide.Shapes.AddShape(Office.MsoAutoShapeType.msoShapeRectangle,
                     18, 18, 18, 18);
@@ -261,12 +408,8 @@ namespace LaTeXBlocks.PowerPointSmoke
                     400, 10, 20, 20);
                 front.ZOrder(Office.MsoZOrderCmd.msoBringToFront);
                 block.Rotation = 17.5f;
-                PowerPointBlockService.NormalizeVisualScale(block, 1.15);
                 var expectedLeft = block.Left;
                 var expectedTop = block.Top;
-                var expectedWidth = block.Width;
-                var expectedScale = PowerPointBlockService.ReadPositiveTag(block,
-                    PowerPointBlockService.VisualScaleTag, 1);
                 var expectedRotation = block.Rotation;
                 var expectedZ = block.ZOrderPosition;
                 var originalId = metadata.Id;
@@ -274,6 +417,10 @@ namespace LaTeXBlocks.PowerPointSmoke
                 const string updatedSource = "Updated block: $\\int_0^1 x^2\\,dx=1/3$.";
                 var updatedRender = service.RenderPreviewAsync(updatedSource, 288, profile, 19)
                     .GetAwaiter().GetResult();
+                var expectedWidth = Math.Max(PowerPointBlockService.ReadSvgWidthPt(
+                    updatedRender.SvgBytes), PowerPointBlockService.ReadFrameWidthPt(block));
+                var expectedHeight = Math.Max(PowerPointBlockService.ReadSvgHeightPt(
+                    updatedRender.SvgBytes), PowerPointBlockService.ReadFrameHeightPt(block));
                 var updated = service.UpdateRendered(block, updatedSource, 288, updatedRender);
                 Assert(PowerPointBlockService.TryReadContract(updated, out var updatedMetadata,
                            out var updatedStoredSource) &&
@@ -287,15 +434,15 @@ namespace LaTeXBlocks.PowerPointSmoke
                     updated.Top.ToString("0.###") + "/" + updated.Width.ToString("0.###") + "/" +
                     updated.Rotation.ToString("0.###") + "/z" + updated.ZOrderPosition);
                 Assert(Math.Abs(updated.Left - expectedLeft) < 0.02 &&
-                       Math.Abs(updated.Top - expectedTop) < 0.02 &&
-                       Math.Abs(updated.Width - expectedWidth) < 0.03 &&
-                       Math.Abs(updated.Rotation - expectedRotation) < 0.02 &&
-                       updated.ZOrderPosition == expectedZ,
-                    "PowerPoint edit did not preserve position, width scale, rotation, and z-order.");
-                var expectedHeight = PowerPointBlockService.ReadSvgHeightPt(updatedRender.SvgBytes) *
-                                     expectedScale;
+                        Math.Abs(updated.Top - expectedTop) < 0.02 &&
+                        Math.Abs(updated.Width - expectedWidth) < 0.03 &&
+                        Math.Abs(updated.Rotation - expectedRotation) < 0.02 &&
+                        updated.ZOrderPosition == expectedZ,
+                    "PowerPoint edit did not preserve position, host-frame width, rotation, and z-order.");
                 Assert(Math.Abs(updated.Height - expectedHeight) < 0.04,
-                    "PowerPoint edit distorted the new SVG instead of preserving the user's scale.");
+                    "PowerPoint edit did not preserve the new SVG's host-frame height.");
+                AssertHostFrameGeometry(updated, expectedWidth, expectedHeight,
+                    "A PowerPoint edit after host-frame resizes");
 
                 if (File.Exists(documentPath)) File.Delete(documentPath);
                 presentation.SaveAs(documentPath,
@@ -321,13 +468,13 @@ namespace LaTeXBlocks.PowerPointSmoke
                     }
                 }
                 Assert(reopened != null &&
-                       PowerPointBlockService.TryReadContract(reopened, out var reopenedMetadata,
-                           out var reopenedSource) &&
-                       reopenedMetadata.Id == originalId && reopenedSource == updatedSource &&
-                       Math.Abs(reopenedMetadata.FontSizePt - 19) < 0.01 &&
-                       Math.Abs(PowerPointBlockService.ReadPositiveTag(reopened,
-                           PowerPointBlockService.VisualScaleTag, 0) - expectedScale) < 0.01,
+                        PowerPointBlockService.TryReadContract(reopened, out var reopenedMetadata,
+                            out var reopenedSource) &&
+                        reopenedMetadata.Id == originalId && reopenedSource == updatedSource &&
+                        Math.Abs(reopenedMetadata.FontSizePt - 19) < 0.01,
                     "The PowerPoint LaTeX Block contract did not survive PPTX save/reopen.");
+                AssertHostFrameGeometry(reopened, expectedWidth, expectedHeight,
+                    "A reopened PowerPoint host frame");
                 Release(reopened);
             }
             finally
@@ -357,6 +504,31 @@ namespace LaTeXBlocks.PowerPointSmoke
         private static void Assert(bool condition, string message)
         {
             if (!condition) throw new InvalidOperationException(message);
+        }
+
+        private static void AssertHostFrameGeometry(PowerPointInterop.Shape shape,
+            double expectedWidthPt, double expectedHeightPt, string context)
+        {
+            const double tolerancePt = 0.06;
+            var taggedWidth = PowerPointBlockService.ReadPositiveTag(shape,
+                PowerPointBlockService.SvgWidthTag, 0);
+            var taggedHeight = PowerPointBlockService.ReadPositiveTag(shape,
+                PowerPointBlockService.SvgHeightTag, 0);
+            Assert(taggedWidth > 0 && taggedHeight > 0 &&
+                   Math.Abs(shape.Width - taggedWidth) < tolerancePt &&
+                   Math.Abs(shape.Height - taggedHeight) < tolerancePt,
+                context + " did not keep its SVG width/height tags equal to its shape geometry.");
+            Assert(Math.Abs(shape.Width - expectedWidthPt) < tolerancePt &&
+                   Math.Abs(shape.Height - expectedHeightPt) < tolerancePt,
+                context + " did not retain the expected renderer-root host-frame dimensions.");
+            Assert(string.IsNullOrEmpty(ReadTag(shape, "LATEXBLOCKS_VISUAL_SCALE")),
+                context + " retained obsolete visual-scale metadata.");
+        }
+
+        private static string ReadTag(PowerPointInterop.Shape shape, string name)
+        {
+            try { return shape.Tags[name] ?? string.Empty; }
+            catch (COMException) { return string.Empty; }
         }
 
         private static void WaitFor(Func<bool> predicate, int timeoutMs,

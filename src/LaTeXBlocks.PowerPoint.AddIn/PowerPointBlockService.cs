@@ -16,7 +16,6 @@ namespace LaTeXBlocks.PowerPoint
         internal const string KindValue = "LATEX_BLOCK";
         internal const string SvgWidthTag = "LATEXBLOCKS_SVG_WIDTH_PT";
         internal const string SvgHeightTag = "LATEXBLOCKS_SVG_HEIGHT_PT";
-        internal const string VisualScaleTag = "LATEXBLOCKS_VISUAL_SCALE";
         private readonly PowerPointInterop.Application application;
         private readonly StemTeXBackend renderers;
         private readonly string cacheDirectory;
@@ -61,8 +60,10 @@ namespace LaTeXBlocks.PowerPoint
             if (string.IsNullOrWhiteSpace(source))
                 throw new ArgumentException("LaTeX source cannot be empty.", nameof(source));
             // The 30–450 pt range belongs to the editor/Ribbon controls. Existing
-            // documents and direct shape gestures keep the broader host contract.
-            if (!(widthPt >= 36) || widthPt > 2000)
+            // documents and direct shape gestures keep the broader host contract,
+            // but native frame fitting must at least be able to use the same lower
+            // endpoint that the user can enter in the Ribbon.
+            if (!(widthPt >= BlockLayoutWidthPolicy.MinimumPt) || widthPt > 2000)
                 throw new ArgumentOutOfRangeException(nameof(widthPt));
             if (!(fontSizePt >= 1) || fontSizePt > 200)
                 throw new ArgumentOutOfRangeException(nameof(fontSizePt));
@@ -81,7 +82,10 @@ namespace LaTeXBlocks.PowerPoint
         {
             if (render == null) throw new ArgumentNullException(nameof(render));
             var slide = GetActiveSlide();
-            var size = ReadSvgSize(render.SvgBytes);
+            var framedSvg = FrameSvg(render.SvgBytes, ReadSvgWidthPt(render.SvgBytes),
+                ReadSvgHeightPt(render.SvgBytes));
+            var size = ReadSvgSize(framedSvg);
+            var framedPath = WriteSvg(framedSvg);
             ResolveInsertionPoint(slide, size.WidthPt, size.HeightPt, out var left, out var top);
             var metadata = LaTeXBlockMetadata.Create(widthPt, render.DepthPt,
                 LaTeXBlockLayoutMode.Fixed, render.FontSizePt, LaTeXBlockRole.Content);
@@ -90,25 +94,32 @@ namespace LaTeXBlocks.PowerPoint
             PowerPointInterop.Shape shape = null;
             try
             {
-                shape = slide.Shapes.AddPicture(render.SvgPath, Office.MsoTriState.msoFalse,
+                shape = slide.Shapes.AddPicture(framedPath, Office.MsoTriState.msoFalse,
                     Office.MsoTriState.msoTrue, left, top, (float)size.WidthPt, (float)size.HeightPt);
+                // A LaTeX Block has an independently editable host frame. Do not
+                // inherit PowerPoint's picture-aspect lock, which would make a
+                // nominally horizontal resize mutate height as well.
+                shape.LockAspectRatio = Office.MsoTriState.msoFalse;
                 ApplyContract(shape, source, metadata, TemporaryShapeName(metadata.Id),
-                    size.WidthPt, size.HeightPt, 1.0);
+                    size.WidthPt, size.HeightPt);
                 shape.Name = StableShapeName(metadata.Id);
                 shape.Select(Office.MsoTriState.msoTrue);
+                DeleteCachedSvg(framedPath);
                 DeleteCachedSvg(render.SvgPath);
                 return shape;
             }
             catch
             {
                 try { shape?.Delete(); } catch { }
+                DeleteCachedSvg(framedPath);
                 throw;
             }
         }
 
         internal PowerPointInterop.Shape UpdateRendered(PowerPointInterop.Shape oldShape,
             string source, double widthPt, LaTeXBlockRender render,
-            bool selectReplacement = true)
+            bool selectReplacement = true, double? frameHeightPt = null,
+            double? frameWidthPt = null)
         {
             if (oldShape == null) throw new ArgumentNullException(nameof(oldShape));
             if (render == null) throw new ArgumentNullException(nameof(render));
@@ -116,10 +127,18 @@ namespace LaTeXBlocks.PowerPoint
                 throw new InvalidOperationException("The selected shape is not a LaTeX Block.");
 
             var slide = GetOwningSlide(oldShape);
-            var sourceSize = ReadSvgSize(render.SvgBytes);
-            var scale = ReadVisualScale(oldShape, previous);
-            var newWidth = (float)(sourceSize.WidthPt * scale);
-            var newHeight = (float)(sourceSize.HeightPt * scale);
+            // A block has one native PowerPoint frame and one genuine StemTeX
+            // layout width. Native size gestures have already queued a fresh TeX
+            // layout request before they reach this replacement step; this method
+            // only embeds that unscaled result in the requested host frame.
+            var requestedFrameHeightPt = frameHeightPt ?? ReadFrameHeightPt(oldShape);
+            var requestedFrameWidthPt = frameWidthPt ?? ReadFrameWidthPt(oldShape);
+            var framedSvg = FrameSvg(render.SvgBytes, requestedFrameWidthPt,
+                requestedFrameHeightPt);
+            var sourceSize = ReadSvgSize(framedSvg);
+            var framedPath = WriteSvg(framedSvg);
+            var newWidth = (float)sourceSize.WidthPt;
+            var newHeight = (float)sourceSize.HeightPt;
             var left = oldShape.Left;
             var top = oldShape.Top;
             var rotation = oldShape.Rotation;
@@ -132,11 +151,12 @@ namespace LaTeXBlocks.PowerPoint
             PowerPointInterop.Shape replacement = null;
             try
             {
-                replacement = slide.Shapes.AddPicture(render.SvgPath, Office.MsoTriState.msoFalse,
+                replacement = slide.Shapes.AddPicture(framedPath, Office.MsoTriState.msoFalse,
                     Office.MsoTriState.msoTrue, left, top, newWidth, newHeight);
+                replacement.LockAspectRatio = Office.MsoTriState.msoFalse;
                 replacement.Rotation = rotation;
                 ApplyContract(replacement, source, metadata, TemporaryShapeName(metadata.Id),
-                    sourceSize.WidthPt, sourceSize.HeightPt, scale);
+                    sourceSize.WidthPt, sourceSize.HeightPt);
 
                 // While the old shape still exists, place the newly inserted topmost
                 // shape immediately above it. Deleting the old shape then leaves the
@@ -155,12 +175,14 @@ namespace LaTeXBlocks.PowerPoint
                 catch { try { replacement.Name = StableShapeName(metadata.Id); } catch { } }
                 if (selectReplacement)
                     try { replacement.Select(Office.MsoTriState.msoTrue); } catch { }
+                DeleteCachedSvg(framedPath);
                 DeleteCachedSvg(render.SvgPath);
                 return replacement;
             }
             catch
             {
                 try { replacement?.Delete(); } catch { }
+                DeleteCachedSvg(framedPath);
                 throw;
             }
         }
@@ -293,88 +315,57 @@ namespace LaTeXBlocks.PowerPoint
             }
         }
 
-        internal static PowerPointResizeResult ClassifyResize(PowerPointInterop.Shape shape,
+        internal static PowerPointFrameUpdate CaptureFrameResize(PowerPointInterop.Shape shape,
             LaTeXBlockMetadata metadata)
         {
             if (shape == null) throw new ArgumentNullException(nameof(shape));
             if (metadata == null) throw new ArgumentNullException(nameof(metadata));
             var intrinsicWidth = ReadPositiveTag(shape, SvgWidthTag, metadata.WidthPt);
             var intrinsicHeight = ReadPositiveTag(shape, SvgHeightTag, shape.Height);
-            var visualScale = ReadPositiveTag(shape, VisualScaleTag,
-                InferVisualScale(shape, intrinsicWidth, intrinsicHeight));
-            if (!(visualScale > 0)) visualScale = 1.0;
-            var expectedWidth = intrinsicWidth * visualScale;
-            var expectedHeight = intrinsicHeight * visualScale;
+            var expectedWidth = intrinsicWidth;
+            var expectedHeight = intrinsicHeight;
             if (!(expectedWidth > 0) || !(expectedHeight > 0))
-                return PowerPointResizeResult.None;
+                return PowerPointFrameUpdate.None;
 
-            var widthFactor = shape.Width / expectedWidth;
-            var heightFactor = shape.Height / expectedHeight;
             const double tolerancePt = 0.01;
             var widthChanged = Math.Abs(shape.Width - expectedWidth) > tolerancePt;
             var heightChanged = Math.Abs(shape.Height - expectedHeight) > tolerancePt;
-            if (!widthChanged && !heightChanged) return PowerPointResizeResult.None;
+            if (!widthChanged && !heightChanged) return PowerPointFrameUpdate.None;
 
-            // This mirrors Scholia's handles: a horizontal-only resize changes the
-            // TeX paragraph width; any vertical component is a visual-scale gesture.
-            if (!heightChanged)
-            {
-                var layoutWidth = Math.Max(36, Math.Min(2000,
-                    LayoutWidthForVisibleWidth(shape, metadata, shape.Width)));
-                return PowerPointResizeResult.Layout(layoutWidth, visualScale);
-            }
-
-            var scaleFactor = widthChanged && Math.Abs(widthFactor - 1.0) >
-                Math.Abs(heightFactor - 1.0) ? widthFactor : heightFactor;
-            var newScale = visualScale * scaleFactor;
-            return newScale > 0 && !double.IsNaN(newScale) && !double.IsInfinity(newScale)
-                ? PowerPointResizeResult.Scale(newScale)
-                : PowerPointResizeResult.None;
+            // Every native handle means the same thing: the user changed the host
+            // frame. The flags retain only which axes the user explicitly changed;
+            // they do not select different side/corner/vertical modes. Every true
+            // size change enters the async TeX reflow path. It never introduces
+            // visual scale.
+            return PowerPointFrameUpdate.Create(widthChanged, heightChanged,
+                ClampHostFrameWidth(shape.Width),
+                ClampHostFrameHeight(shape.Height));
         }
 
-        internal static double LayoutWidthForVisibleWidth(PowerPointInterop.Shape shape,
-            LaTeXBlockMetadata metadata, double visibleWidthPt)
+        private static double ClampHostFrameWidth(double widthPt)
         {
-            if (shape == null) throw new ArgumentNullException(nameof(shape));
-            if (metadata == null) throw new ArgumentNullException(nameof(metadata));
-            if (!(visibleWidthPt > 0)) throw new ArgumentOutOfRangeException(nameof(visibleWidthPt));
-            var intrinsicWidth = ReadPositiveTag(shape, SvgWidthTag, metadata.WidthPt);
-            var intrinsicHeight = ReadPositiveTag(shape, SvgHeightTag, shape.Height);
-            var visualScale = ReadPositiveTag(shape, VisualScaleTag,
-                InferVisualScale(shape, intrinsicWidth, intrinsicHeight));
-            var expectedVisibleWidth = intrinsicWidth * visualScale;
-            if (!(expectedVisibleWidth > 0)) expectedVisibleWidth = metadata.WidthPt;
-            return metadata.WidthPt * visibleWidthPt / expectedVisibleWidth;
+            if (double.IsNaN(widthPt) || double.IsInfinity(widthPt)) return 1;
+            return Math.Max(1, Math.Min(2000, widthPt));
         }
 
-        internal static void NormalizeVisualScale(PowerPointInterop.Shape shape,
-            double visualScale)
+        private static double ClampHostFrameHeight(double heightPt)
+        {
+            if (double.IsNaN(heightPt) || double.IsInfinity(heightPt)) return 1;
+            return Math.Max(1, Math.Min(2000, heightPt));
+        }
+
+        internal static double ReadFrameHeightPt(PowerPointInterop.Shape shape)
         {
             if (shape == null) throw new ArgumentNullException(nameof(shape));
-            if (!(visualScale > 0) || double.IsNaN(visualScale) ||
-                double.IsInfinity(visualScale))
-                throw new ArgumentOutOfRangeException(nameof(visualScale));
-            var intrinsicWidth = ReadPositiveTag(shape, SvgWidthTag, shape.Width);
-            var intrinsicHeight = ReadPositiveTag(shape, SvgHeightTag, shape.Height);
-            var snapshot = ShapeGeometrySnapshot.Capture(shape, true);
-            try
-            {
-                // Publish the metadata first, but restore both metadata and geometry
-                // if any subsequent COM setter rejects the resize.
-                shape.Tags.Add(VisualScaleTag,
-                    visualScale.ToString("R", CultureInfo.InvariantCulture));
-                SetGeometryAroundCurrentCenter(shape, intrinsicWidth * visualScale,
-                    intrinsicHeight * visualScale);
-            }
-            catch (Exception exception)
-            {
-                var recoveryFailure = RestoreGeometry(shape, snapshot);
-                if (recoveryFailure != null)
-                    throw new InvalidOperationException(
-                        "PowerPoint could not apply the visual scale and could not fully restore the previous shape geometry: " +
-                        recoveryFailure.Message, exception);
-                throw;
-            }
+            var height = Convert.ToDouble(shape.Height);
+            return ClampHostFrameHeight(height);
+        }
+
+        internal static double ReadFrameWidthPt(PowerPointInterop.Shape shape)
+        {
+            if (shape == null) throw new ArgumentNullException(nameof(shape));
+            var width = Convert.ToDouble(shape.Width);
+            return ClampHostFrameWidth(width);
         }
 
         internal static void RestoreStoredGeometry(PowerPointInterop.Shape shape,
@@ -384,15 +375,12 @@ namespace LaTeXBlocks.PowerPoint
             if (metadata == null) throw new ArgumentNullException(nameof(metadata));
             var intrinsicWidth = ReadPositiveTag(shape, SvgWidthTag, metadata.WidthPt);
             var intrinsicHeight = ReadPositiveTag(shape, SvgHeightTag, shape.Height);
-            var scale = ReadPositiveTag(shape, VisualScaleTag,
-                InferVisualScale(shape, intrinsicWidth, intrinsicHeight));
-            if (!(scale > 0)) scale = 1;
-            var snapshot = ShapeGeometrySnapshot.Capture(shape, false);
+            var snapshot = ShapeGeometrySnapshot.Capture(shape);
             try
             {
                 shape.LockAspectRatio = Office.MsoTriState.msoFalse;
-                shape.Width = (float)(intrinsicWidth * scale);
-                shape.Height = (float)(intrinsicHeight * scale);
+                shape.Width = (float)intrinsicWidth;
+                shape.Height = (float)intrinsicHeight;
             }
             catch (Exception exception)
             {
@@ -403,18 +391,6 @@ namespace LaTeXBlocks.PowerPoint
                         recoveryFailure.Message, exception);
                 throw;
             }
-        }
-
-        private static void SetGeometryAroundCurrentCenter(PowerPointInterop.Shape shape,
-            double widthPt, double heightPt)
-        {
-            var centerX = shape.Left + shape.Width / 2.0;
-            var centerY = shape.Top + shape.Height / 2.0;
-            shape.LockAspectRatio = Office.MsoTriState.msoFalse;
-            shape.Width = (float)widthPt;
-            shape.Height = (float)heightPt;
-            shape.Left = (float)(centerX - widthPt / 2.0);
-            shape.Top = (float)(centerY - heightPt / 2.0);
         }
 
         private static Exception RestoreGeometry(PowerPointInterop.Shape shape,
@@ -429,14 +405,6 @@ namespace LaTeXBlocks.PowerPoint
             RestoreStep(() => shape.Top = snapshot.Top, ref firstFailure);
             RestoreStep(() => shape.LockAspectRatio = snapshot.LockAspectRatio,
                 ref firstFailure);
-            if (snapshot.CapturesVisualScaleTag)
-            {
-                if (snapshot.HasVisualScaleTag)
-                    RestoreStep(() => shape.Tags.Add(VisualScaleTag, snapshot.VisualScaleTag),
-                        ref firstFailure);
-                else
-                    RestoreStep(() => shape.Tags.Delete(VisualScaleTag), ref firstFailure);
-            }
             return firstFailure;
         }
 
@@ -452,17 +420,13 @@ namespace LaTeXBlocks.PowerPoint
         private sealed class ShapeGeometrySnapshot
         {
             private ShapeGeometrySnapshot(float left, float top, float width, float height,
-                Office.MsoTriState lockAspectRatio, bool capturesVisualScaleTag,
-                bool hasVisualScaleTag, string visualScaleTag)
+                Office.MsoTriState lockAspectRatio)
             {
                 Left = left;
                 Top = top;
                 Width = width;
                 Height = height;
                 LockAspectRatio = lockAspectRatio;
-                CapturesVisualScaleTag = capturesVisualScaleTag;
-                HasVisualScaleTag = hasVisualScaleTag;
-                VisualScaleTag = visualScaleTag;
             }
 
             internal float Left { get; }
@@ -470,27 +434,11 @@ namespace LaTeXBlocks.PowerPoint
             internal float Width { get; }
             internal float Height { get; }
             internal Office.MsoTriState LockAspectRatio { get; }
-            internal bool CapturesVisualScaleTag { get; }
-            internal bool HasVisualScaleTag { get; }
-            internal string VisualScaleTag { get; }
 
-            internal static ShapeGeometrySnapshot Capture(PowerPointInterop.Shape shape,
-                bool includeVisualScaleTag)
+            internal static ShapeGeometrySnapshot Capture(PowerPointInterop.Shape shape)
             {
-                string visualScaleTag = null;
-                var hasVisualScaleTag = false;
-                if (includeVisualScaleTag)
-                {
-                    try
-                    {
-                        visualScaleTag = shape.Tags[PowerPointBlockService.VisualScaleTag];
-                        hasVisualScaleTag = !string.IsNullOrEmpty(visualScaleTag);
-                    }
-                    catch (COMException) { }
-                }
                 return new ShapeGeometrySnapshot(shape.Left, shape.Top, shape.Width, shape.Height,
-                    shape.LockAspectRatio,
-                    includeVisualScaleTag, hasVisualScaleTag, visualScaleTag);
+                    shape.LockAspectRatio);
             }
         }
 
@@ -501,6 +449,95 @@ namespace LaTeXBlocks.PowerPoint
 
         internal static double ReadSvgWidthPt(byte[] svgBytes) => ReadSvgLengthPt(svgBytes, "width");
         internal static double ReadSvgHeightPt(byte[] svgBytes) => ReadSvgLengthPt(svgBytes, "height");
+
+        // StemTeX owns the content SVG. PowerPoint owns a surrounding block frame.
+        // Extending the root viewport (rather than changing the picture's geometry)
+        // leaves all TeX coordinates at their original 1:1 physical scale and merely
+        // adds transparent frame space around the natural TeX result. The natural
+        // TeX box is a lower bound for a particular render: callers that need a
+        // smaller frame first ask StemTeX for a reflowed render, never scale or crop
+        // this SVG. If no fixed-size TeX render can satisfy the request, this
+        // method deliberately returns the natural lower bound as the safe fallback.
+        internal static byte[] FrameSvg(byte[] svgBytes, double requestedFrameWidthPt,
+            double requestedFrameHeightPt)
+        {
+            if (svgBytes == null || svgBytes.Length == 0)
+                throw new ArgumentException("StemTeX returned an empty SVG.", nameof(svgBytes));
+
+            var naturalSize = ReadSvgSize(svgBytes);
+            var frameWidthPt = Math.Max(naturalSize.WidthPt,
+                ClampHostFrameWidth(requestedFrameWidthPt));
+            var frameHeightPt = Math.Max(naturalSize.HeightPt,
+                ClampHostFrameHeight(requestedFrameHeightPt));
+            if (Math.Abs(frameWidthPt - naturalSize.WidthPt) < 0.001 &&
+                Math.Abs(frameHeightPt - naturalSize.HeightPt) < 0.001) return svgBytes;
+
+            var svg = Encoding.UTF8.GetString(svgBytes);
+            var root = Regex.Match(svg, "<svg\\b[^>]*>",
+                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+            if (!root.Success)
+                throw new InvalidDataException("StemTeX SVG has no root svg element.");
+
+            var rootTag = root.Value;
+            var viewBox = Regex.Match(rootTag,
+                "\\bviewBox=(?<q>['\"])(?<x>[-+0-9.eE]+)\\s+(?<y>[-+0-9.eE]+)\\s+" +
+                "(?<w>[-+0-9.eE]+)\\s+(?<h>[-+0-9.eE]+)\\k<q>",
+                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+            if (!viewBox.Success ||
+                !TryReadFinitePositive(viewBox.Groups["w"].Value, out var viewBoxWidth) ||
+                !TryReadFinitePositive(viewBox.Groups["h"].Value, out var viewBoxHeight) ||
+                !TryReadFinite(viewBox.Groups["x"].Value, out var viewBoxX) ||
+                !TryReadFinite(viewBox.Groups["y"].Value, out var viewBoxY))
+                throw new InvalidDataException("StemTeX SVG has no numeric root viewBox.");
+
+            // The root's physical dimensions and viewBox can use different units.
+            // Extend each axis by the same ratio in physical and viewBox space. This
+            // preserves the original TeX coordinate scale exactly; the additional
+            // frame area is transparent and keeps the formula centered.
+            var frameViewBoxWidth = viewBoxWidth * frameWidthPt / naturalSize.WidthPt;
+            var frameViewBoxX = viewBoxX - (frameViewBoxWidth - viewBoxWidth) / 2.0;
+            var frameViewBoxHeight = viewBoxHeight * frameHeightPt / naturalSize.HeightPt;
+            var frameViewBoxY = viewBoxY - (frameViewBoxHeight - viewBoxHeight) / 2.0;
+            var number = CultureInfo.InvariantCulture;
+            var newViewBox = frameViewBoxX.ToString("0.######", number) + " " +
+                             frameViewBoxY.ToString("0.######", number) + " " +
+                             frameViewBoxWidth.ToString("0.######", number) + " " +
+                             frameViewBoxHeight.ToString("0.######", number);
+            rootTag = ReplaceSvgAttribute(rootTag, "width",
+                frameWidthPt.ToString("0.######", number) + "pt");
+            rootTag = ReplaceSvgAttribute(rootTag, "height",
+                frameHeightPt.ToString("0.######", number) + "pt");
+            rootTag = ReplaceSvgAttribute(rootTag, "viewBox", newViewBox);
+            svg = svg.Substring(0, root.Index) + rootTag +
+                  svg.Substring(root.Index + root.Length);
+            return Encoding.UTF8.GetBytes(svg);
+        }
+
+        private static bool TryReadFinitePositive(string text, out double value)
+        {
+            return TryReadFinite(text, out value) && value > 0;
+        }
+
+        private static bool TryReadFinite(string text, out double value)
+        {
+            return double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture,
+                       out value) && !double.IsNaN(value) && !double.IsInfinity(value);
+        }
+
+        private static string ReplaceSvgAttribute(string rootTag, string name, string value)
+        {
+            var attribute = Regex.Match(rootTag,
+                "\\b" + Regex.Escape(name) + "=(?<q>['\"])[^'\"]*\\k<q>",
+                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+            var replacement = name + "='" + value + "'";
+            if (attribute.Success)
+                return rootTag.Substring(0, attribute.Index) + replacement +
+                       rootTag.Substring(attribute.Index + attribute.Length);
+            var insertion = rootTag.EndsWith("/>", StringComparison.Ordinal)
+                ? rootTag.Length - 2
+                : rootTag.Length - 1;
+            return rootTag.Insert(insertion, " " + replacement);
+        }
 
         private static double TryReadTextRange2Size(PowerPointInterop.Selection selection)
         {
@@ -584,12 +621,11 @@ namespace LaTeXBlocks.PowerPoint
         }
 
         private static void ApplyContract(PowerPointInterop.Shape shape, string source,
-            LaTeXBlockMetadata metadata, string name, double svgWidthPt, double svgHeightPt,
-            double visualScale)
+            LaTeXBlockMetadata metadata, string name, double svgWidthPt, double svgHeightPt)
         {
-            // Unlocking the picture exposes PowerPoint's horizontal side handles as
-            // layout-width handles. AfterShapeSizeChange restores uniform visual
-            // scaling for vertical/corner gestures.
+            // The picture geometry is the persisted host frame. All native handles
+            // feed the same frame-update path; committed SVGs are framed to exactly
+            // this geometry instead of retaining a visual zoom state.
             shape.LockAspectRatio = Office.MsoTriState.msoFalse;
             shape.AlternativeText = NormalizeSourceText(source);
             shape.Title = metadata.ToString();
@@ -598,8 +634,6 @@ namespace LaTeXBlocks.PowerPoint
                 svgWidthPt.ToString("R", CultureInfo.InvariantCulture));
             shape.Tags.Add(SvgHeightTag,
                 svgHeightPt.ToString("R", CultureInfo.InvariantCulture));
-            shape.Tags.Add(VisualScaleTag,
-                visualScale.ToString("R", CultureInfo.InvariantCulture));
             shape.Name = name;
         }
 
@@ -614,29 +648,6 @@ namespace LaTeXBlocks.PowerPoint
             }
             catch (COMException) { }
             return fallback;
-        }
-
-        private static double ReadVisualScale(PowerPointInterop.Shape shape,
-            LaTeXBlockMetadata metadata)
-        {
-            var intrinsicWidth = ReadPositiveTag(shape, SvgWidthTag, metadata.WidthPt);
-            var intrinsicHeight = ReadPositiveTag(shape, SvgHeightTag, shape.Height);
-            return ReadPositiveTag(shape, VisualScaleTag,
-                InferVisualScale(shape, intrinsicWidth, intrinsicHeight));
-        }
-
-        private static double InferVisualScale(PowerPointInterop.Shape shape,
-            double intrinsicWidth, double intrinsicHeight)
-        {
-            var widthScale = intrinsicWidth > 0 ? shape.Width / intrinsicWidth : 0;
-            var heightScale = intrinsicHeight > 0 ? shape.Height / intrinsicHeight : 0;
-            if (widthScale > 0 && heightScale > 0)
-            {
-                var relativeDifference = Math.Abs(widthScale - heightScale) /
-                    Math.Max(widthScale, heightScale);
-                return relativeDifference < 0.01 ? (widthScale + heightScale) / 2.0 : heightScale;
-            }
-            return widthScale > 0 ? widthScale : heightScale > 0 ? heightScale : 1.0;
         }
 
         private static int TryGetZOrder(PowerPointInterop.Shape shape)
@@ -772,28 +783,30 @@ namespace LaTeXBlocks.PowerPoint
         }
     }
 
-    internal enum PowerPointResizeKind { None, LayoutWidth, VisualScale }
-
-    internal sealed class PowerPointResizeResult
+    internal sealed class PowerPointFrameUpdate
     {
-        private PowerPointResizeResult(PowerPointResizeKind kind, double layoutWidthPt,
-            double visualScale)
+        private PowerPointFrameUpdate(bool widthChanged, bool heightChanged,
+            double frameWidthPt, double frameHeightPt)
         {
-            Kind = kind;
-            LayoutWidthPt = layoutWidthPt;
-            VisualScale = visualScale;
+            WidthChanged = widthChanged;
+            HeightChanged = heightChanged;
+            FrameWidthPt = frameWidthPt;
+            FrameHeightPt = frameHeightPt;
         }
 
-        internal static readonly PowerPointResizeResult None =
-            new PowerPointResizeResult(PowerPointResizeKind.None, 0, 0);
-        internal static PowerPointResizeResult Layout(double widthPt, double scale) =>
-            new PowerPointResizeResult(PowerPointResizeKind.LayoutWidth, widthPt, scale);
-        internal static PowerPointResizeResult Scale(double scale) =>
-            new PowerPointResizeResult(PowerPointResizeKind.VisualScale, 0, scale);
+        internal static readonly PowerPointFrameUpdate None =
+            new PowerPointFrameUpdate(false, false, 0, 0);
+        internal static PowerPointFrameUpdate Create(bool widthChanged, bool heightChanged,
+            double widthPt, double heightPt) =>
+            new PowerPointFrameUpdate(widthChanged, heightChanged, widthPt, heightPt);
 
-        internal PowerPointResizeKind Kind { get; }
-        internal double LayoutWidthPt { get; }
-        internal double VisualScale { get; }
+        internal bool HasChange => WidthChanged || HeightChanged;
+        // These flags only let two sequential Office events be merged into one frame
+        // update. They do not give the handles different user-facing semantics.
+        internal bool WidthChanged { get; }
+        internal bool HeightChanged { get; }
+        internal double FrameWidthPt { get; }
+        internal double FrameHeightPt { get; }
     }
 
     internal sealed class LaTeXBlockRender

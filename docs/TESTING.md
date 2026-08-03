@@ -38,16 +38,20 @@ PowerPoint executable.
 | Test | Office behavior | Main coverage |
 | --- | --- | --- |
 | Word smoke | Starts a separate hidden Word instance and closes it when complete. It rejects an accidental attachment to an existing visible Word instance. | StemTeX startup/shutdown, rendering, SVG insertion and replacement, metadata, baseline/inline behavior, numbered equations, and DOCX persistence. |
-| PowerPoint smoke | Requires PowerPoint to be closed, then starts a visible temporary PowerPoint instance and closes it when complete. | Rendering, block insertion and editing, profile and width controls, slide placement/scale behavior, and PPTX persistence. |
+| PowerPoint smoke | Requires PowerPoint to be closed, then starts a visible temporary PowerPoint instance and closes it when complete. | Rendering, block insertion and editing, profile/TeX-size/width controls, unified host-frame resize handling, and PPTX persistence. |
 
 The tests leave diagnostic documents under ignored `artifacts` directories. They are useful when diagnosing a failed
 Office assertion but are not release artifacts.
 
-## PowerPoint width integration test
+## PowerPoint host-frame integration test
 
-The separate PowerPoint integration test verifies that a direct horizontal shape resize is converted into a new
-StemTeX layout width without visual distortion. It uses the presentation created by the PowerPoint smoke test, so run
-that smoke test first.
+The separate PowerPoint integration test exercises the unified native host-frame contract through direct horizontal,
+vertical, and corner resizes. Every size change must submit a real StemTeX layout pass: width changes update the stored
+typesetting width, while height-only changes rerender the current width. It verifies that SVG content remains 1:1 with
+neither stretching nor cropping, then explicitly checks that move and rotation preserve the same Shape ID and do not
+rerender. It also sends two native gestures in succession after the first debounce window, so a late render from the
+first may not overwrite the second. It uses the presentation created by the PowerPoint smoke test, so run that smoke
+test first.
 
 With an installed PowerPoint add-in registered:
 
@@ -64,7 +68,7 @@ pwsh.exe -NoProfile -File .\tests\Test-PowerPointWidthIntegration.ps1 -Configura
 
 The latter mode temporarily registers the selected development build, launches PowerPoint, connects the add-in,
 resizes the generated block, and restores the previous PowerPoint registration in its cleanup path. It accepts
-`-ResizeFactor` (default `0.82`) and `-TimeoutSeconds` (default `30`) when investigating event timing.
+`-ResizeFactor` (default `1.18`) and `-TimeoutSeconds` (default `30`) when investigating event timing.
 
 Do not use this registry-only mode to replace an installed package on the same user profile. VSTO permits a solution
 identity to have only one deployment codebase and will reject the switch with

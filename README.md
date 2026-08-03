@@ -41,8 +41,12 @@ the Word field and tab scaffold remain.
 ### PowerPoint
 
 Use **Insert Block** or **Edit Block**. A new block starts with the ordinary text size at the active caret/selection
-when one exists. **Typesetting width (pt)** reflows the TeX; **TeX size (pt)** rerenders it at a different design
-size. Side-handle resizing reflows the block, while vertical/corner resizing remains native visual scale.
+when one exists. **Typesetting width (pt)** is an explicit TeX layout control; **TeX size (pt)** rerenders at a
+different design size. Every native PowerPoint *size* change also queues a real TeX layout pass: a changed width
+derives a new typesetting measure, while a height-only change rerenders at the current measure under the new frame.
+Moving or rotating the shape does not render. SVG artwork is never visually scaled or cropped. If fixed-size TeX
+cannot satisfy a constrained dimension after reflow, the frame retains the natural safe extent on that axis. Use
+**TeX size (pt)** when the formula itself should become larger or smaller.
 
 PowerPoint and Word save their profile choices independently.
 
