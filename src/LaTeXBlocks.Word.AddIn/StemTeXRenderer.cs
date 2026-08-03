@@ -4,6 +4,7 @@ using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Threading;
 using Microsoft.Win32;
 
 #if POWERPOINT
@@ -20,6 +21,11 @@ namespace LaTeXBlocks.Word
         // substitute the 0.11 runtime for the packaged binary.
         private static readonly Version RequiredRuntimeVersion = new Version(0, 12, 0);
         private readonly object gate = new object();
+        // RenderSvg keeps gate for the native render so create/destroy remain strictly
+        // serialized. Cancellation must not wait for that lock, but it still needs a
+        // small lifetime handshake so Destroy cannot free a renderer while an already
+        // issued cancel call is using its native pointer.
+        private readonly object cancellationGate = new object();
         private readonly string stemTeXHome;
         private readonly string runtimeRoot;
         private readonly string profileRoot;
@@ -27,6 +33,11 @@ namespace LaTeXBlocks.Word
         private IntPtr renderer;
         private NativeApi api;
         private bool disposed;
+        private bool nativeRenderInProgress;
+        private int activeCancelCalls;
+        private long nativeRenderGeneration;
+        private long cancellationRetryGeneration;
+        private int nativeCancelAttempts;
 
         internal StemTeXRenderer(string profile = "unicodemath_cjk")
         {
@@ -37,6 +48,14 @@ namespace LaTeXBlocks.Word
 
         internal string StemTeXHome => stemTeXHome;
         internal string ProfileRoot => profileRoot;
+        internal bool NativeRenderInProgressForTest
+        {
+            get { lock (cancellationGate) return nativeRenderInProgress; }
+        }
+        internal int NativeCancelAttemptsForTest
+        {
+            get { lock (cancellationGate) return nativeCancelAttempts; }
+        }
 
         internal void WarmUp()
         {
@@ -60,7 +79,7 @@ namespace LaTeXBlocks.Word
         }
 
         internal StemTeXSvgResult RenderSvg(string source, double widthPt, bool autoWidth = false,
-            double fontSizePt = 10)
+            double fontSizePt = 10, Func<bool> cancelBeforeNativeRender = null)
         {
             if (string.IsNullOrWhiteSpace(source)) throw new ArgumentException("LaTeX source cannot be empty.", nameof(source));
             if (widthPt <= 0) throw new ArgumentOutOfRangeException(nameof(widthPt));
@@ -78,8 +97,31 @@ namespace LaTeXBlocks.Word
                     var result = new StemTeXRenderOutputResult();
                     IntPtr error;
                     int errorCode;
-                    var ok = api.RenderOutputBytesWithFontSize(renderer, sourceUtf8.Pointer, renderWidth, fontSizePt,
-                        SvgOutputFormat, out bytes, out result, out errorCode, out error);
+                    int ok;
+                    lock (cancellationGate)
+                    {
+                        // Pair this check with CancelCurrent's native-render state.
+                        // If a newer preview wins before we enter the native call, it
+                        // returns here; if it wins after this point, CancelCurrent sees
+                        // nativeRenderInProgress and interrupts the active XeTeX job.
+                        if (cancelBeforeNativeRender != null && cancelBeforeNativeRender())
+                            throw new OperationCanceledException("StemTeX request was superseded.");
+                        ++nativeRenderGeneration;
+                        nativeRenderInProgress = true;
+                    }
+                    try
+                    {
+                        ok = api.RenderOutputBytesWithFontSize(renderer, sourceUtf8.Pointer, renderWidth, fontSizePt,
+                            SvgOutputFormat, out bytes, out result, out errorCode, out error);
+                    }
+                    finally
+                    {
+                        lock (cancellationGate)
+                        {
+                            nativeRenderInProgress = false;
+                            Monitor.PulseAll(cancellationGate);
+                        }
+                    }
                     try
                     {
                         if (ok == 0)
@@ -113,40 +155,52 @@ namespace LaTeXBlocks.Word
         private void EnsureRenderer()
         {
             if (renderer != IntPtr.Zero) return;
-            var dll = Path.Combine(runtimeRoot, "bin", "sdk", "stemtex-renderer.dll");
-            library = NativeMethods.LoadLibrary(dll);
-            if (library == IntPtr.Zero)
-                throw new InvalidOperationException("Unable to load StemTeX renderer: " + dll + " (Win32 " + Marshal.GetLastWin32Error() + ").");
-            api = new NativeApi(library);
-
-            using (var home = new NativeUtf8(stemTeXHome))
-            using (var runtime = new NativeUtf8(runtimeRoot))
-            using (var profile = new NativeUtf8(profileRoot))
+            try
             {
-                var config = new StemTeXConfig
+                var dll = Path.Combine(runtimeRoot, "bin", "sdk", "stemtex-renderer.dll");
+                library = NativeMethods.LoadLibrary(dll);
+                if (library == IntPtr.Zero)
+                    throw new InvalidOperationException("Unable to load StemTeX renderer: " + dll + " (Win32 " + Marshal.GetLastWin32Error() + ").");
+                api = new NativeApi(library);
+
+                using (var home = new NativeUtf8(stemTeXHome))
+                using (var runtime = new NativeUtf8(runtimeRoot))
+                using (var profile = new NativeUtf8(profileRoot))
                 {
-                    RepoRoot = home.Pointer,
-                    RuntimeRoot = runtime.Pointer,
-                    ProfileRoot = profile.Pointer,
-                    RequestTimeoutMs = 90000,
-                    XdvipdfmxTimeoutMs = 90000,
-                    DefaultWidthPt = 360,
-                    SpareWorkerCount = 0,
-                    AutoRestart = 1,
-                    DeleteIntermediates = 1
-                };
-                IntPtr error;
-                int errorCode;
-                renderer = api.Create(ref config, out errorCode, out error);
-                try
-                {
-                    if (renderer == IntPtr.Zero)
-                        throw new StemTeXException(errorCode, ReadUtf8(error) ?? "StemTeX initialization failed.");
+                    var config = new StemTeXConfig
+                    {
+                        RepoRoot = home.Pointer,
+                        RuntimeRoot = runtime.Pointer,
+                        ProfileRoot = profile.Pointer,
+                        RequestTimeoutMs = 90000,
+                        XdvipdfmxTimeoutMs = 90000,
+                        DefaultWidthPt = 360,
+                        SpareWorkerCount = 0,
+                        AutoRestart = 1,
+                        DeleteIntermediates = 1
+                    };
+                    IntPtr error;
+                    int errorCode;
+                    renderer = api.Create(ref config, out errorCode, out error);
+                    try
+                    {
+                        if (renderer == IntPtr.Zero)
+                            throw new StemTeXException(errorCode, ReadUtf8(error) ?? "StemTeX initialization failed.");
+                    }
+                    finally
+                    {
+                        if (error != IntPtr.Zero) api.FreeString(error);
+                    }
                 }
-                finally
-                {
-                    if (error != IntPtr.Zero) api.FreeString(error);
-                }
+            }
+            catch
+            {
+                // A failed create/entry-point load must leave this instance retryable.
+                // Without this cleanup a later retry overwrote library and leaked the
+                // old module handle, which also made diagnostics misleading.
+                try { ReleaseNativeResources(); }
+                catch { }
+                throw;
             }
         }
 
@@ -221,31 +275,107 @@ namespace LaTeXBlocks.Word
             lock (gate)
             {
                 if (disposed) return;
-                disposed = true;
-                if (renderer != IntPtr.Zero && api != null) api.Destroy(renderer);
-                renderer = IntPtr.Zero;
-                if (library != IntPtr.Zero) NativeMethods.FreeLibrary(library);
-                library = IntPtr.Zero;
+                lock (cancellationGate)
+                {
+                    disposed = true;
+                    while (activeCancelCalls != 0) Monitor.Wait(cancellationGate);
+                }
+                ReleaseNativeResources();
             }
+        }
+
+        // Reserves the current native render for one asynchronous cancellation loop.
+        // Calls made while the render is still crossing into the C++ renderer are
+        // intentionally coalesced; the loop below retries after active_slot is set.
+        internal long BeginCancelCurrent()
+        {
+            lock (cancellationGate)
+            {
+                if (disposed || !nativeRenderInProgress || renderer == IntPtr.Zero || api == null) return 0;
+                if (cancellationRetryGeneration == nativeRenderGeneration) return 0;
+                cancellationRetryGeneration = nativeRenderGeneration;
+                return nativeRenderGeneration;
+            }
+        }
+
+        internal bool IsNativeRenderInProgress(long expectedGeneration)
+        {
+            lock (cancellationGate)
+                return !disposed && nativeRenderInProgress && nativeRenderGeneration == expectedGeneration;
+        }
+
+        internal void ReleaseCancellationReservation(long expectedGeneration)
+        {
+            lock (cancellationGate)
+                if (cancellationRetryGeneration == expectedGeneration) cancellationRetryGeneration = 0;
         }
 
         internal void CancelCurrent()
         {
+            var generation = BeginCancelCurrent();
+            if (generation != 0) CancelCurrent(generation);
+        }
+
+        internal void CancelCurrent(long expectedGeneration)
+        {
             // Cancellation is intentionally concurrent with RenderSvg. The native API
             // uses its own control mutex and stops the active XeTeX child; taking gate
             // here would wait behind the render and defeat cancellation during shutdown.
-            var currentRenderer = renderer;
-            var currentApi = api;
-            if (currentRenderer == IntPtr.Zero || currentApi == null) return;
-            IntPtr error = IntPtr.Zero;
-            int errorCode;
+            IntPtr currentRenderer;
+            NativeApi currentApi;
+            lock (cancellationGate)
+            {
+                if (disposed || !nativeRenderInProgress || nativeRenderGeneration != expectedGeneration ||
+                    renderer == IntPtr.Zero || api == null) return;
+                currentRenderer = renderer;
+                currentApi = api;
+                ++activeCancelCalls;
+            }
             try
             {
-                currentApi.CancelCurrent(currentRenderer, out errorCode, out error);
+                IntPtr error = IntPtr.Zero;
+                int errorCode;
+                try
+                {
+                    lock (cancellationGate) ++nativeCancelAttempts;
+                    currentApi.CancelCurrent(currentRenderer, out errorCode, out error);
+                }
+                finally
+                {
+                    if (error != IntPtr.Zero)
+                    {
+                        try { currentApi.FreeString(error); }
+                        catch { }
+                    }
+                }
+            }
+            catch
+            {
+                // The request is already obsolete. A best-effort native cancellation
+                // must never surface as a new UI failure or break renderer shutdown.
             }
             finally
             {
-                if (error != IntPtr.Zero) currentApi.FreeString(error);
+                lock (cancellationGate)
+                {
+                    --activeCancelCalls;
+                    Monitor.PulseAll(cancellationGate);
+                }
+            }
+        }
+
+        private void ReleaseNativeResources()
+        {
+            try
+            {
+                if (renderer != IntPtr.Zero && api != null) api.Destroy(renderer);
+            }
+            finally
+            {
+                renderer = IntPtr.Zero;
+                api = null;
+                if (library != IntPtr.Zero) NativeMethods.FreeLibrary(library);
+                library = IntPtr.Zero;
             }
         }
 

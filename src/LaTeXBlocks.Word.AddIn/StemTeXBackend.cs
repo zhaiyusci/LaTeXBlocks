@@ -23,9 +23,23 @@ namespace LaTeXBlocks.Word
         private readonly Thread worker;
         private readonly string[] profiles;
         private readonly string stemTeXHome;
+        // Worker hosts are children of Office, not of this managed worker thread. A
+        // reloaded add-in therefore cannot identify them by parent PID alone: an old
+        // shutdown reaper could otherwise kill a freshly-created backend's host. Keep
+        // the concrete process identities observed by this backend and freeze them
+        // when shutdown begins.
+        private readonly Dictionary<int, long> observedWorkerHosts = new Dictionary<int, long>();
+        private Dictionary<int, long> shutdownWorkerHosts;
+        private long shutdownStartedUtcTicks;
         private StemTeXRenderer renderer;
         private string rendererProfile;
         private string selectedProfile;
+        // A selected profile can be different from the renderer currently in use
+        // while a replacement is warming. Keep that state separately so a failed
+        // warm-up can be retried without accidentally queueing duplicate creates
+        // for every keystroke in the preview editor.
+        private string initializingProfile;
+        private long initializingGeneration;
         private long generation;
         private long nextRequestId;
         private long latestRequestId;
@@ -63,18 +77,29 @@ namespace LaTeXBlocks.Word
         {
             var canonical = CanonicalProfile(profile);
             long requestedGeneration;
+            StemTeXRenderer previewToCancel = null;
             lock (gate)
             {
                 ThrowIfStopping();
-                if (string.Equals(selectedProfile, canonical, StringComparison.OrdinalIgnoreCase) && generation != 0) return;
+                var selectedAlready = string.Equals(selectedProfile, canonical,
+                    StringComparison.OrdinalIgnoreCase);
+                var rendererReady = renderer != null && string.Equals(rendererProfile, canonical,
+                    StringComparison.OrdinalIgnoreCase);
+                var initializationPending = initializingGeneration == generation &&
+                    string.Equals(initializingProfile, canonical, StringComparison.OrdinalIgnoreCase);
+                if (selectedAlready && generation != 0 && (rendererReady || initializationPending)) return;
                 selectedProfile = canonical;
                 requestedGeneration = ++generation;
+                initializingProfile = canonical;
+                initializingGeneration = requestedGeneration;
                 ++latestRequestId;
                 status = "warming:" + canonical;
                 queue.Enqueue(new BackendWorkItem(
                     () => InitializeRenderer(canonical, requestedGeneration), null));
+                previewToCancel = ActiveLatestPreviewRenderer_NoLock();
             }
             wake.Set();
+            RequestNativePreviewCancellation(previewToCancel);
         }
 
         internal void WarmUp(string profile)
@@ -103,6 +128,7 @@ namespace LaTeXBlocks.Word
             var completion = new TaskCompletionSource<StemTeXSvgResult>(TaskCreationOptions.RunContinuationsAsynchronously);
             long requestGeneration;
             long requestId;
+            StemTeXRenderer previewToCancel;
             lock (gate)
             {
                 ThrowIfStopping();
@@ -113,10 +139,31 @@ namespace LaTeXBlocks.Word
                 queue.Enqueue(new BackendWorkItem(
                     () => ExecuteRender(canonical, source, widthPt, autoWidth, fontSizePt,
                         requestGeneration, requestId, true, completion),
-                    () => completion.TrySetCanceled()));
+                    () => completion.TrySetCanceled(), true));
+                previewToCancel = ActiveLatestPreviewRenderer_NoLock();
             }
             wake.Set();
+            // This call deliberately happens outside gate. stemtex_renderer_cancel_current
+            // may wait on native control state, whereas the Office/UI thread only needs
+            // the lock long enough to publish the newer latest-only request.
+            RequestNativePreviewCancellation(previewToCancel);
             return completion.Task;
+        }
+
+        // The editor owns a latest-only preview generation. Closing it must invalidate
+        // that generation too; otherwise an already-running TeX render can keep the
+        // shared worker occupied long after the form has gone away. Durable document
+        // renders intentionally do not participate in this channel.
+        internal void CancelLatestPreview()
+        {
+            StemTeXRenderer previewToCancel;
+            lock (gate)
+            {
+                if (stopping) return;
+                ++latestRequestId;
+                previewToCancel = ActiveLatestPreviewRenderer_NoLock();
+            }
+            RequestNativePreviewCancellation(previewToCancel);
         }
 
         // Document mutations are durable work, unlike live previews. They retain FIFO
@@ -162,6 +209,7 @@ namespace LaTeXBlocks.Word
             {
                 replacement = new StemTeXRenderer(profile);
                 replacement.WarmUp();
+                RememberOwnedWorkerHosts();
                 lock (gate)
                 {
                     if (requestedGeneration != generation || stopping) return;
@@ -169,12 +217,28 @@ namespace LaTeXBlocks.Word
                     renderer = replacement;
                     replacement = null;
                     rendererProfile = profile;
+                    if (initializingGeneration == requestedGeneration)
+                    {
+                        initializingGeneration = 0;
+                        initializingProfile = null;
+                    }
                     status = "ready:" + profile;
                 }
             }
             catch (Exception exception)
             {
-                lock (gate) if (requestedGeneration == generation) status = "failed:" + exception.Message;
+                lock (gate)
+                {
+                    if (requestedGeneration == generation)
+                    {
+                        if (initializingGeneration == requestedGeneration)
+                        {
+                            initializingGeneration = 0;
+                            initializingProfile = null;
+                        }
+                        status = "failed:" + exception.Message;
+                    }
+                }
             }
             finally
             {
@@ -220,8 +284,10 @@ namespace LaTeXBlocks.Word
             {
                 if (renderer == null || !string.Equals(rendererProfile, profile, StringComparison.OrdinalIgnoreCase))
                     throw new InvalidOperationException("StemTeX renderer is not ready for profile " + profile + ".");
+                RememberOwnedWorkerHosts();
                 var result = RenderWithTransientRetry(source, widthPt, autoWidth, fontSizePt,
                     requestGeneration, requestId, latestOnly);
+                RememberOwnedWorkerHosts();
                 lock (gate)
                 {
                     if (stopping || requestGeneration != generation ||
@@ -236,11 +302,76 @@ namespace LaTeXBlocks.Word
             }
             catch (Exception exception)
             {
+                bool superseded;
                 lock (gate)
-                    if (requestGeneration == generation &&
-                        (!latestOnly || requestId == latestRequestId))
+                {
+                    superseded = stopping || requestGeneration != generation ||
+                        (latestOnly && requestId != latestRequestId);
+                    if (!superseded)
                         status = "failed:" + exception.Message;
-                completion.TrySetException(exception);
+                }
+                // Native cancellation of an obsolete preview normally reports an error
+                // from StemTeX. The editor should observe the same cancellation result
+                // whether the request was still queued or had already entered XeTeX.
+                if (superseded) completion.TrySetCanceled();
+                else completion.TrySetException(exception);
+            }
+        }
+
+        private StemTeXRenderer ActiveLatestPreviewRenderer_NoLock()
+        {
+            return !stopping && activeWorkItem != null && activeWorkItem.CanCancelNativeRender
+                ? renderer : null;
+        }
+
+        private static void RequestNativePreviewCancellation(StemTeXRenderer candidate)
+        {
+            if (candidate == null) return;
+            long nativeRenderGeneration;
+            try { nativeRenderGeneration = candidate.BeginCancelCurrent(); }
+            catch { return; }
+            if (nativeRenderGeneration == 0) return;
+            try
+            {
+                ThreadPool.QueueUserWorkItem(_ => CancelNativePreviewUntilStopped(candidate, nativeRenderGeneration));
+            }
+            catch
+            {
+                // Let a later preview request reserve a retry if queuing work itself
+                // fails during process teardown.
+                try { candidate.ReleaseCancellationReservation(nativeRenderGeneration); }
+                catch { }
+            }
+        }
+
+        private static void CancelNativePreviewUntilStopped(StemTeXRenderer candidate, long nativeRenderGeneration)
+        {
+            // C# knows only that the call has crossed into the native renderer. The
+            // C++ renderer publishes its active worker slot a few instructions later;
+            // retry briefly so an early cancel cannot be lost in that hand-off window.
+            const int attempts = 32;
+            const int intervalMs = 25;
+            try
+            {
+                for (var attempt = 0; attempt < attempts; attempt++)
+                {
+                    try
+                    {
+                        if (!candidate.IsNativeRenderInProgress(nativeRenderGeneration)) return;
+                        candidate.CancelCurrent(nativeRenderGeneration);
+                    }
+                    catch { return; }
+                    Thread.Sleep(intervalMs);
+                }
+            }
+            finally
+            {
+                // A missed native hand-off must not permanently suppress future
+                // cancellation requests for this render generation. Releasing the
+                // reservation is safe after a successful cancel too: a repeat cancel
+                // can only target the same still-obsolete native render.
+                try { candidate.ReleaseCancellationReservation(nativeRenderGeneration); }
+                catch { }
             }
         }
 
@@ -249,7 +380,8 @@ namespace LaTeXBlocks.Word
         {
             try
             {
-                return renderer.RenderSvg(source, widthPt, autoWidth, fontSizePt);
+                return renderer.RenderSvg(source, widthPt, autoWidth, fontSizePt,
+                    () => IsRequestSuperseded(requestGeneration, requestId, latestOnly));
             }
             catch (StemTeXException exception) when (
                 exception.ErrorCode == WorkerRestartingError || exception.ErrorCode == WorkerBusyError)
@@ -265,7 +397,17 @@ namespace LaTeXBlocks.Word
                     if (stopping || requestGeneration != generation ||
                         (latestOnly && requestId != latestRequestId))
                         throw new TaskCanceledException("StemTeX request was superseded.");
-                return renderer.RenderSvg(source, widthPt, autoWidth, fontSizePt);
+                return renderer.RenderSvg(source, widthPt, autoWidth, fontSizePt,
+                    () => IsRequestSuperseded(requestGeneration, requestId, latestOnly));
+            }
+        }
+
+        private bool IsRequestSuperseded(long requestGeneration, long requestId, bool latestOnly)
+        {
+            lock (gate)
+            {
+                return stopping || requestGeneration != generation ||
+                    (latestOnly && requestId != latestRequestId);
             }
         }
 
@@ -333,6 +475,7 @@ namespace LaTeXBlocks.Word
             {
                 if (stopping) return;
                 stopping = true;
+                shutdownStartedUtcTicks = DateTime.UtcNow.Ticks;
                 ++generation;
                 ++latestRequestId;
                 abandoned = queue.ToArray();
@@ -360,12 +503,34 @@ namespace LaTeXBlocks.Word
             get { lock (gate) return activeWorkItem != null; }
         }
 
+        internal bool NativeRenderInProgressForTest
+        {
+            get
+            {
+                StemTeXRenderer current;
+                lock (gate) current = renderer;
+                return current != null && current.NativeRenderInProgressForTest;
+            }
+        }
+
+        internal int NativeCancelAttemptsForTest
+        {
+            get
+            {
+                StemTeXRenderer current;
+                lock (gate) current = renderer;
+                return current == null ? 0 : current.NativeCancelAttemptsForTest;
+            }
+        }
+
         internal bool HasOwnedWorkerHostForTest
         {
             get
             {
                 var snapshot = ProcessTreeSnapshot.Capture();
-                return FindOwnedWorkerHosts(snapshot).Count > 0;
+                var matches = FindOwnedWorkerHosts(snapshot);
+                RememberOwnedWorkerHosts(matches);
+                return matches.Count > 0;
             }
         }
 
@@ -373,6 +538,7 @@ namespace LaTeXBlocks.Word
         {
             var reaper = new Thread(() =>
             {
+                FreezeShutdownWorkerHosts();
                 var timer = Stopwatch.StartNew();
                 do
                 {
@@ -391,18 +557,57 @@ namespace LaTeXBlocks.Word
 
         private void TerminateOwnedWorkerTrees()
         {
-            // stemtex_renderer_create does not publish its renderer pointer until the
-            // warm-up process has completed. Repeatedly terminate only the worker-host
-            // process tree created by this Word process and this StemTeX installation;
-            // this also catches a host born after the initial shutdown snapshot.
+            // Only terminate identities recorded for this backend before/falling into
+            // shutdown. Parent PID + executable path alone is not an ownership proof
+            // after an add-in reload, because both generations run under the same
+            // Office process and StemTeX installation.
             var snapshot = ProcessTreeSnapshot.Capture();
-            foreach (var entry in FindOwnedWorkerHosts(snapshot))
+            var matches = FindOwnedWorkerHosts(snapshot);
+            Dictionary<int, long> owned;
+            lock (gate)
+                owned = shutdownWorkerHosts == null ? null : new Dictionary<int, long>(shutdownWorkerHosts);
+            if (owned == null) return;
+            foreach (var entry in matches)
             {
+                long startTime;
+                if (!owned.TryGetValue(entry.ProcessId, out startTime) ||
+                    startTime != entry.StartTimeUtcTicks) continue;
                 try
                 {
                     ProcessTreeSnapshot.KillTree(entry.ProcessId, snapshot);
                 }
                 catch { }
+            }
+        }
+
+        private void RememberOwnedWorkerHosts()
+        {
+            var snapshot = ProcessTreeSnapshot.Capture();
+            RememberOwnedWorkerHosts(FindOwnedWorkerHosts(snapshot));
+        }
+
+        private void RememberOwnedWorkerHosts(List<ProcessTreeSnapshot> matches)
+        {
+            if (matches == null || matches.Count == 0) return;
+            lock (gate)
+            {
+                if (stopping || shutdownWorkerHosts != null) return;
+                foreach (var entry in matches)
+                    if (entry.StartTimeUtcTicks != 0) observedWorkerHosts[entry.ProcessId] = entry.StartTimeUtcTicks;
+            }
+        }
+
+        private void FreezeShutdownWorkerHosts()
+        {
+            var snapshot = ProcessTreeSnapshot.Capture();
+            var matches = FindOwnedWorkerHosts(snapshot);
+            lock (gate)
+            {
+                if (shutdownWorkerHosts != null) return;
+                shutdownWorkerHosts = new Dictionary<int, long>(observedWorkerHosts);
+                foreach (var entry in matches)
+                    if (entry.StartTimeUtcTicks != 0 && entry.StartTimeUtcTicks <= shutdownStartedUtcTicks)
+                        shutdownWorkerHosts[entry.ProcessId] = entry.StartTimeUtcTicks;
             }
         }
 
@@ -423,6 +628,7 @@ namespace LaTeXBlocks.Word
                     {
                         if (!string.Equals(Path.GetFullPath(host.MainModule.FileName), expectedHost,
                             StringComparison.OrdinalIgnoreCase)) continue;
+                        entry.StartTimeUtcTicks = host.StartTime.ToUniversalTime().Ticks;
                     }
                     matches.Add(entry);
                 }
@@ -435,12 +641,14 @@ namespace LaTeXBlocks.Word
         {
             private readonly Action execute;
             private readonly Action cancel;
-
-            internal BackendWorkItem(Action execute, Action cancel)
+            internal BackendWorkItem(Action execute, Action cancel, bool canCancelNativeRender = false)
             {
                 this.execute = execute ?? throw new ArgumentNullException(nameof(execute));
                 this.cancel = cancel;
+                CanCancelNativeRender = canCancelNativeRender;
             }
+
+            internal bool CanCancelNativeRender { get; }
 
             internal void Execute() { execute(); }
             internal void Cancel()
@@ -457,6 +665,7 @@ namespace LaTeXBlocks.Word
             internal int ProcessId;
             internal int ParentProcessId;
             internal string ExecutableName;
+            internal long StartTimeUtcTicks;
 
             internal static List<ProcessTreeSnapshot> Capture()
             {

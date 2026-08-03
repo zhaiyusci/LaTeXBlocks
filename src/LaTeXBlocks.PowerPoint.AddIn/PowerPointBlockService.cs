@@ -20,6 +20,7 @@ namespace LaTeXBlocks.PowerPoint
         private readonly PowerPointInterop.Application application;
         private readonly StemTeXBackend renderers;
         private readonly string cacheDirectory;
+        private const int CacheRetentionDays = 7;
 
         internal PowerPointBlockService(PowerPointInterop.Application application, StemTeXBackend renderers)
         {
@@ -29,9 +30,17 @@ namespace LaTeXBlocks.PowerPoint
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
                 "LaTeXBlocks", "PowerPointCache");
             Directory.CreateDirectory(cacheDirectory);
+            SweepExpiredCacheFiles();
         }
 
         internal string[] Profiles => renderers.Profiles;
+
+        internal void CancelPreview()
+        {
+            // Closing an editor must not leave an obsolete latest-only XeTeX request
+            // occupying the shared worker. This never cancels committed document work.
+            renderers.CancelLatestPreview();
+        }
 
         internal async Task<LaTeXBlockRender> RenderPreviewAsync(string source, double widthPt,
             string profile, double fontSizePt)
@@ -87,6 +96,7 @@ namespace LaTeXBlocks.PowerPoint
                     size.WidthPt, size.HeightPt, 1.0);
                 shape.Name = StableShapeName(metadata.Id);
                 shape.Select(Office.MsoTriState.msoTrue);
+                DeleteCachedSvg(render.SvgPath);
                 return shape;
             }
             catch
@@ -145,6 +155,7 @@ namespace LaTeXBlocks.PowerPoint
                 catch { try { replacement.Name = StableShapeName(metadata.Id); } catch { } }
                 if (selectReplacement)
                     try { replacement.Select(Office.MsoTriState.msoTrue); } catch { }
+                DeleteCachedSvg(render.SvgPath);
                 return replacement;
             }
             catch
@@ -345,10 +356,25 @@ namespace LaTeXBlocks.PowerPoint
                 throw new ArgumentOutOfRangeException(nameof(visualScale));
             var intrinsicWidth = ReadPositiveTag(shape, SvgWidthTag, shape.Width);
             var intrinsicHeight = ReadPositiveTag(shape, SvgHeightTag, shape.Height);
-            SetGeometryAroundCurrentCenter(shape, intrinsicWidth * visualScale,
-                intrinsicHeight * visualScale);
-            shape.Tags.Add(VisualScaleTag,
-                visualScale.ToString("R", CultureInfo.InvariantCulture));
+            var snapshot = ShapeGeometrySnapshot.Capture(shape, true);
+            try
+            {
+                // Publish the metadata first, but restore both metadata and geometry
+                // if any subsequent COM setter rejects the resize.
+                shape.Tags.Add(VisualScaleTag,
+                    visualScale.ToString("R", CultureInfo.InvariantCulture));
+                SetGeometryAroundCurrentCenter(shape, intrinsicWidth * visualScale,
+                    intrinsicHeight * visualScale);
+            }
+            catch (Exception exception)
+            {
+                var recoveryFailure = RestoreGeometry(shape, snapshot);
+                if (recoveryFailure != null)
+                    throw new InvalidOperationException(
+                        "PowerPoint could not apply the visual scale and could not fully restore the previous shape geometry: " +
+                        recoveryFailure.Message, exception);
+                throw;
+            }
         }
 
         internal static void RestoreStoredGeometry(PowerPointInterop.Shape shape,
@@ -361,9 +387,22 @@ namespace LaTeXBlocks.PowerPoint
             var scale = ReadPositiveTag(shape, VisualScaleTag,
                 InferVisualScale(shape, intrinsicWidth, intrinsicHeight));
             if (!(scale > 0)) scale = 1;
-            shape.LockAspectRatio = Office.MsoTriState.msoFalse;
-            shape.Width = (float)(intrinsicWidth * scale);
-            shape.Height = (float)(intrinsicHeight * scale);
+            var snapshot = ShapeGeometrySnapshot.Capture(shape, false);
+            try
+            {
+                shape.LockAspectRatio = Office.MsoTriState.msoFalse;
+                shape.Width = (float)(intrinsicWidth * scale);
+                shape.Height = (float)(intrinsicHeight * scale);
+            }
+            catch (Exception exception)
+            {
+                var recoveryFailure = RestoreGeometry(shape, snapshot);
+                if (recoveryFailure != null)
+                    throw new InvalidOperationException(
+                        "PowerPoint could not restore the LaTeX Block geometry and could not fully restore its prior state: " +
+                        recoveryFailure.Message, exception);
+                throw;
+            }
         }
 
         private static void SetGeometryAroundCurrentCenter(PowerPointInterop.Shape shape,
@@ -376,6 +415,83 @@ namespace LaTeXBlocks.PowerPoint
             shape.Height = (float)heightPt;
             shape.Left = (float)(centerX - widthPt / 2.0);
             shape.Top = (float)(centerY - heightPt / 2.0);
+        }
+
+        private static Exception RestoreGeometry(PowerPointInterop.Shape shape,
+            ShapeGeometrySnapshot snapshot)
+        {
+            Exception firstFailure = null;
+            RestoreStep(() => shape.LockAspectRatio = Office.MsoTriState.msoFalse,
+                ref firstFailure);
+            RestoreStep(() => shape.Width = snapshot.Width, ref firstFailure);
+            RestoreStep(() => shape.Height = snapshot.Height, ref firstFailure);
+            RestoreStep(() => shape.Left = snapshot.Left, ref firstFailure);
+            RestoreStep(() => shape.Top = snapshot.Top, ref firstFailure);
+            RestoreStep(() => shape.LockAspectRatio = snapshot.LockAspectRatio,
+                ref firstFailure);
+            if (snapshot.CapturesVisualScaleTag)
+            {
+                if (snapshot.HasVisualScaleTag)
+                    RestoreStep(() => shape.Tags.Add(VisualScaleTag, snapshot.VisualScaleTag),
+                        ref firstFailure);
+                else
+                    RestoreStep(() => shape.Tags.Delete(VisualScaleTag), ref firstFailure);
+            }
+            return firstFailure;
+        }
+
+        private static void RestoreStep(Action action, ref Exception firstFailure)
+        {
+            try { action(); }
+            catch (Exception exception)
+            {
+                if (firstFailure == null) firstFailure = exception;
+            }
+        }
+
+        private sealed class ShapeGeometrySnapshot
+        {
+            private ShapeGeometrySnapshot(float left, float top, float width, float height,
+                Office.MsoTriState lockAspectRatio, bool capturesVisualScaleTag,
+                bool hasVisualScaleTag, string visualScaleTag)
+            {
+                Left = left;
+                Top = top;
+                Width = width;
+                Height = height;
+                LockAspectRatio = lockAspectRatio;
+                CapturesVisualScaleTag = capturesVisualScaleTag;
+                HasVisualScaleTag = hasVisualScaleTag;
+                VisualScaleTag = visualScaleTag;
+            }
+
+            internal float Left { get; }
+            internal float Top { get; }
+            internal float Width { get; }
+            internal float Height { get; }
+            internal Office.MsoTriState LockAspectRatio { get; }
+            internal bool CapturesVisualScaleTag { get; }
+            internal bool HasVisualScaleTag { get; }
+            internal string VisualScaleTag { get; }
+
+            internal static ShapeGeometrySnapshot Capture(PowerPointInterop.Shape shape,
+                bool includeVisualScaleTag)
+            {
+                string visualScaleTag = null;
+                var hasVisualScaleTag = false;
+                if (includeVisualScaleTag)
+                {
+                    try
+                    {
+                        visualScaleTag = shape.Tags[PowerPointBlockService.VisualScaleTag];
+                        hasVisualScaleTag = !string.IsNullOrEmpty(visualScaleTag);
+                    }
+                    catch (COMException) { }
+                }
+                return new ShapeGeometrySnapshot(shape.Left, shape.Top, shape.Width, shape.Height,
+                    shape.LockAspectRatio,
+                    includeVisualScaleTag, hasVisualScaleTag, visualScaleTag);
+            }
         }
 
         internal static string NormalizeSourceText(string source)
@@ -548,6 +664,32 @@ namespace LaTeXBlocks.PowerPoint
             var path = Path.Combine(cacheDirectory, Guid.NewGuid().ToString("N") + ".svg");
             File.WriteAllBytes(path, bytes);
             return path;
+        }
+
+        private void SweepExpiredCacheFiles()
+        {
+            try
+            {
+                var cutoff = DateTime.UtcNow.AddDays(-CacheRetentionDays);
+                foreach (var path in Directory.GetFiles(cacheDirectory, "*.svg"))
+                    if (File.GetLastWriteTimeUtc(path) < cutoff)
+                        try { File.Delete(path); } catch { }
+            }
+            catch { }
+        }
+
+        private void DeleteCachedSvg(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path)) return;
+            try
+            {
+                var cacheRoot = Path.GetFullPath(cacheDirectory).TrimEnd(Path.DirectorySeparatorChar,
+                    Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
+                var candidate = Path.GetFullPath(path);
+                if (!candidate.StartsWith(cacheRoot, StringComparison.OrdinalIgnoreCase)) return;
+                File.Delete(candidate);
+            }
+            catch { }
         }
 
         private static SvgSize ReadSvgSize(byte[] svgBytes)

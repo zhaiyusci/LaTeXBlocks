@@ -30,6 +30,7 @@ namespace LaTeXBlocks.Word
         private long formatRefreshSequence;
         private int programmaticMutationDepth;
         private bool shuttingDown;
+        private bool hostEventProcessingEnabled;
         private const int NativeFontSizeControlId = 1731;
         // A profile is a host-level preference: selecting a Word profile must
         // not change the one PowerPoint starts with.
@@ -42,43 +43,70 @@ namespace LaTeXBlocks.Word
 
         private void ThisAddIn_Startup(object sender, EventArgs e)
         {
-            wordUiDispatcher = new Control();
-            wordUiDispatcher.CreateControl();
-            Application.WindowBeforeDoubleClick += Application_WindowBeforeDoubleClick;
-            Application.WindowSelectionChange += Application_WindowSelectionChange;
-            AttachNativeFontSizeControl();
-            if (Application.Documents.Count > 0) RememberSelection(Application.Selection);
             try
             {
+                wordUiDispatcher = new Control();
+                wordUiDispatcher.CreateControl();
+                Application.WindowBeforeDoubleClick += Application_WindowBeforeDoubleClick;
+                Application.WindowSelectionChange += Application_WindowSelectionChange;
+                AttachNativeFontSizeControl();
+                if (Application.Documents.Count > 0) RememberSelection(Application.Selection);
+
                 var pool = Renderers;
                 currentProfile = LoadCurrentProfile(pool);
                 var startupProfile = currentProfile;
                 backendStatus = "warming:" + startupProfile;
                 pool.SwitchProfile(startupProfile);
                 backendStatus = pool.Status;
+                hostEventProcessingEnabled = true;
             }
             catch (Exception exception)
             {
                 backendStartupError = exception.Message;
                 backendStatus = "failed";
+                ReleaseHostResources();
             }
         }
 
         private void ThisAddIn_Shutdown(object sender, EventArgs e)
         {
             shuttingDown = true;
+            ReleaseHostResources();
+        }
+
+        private void ReleaseHostResources()
+        {
+            hostEventProcessingEnabled = false;
             Interlocked.Increment(ref formatRefreshSequence);
             pendingFormatRefreshes.Clear();
             formatRefreshesInFlight.Clear();
-            Application.WindowBeforeDoubleClick -= Application_WindowBeforeDoubleClick;
-            Application.WindowSelectionChange -= Application_WindowSelectionChange;
-            DetachNativeFontSizeControl();
-            ClearPreviousSelectionSnapshot();
-            rendererPool?.Dispose();
+            // Word is already part-way through COM teardown when this event runs. One
+            // failed event unsubscription must never prevent the renderer shutdown
+            // path from being reached: otherwise the background worker is left alive
+            // until the process finally exits.
+            RunBestEffortCleanup(() => Application.WindowBeforeDoubleClick -= Application_WindowBeforeDoubleClick);
+            RunBestEffortCleanup(() => Application.WindowSelectionChange -= Application_WindowSelectionChange);
+            RunBestEffortCleanup(DetachNativeFontSizeControl);
+            RunBestEffortCleanup(ClearPreviousSelectionSnapshot);
+
+            var pool = rendererPool;
             rendererPool = null;
             blocks = null;
-            wordUiDispatcher?.Dispose();
+            RunBestEffortCleanup(() => pool?.Dispose());
+
+            var dispatcher = wordUiDispatcher;
             wordUiDispatcher = null;
+            RunBestEffortCleanup(() => dispatcher?.Dispose());
+        }
+
+        private static void RunBestEffortCleanup(Action cleanup)
+        {
+            try { cleanup?.Invoke(); }
+            catch
+            {
+                // Startup rollback and VSTO shutdown can both race Word COM teardown.
+                // Cleanup is best-effort, but every independently owned step still runs.
+            }
         }
 
         internal void ShowInsertFormulaEditor()
@@ -239,7 +267,8 @@ namespace LaTeXBlocks.Word
 
         private void NativeFontSizeControl_Change(Office.CommandBarComboBox control)
         {
-            if (refreshingNativeFontSize || Application.Documents.Count == 0) return;
+            if (shuttingDown || !hostEventProcessingEnabled || refreshingNativeFontSize ||
+                Application.Documents.Count == 0) return;
             try
             {
                 refreshingNativeFontSize = true;
@@ -262,7 +291,8 @@ namespace LaTeXBlocks.Word
 
         private void Application_WindowSelectionChange(WordInterop.Selection selection)
         {
-            if (refreshingNativeFontSize || programmaticMutationDepth > 0)
+            if (shuttingDown || !hostEventProcessingEnabled || refreshingNativeFontSize ||
+                programmaticMutationDepth > 0)
                 return;
 
             try
@@ -356,6 +386,7 @@ namespace LaTeXBlocks.Word
 
         private void QueueFormatRefresh(FormatRefreshRequest request)
         {
+            if (shuttingDown || request == null) return;
             var profile = currentProfile ?? Renderers.DefaultAvailableProfile;
             var targetWidthPt = request.Metadata.WidthPt;
             var targetFontSizePt = request.Metadata.FontSizePt;
@@ -626,6 +657,7 @@ namespace LaTeXBlocks.Word
 
         private void Application_WindowBeforeDoubleClick(WordInterop.Selection selection, ref bool cancel)
         {
+            if (shuttingDown || !hostEventProcessingEnabled) return;
             try
             {
                 if (!Blocks.TryGetSelectedBlock(out var shape, out var metadata)) return;
@@ -653,15 +685,83 @@ namespace LaTeXBlocks.Word
 
         private void SetCurrentProfile(string profile)
         {
+            if (shuttingDown) throw new ObjectDisposedException(nameof(ThisAddIn));
             var valid = false;
             foreach (var candidate in Renderers.Profiles)
                 if (string.Equals(candidate, profile, StringComparison.OrdinalIgnoreCase)) { profile = candidate; valid = true; break; }
             if (!valid) throw new ArgumentException("Unknown StemTeX profile: " + profile, nameof(profile));
+            if (string.Equals(currentProfile, profile, StringComparison.OrdinalIgnoreCase)) return;
+
+            // Do not expose the new profile to the editor, queued format updates, or
+            // the next Word session until both immediate state transitions succeeded.
+            // SwitchProfile can still finish warming asynchronously; its synchronous
+            // validation/shutdown failures must leave the old host preference intact.
+            var previousProfile = currentProfile;
+            var previousSetting = ReadProfileSetting();
+            Renderers.SwitchProfile(profile);
+            try
+            {
+                WriteProfileSetting(profile);
+            }
+            catch (Exception persistenceException)
+            {
+                Exception rollbackFailure = null;
+                try { RestoreProfileSetting(previousSetting); }
+                catch (Exception exception) { rollbackFailure = exception; }
+                if (!string.IsNullOrWhiteSpace(previousProfile))
+                {
+                    try { Renderers.SwitchProfile(previousProfile); }
+                    catch (Exception exception) { rollbackFailure = rollbackFailure ?? exception; }
+                }
+
+                if (rollbackFailure != null)
+                    throw new InvalidOperationException(
+                        "Word could not save the selected StemTeX profile and could not restore the previous profile.",
+                        new AggregateException(persistenceException, rollbackFailure));
+                throw;
+            }
+
+            currentProfile = profile;
             pendingFormatRefreshes.Clear();
             Interlocked.Increment(ref formatRefreshSequence);
-            currentProfile = profile;
-            Renderers.SwitchProfile(profile);
-            using (var key = Registry.CurrentUser.CreateSubKey(SettingsKey)) key.SetValue("Profile", profile, RegistryValueKind.String);
+        }
+
+        private static ProfileSetting ReadProfileSetting()
+        {
+            using (var key = Registry.CurrentUser.OpenSubKey(SettingsKey))
+            {
+                var value = key?.GetValue("Profile") as string;
+                return new ProfileSetting(value != null, value);
+            }
+        }
+
+        private static void WriteProfileSetting(string profile)
+        {
+            using (var key = Registry.CurrentUser.CreateSubKey(SettingsKey))
+                key.SetValue("Profile", profile, RegistryValueKind.String);
+        }
+
+        private static void RestoreProfileSetting(ProfileSetting setting)
+        {
+            using (var key = Registry.CurrentUser.CreateSubKey(SettingsKey))
+            {
+                if (setting.HasValue)
+                    key.SetValue("Profile", setting.Value, RegistryValueKind.String);
+                else
+                    key.DeleteValue("Profile", false);
+            }
+        }
+
+        private struct ProfileSetting
+        {
+            internal ProfileSetting(bool hasValue, string value)
+            {
+                HasValue = hasValue;
+                Value = value;
+            }
+
+            internal bool HasValue { get; }
+            internal string Value { get; }
         }
 
         protected override Office.IRibbonExtensibility CreateRibbonExtensibilityObject()

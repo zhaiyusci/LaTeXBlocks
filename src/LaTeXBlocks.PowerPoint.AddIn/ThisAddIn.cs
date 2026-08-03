@@ -41,13 +41,13 @@ namespace LaTeXBlocks.PowerPoint
 
         private void ThisAddIn_Startup(object sender, EventArgs e)
         {
-            powerPointUiDispatcher = new Control();
-            powerPointUiDispatcher.CreateControl();
-            Application.WindowBeforeDoubleClick += Application_WindowBeforeDoubleClick;
-            Application.WindowSelectionChange += Application_WindowSelectionChange;
-            Application.AfterShapeSizeChange += Application_AfterShapeSizeChange;
             try
             {
+                powerPointUiDispatcher = new Control();
+                powerPointUiDispatcher.CreateControl();
+                Application.WindowBeforeDoubleClick += Application_WindowBeforeDoubleClick;
+                Application.WindowSelectionChange += Application_WindowSelectionChange;
+                Application.AfterShapeSizeChange += Application_AfterShapeSizeChange;
                 var pool = Renderers;
                 currentProfile = LoadCurrentProfile(pool);
                 pool.SwitchProfile(currentProfile);
@@ -55,7 +55,23 @@ namespace LaTeXBlocks.PowerPoint
             catch (Exception exception)
             {
                 backendStartupError = exception.Message;
+                // Startup can fail after Office event sinks or the UI dispatcher have
+                // already been created. Leave the add-in disabled-but-clean instead
+                // of retaining callbacks into a half-initialized host object.
+                ReleaseHostResources();
             }
+        }
+
+        private void ReleaseHostResources()
+        {
+            try { Application.WindowBeforeDoubleClick -= Application_WindowBeforeDoubleClick; } catch { }
+            try { Application.WindowSelectionChange -= Application_WindowSelectionChange; } catch { }
+            try { Application.AfterShapeSizeChange -= Application_AfterShapeSizeChange; } catch { }
+            try { rendererPool?.Dispose(); } catch { }
+            rendererPool = null;
+            blocks = null;
+            try { powerPointUiDispatcher?.Dispose(); } catch { }
+            powerPointUiDispatcher = null;
         }
 
         private void ThisAddIn_Shutdown(object sender, EventArgs e)
@@ -65,14 +81,19 @@ namespace LaTeXBlocks.PowerPoint
             pendingBlockFormats.Clear();
             blockFormatsInFlight.Clear();
             deferredSizeEventSuppression.Clear();
-            Application.WindowBeforeDoubleClick -= Application_WindowBeforeDoubleClick;
-            Application.WindowSelectionChange -= Application_WindowSelectionChange;
-            Application.AfterShapeSizeChange -= Application_AfterShapeSizeChange;
-            rendererPool?.Dispose();
-            rendererPool = null;
-            blocks = null;
-            powerPointUiDispatcher?.Dispose();
-            powerPointUiDispatcher = null;
+            try
+            {
+                // Office can disconnect event sinks before VSTO raises Shutdown. Each
+                // unhook is therefore best effort; none may prevent the renderer's
+                // non-blocking disposal/reaper from running.
+                try { Application.WindowBeforeDoubleClick -= Application_WindowBeforeDoubleClick; } catch { }
+                try { Application.WindowSelectionChange -= Application_WindowSelectionChange; } catch { }
+                try { Application.AfterShapeSizeChange -= Application_AfterShapeSizeChange; } catch { }
+            }
+            finally
+            {
+                ReleaseHostResources();
+            }
         }
 
         internal void ShowInsertBlockEditor()
@@ -384,12 +405,16 @@ namespace LaTeXBlocks.PowerPoint
             catch (COMException) { return false; }
         }
 
-        private void PostToPowerPointUi(Action action)
+        private bool PostToPowerPointUi(Action action)
         {
             var dispatcher = powerPointUiDispatcher;
-            if (dispatcher == null || dispatcher.IsDisposed || shuttingDown) return;
-            try { dispatcher.BeginInvoke(action); }
-            catch (InvalidOperationException) { }
+            if (dispatcher == null || dispatcher.IsDisposed || shuttingDown) return false;
+            try
+            {
+                dispatcher.BeginInvoke(action);
+                return true;
+            }
+            catch (InvalidOperationException) { return false; }
         }
 
         private void ShowBlockFormattingError(Exception exception)
@@ -436,10 +461,10 @@ namespace LaTeXBlocks.PowerPoint
                     selection.ShapeRange.Count != 1 ||
                     !PowerPointBlockService.TryReadContract(selection.ShapeRange[1], out _, out _))
                     return;
-                cancel = true;
-                var dispatcher = powerPointUiDispatcher;
-                if (dispatcher == null || dispatcher.IsDisposed || shuttingDown) return;
-                dispatcher.BeginInvoke(new Action(() =>
+                // Do not cancel PowerPoint's native edit until we know the deferred
+                // editor invocation was actually queued. A disposed dispatcher is a
+                // normal shutdown race, not an exception that may escape the event.
+                if (!PostToPowerPointUi(new Action(() =>
                 {
                     if (shuttingDown) return;
                     try { ShowEditBlockEditor(); }
@@ -449,9 +474,11 @@ namespace LaTeXBlocks.PowerPoint
                             exception.Message, "LaTeX Blocks", MessageBoxButtons.OK,
                             MessageBoxIcon.Error);
                     }
-                }));
+                }))) return;
+                cancel = true;
             }
             catch (COMException) { }
+            catch (InvalidOperationException) { }
         }
 
         private void EnsureBackendAvailable()
@@ -493,12 +520,39 @@ namespace LaTeXBlocks.PowerPoint
             if (!valid)
                 throw new ArgumentException("Unknown StemTeX profile: " + profile,
                     nameof(profile));
+            if (shuttingDown) throw new ObjectDisposedException(nameof(ThisAddIn));
+            if (string.Equals(currentProfile, profile, StringComparison.OrdinalIgnoreCase)) return;
+
+            // Persist before publishing the new in-memory profile. A registry failure
+            // must leave the current profile and all queued document updates intact.
+            var previousProfile = currentProfile;
+            try
+            {
+                using (var key = Registry.CurrentUser.CreateSubKey(SettingsKey))
+                    key.SetValue("Profile", profile, RegistryValueKind.String);
+                Renderers.SwitchProfile(profile);
+            }
+            catch
+            {
+                RestorePersistedProfile(previousProfile);
+                throw;
+            }
+            currentProfile = profile;
             foreach (var pending in new List<PendingBlockFormat>(pendingBlockFormats.Values))
                 AbandonBlockFormat(pending, null);
-            currentProfile = profile;
-            Renderers.SwitchProfile(profile);
-            using (var key = Registry.CurrentUser.CreateSubKey(SettingsKey))
-                key.SetValue("Profile", profile, RegistryValueKind.String);
+        }
+
+        private static void RestorePersistedProfile(string profile)
+        {
+            try
+            {
+                using (var key = Registry.CurrentUser.CreateSubKey(SettingsKey))
+                {
+                    if (string.IsNullOrWhiteSpace(profile)) key.DeleteValue("Profile", false);
+                    else key.SetValue("Profile", profile, RegistryValueKind.String);
+                }
+            }
+            catch { }
         }
 
         protected override Office.IRibbonExtensibility CreateRibbonExtensibilityObject()

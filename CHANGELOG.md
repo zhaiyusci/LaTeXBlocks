@@ -5,6 +5,23 @@ Word-and-PowerPoint package line.
 
 ## [Unreleased]
 
+## [0.2.14] — 2026-08-03
+
+### Reliability
+
+- Preview cancellation is now isolated from queued insert/update renders. Closing an editor promptly cancels only
+  obsolete preview work, and the renderer can recover from a failed or canceled profile initialization.
+- Word and PowerPoint lifecycle, profile-switch, document mutation, undo, and Office-event paths now clean up
+  transactionally. A failed operation preserves the existing object instead of partially replacing it.
+- PowerPoint block recovery preserves geometry and visual-scale metadata during exceptional render/update paths.
+
+### Verification and packaging
+
+- Release smoke coverage exercises active-preview cancellation, renderer recovery, immediate shutdown, U+2060
+  persistence, Word equation numbering, and PowerPoint replacement geometry.
+- The release procedure now validates the installed PowerPoint VSTO package. VSTO cannot safely swap a solution
+  identity between an installed codebase and a development directory through registry edits alone.
+
 ## [0.2.13] — 2026-08-03
 
 ### Word

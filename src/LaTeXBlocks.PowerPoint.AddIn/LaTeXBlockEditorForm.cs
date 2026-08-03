@@ -25,6 +25,8 @@ namespace LaTeXBlocks.PowerPoint
         private readonly Action<string> profileChanged;
         private readonly List<string> previewFiles = new List<string>();
         private bool synchronizingWidth;
+        private bool synchronizingProfile;
+        private string lastAcceptedProfile;
         private int editVersion;
         private int activeRenders;
         private int renderedVersion = -1;
@@ -103,8 +105,9 @@ namespace LaTeXBlocks.PowerPoint
             profileBox.SelectedIndex = 0;
             for (var index = 0; index < profileBox.Items.Count; index++)
                 if (string.Equals((string)profileBox.Items[index], profile,
-                        StringComparison.OrdinalIgnoreCase))
+                    StringComparison.OrdinalIgnoreCase))
                     profileBox.SelectedIndex = index;
+            lastAcceptedProfile = Profile;
 
             previewBrowser = new WebBrowser
             {
@@ -235,8 +238,37 @@ namespace LaTeXBlocks.PowerPoint
             fontSizeBox.ValueChanged += (sender, args) => QueueLivePreview();
             profileBox.SelectedIndexChanged += (sender, args) =>
             {
-                profileChanged(Profile);
-                QueueLivePreview();
+                if (synchronizingProfile) return;
+                var attemptedProfile = Profile;
+                try
+                {
+                    profileChanged(attemptedProfile);
+                    lastAcceptedProfile = attemptedProfile;
+                    QueueLivePreview();
+                }
+                catch (Exception exception)
+                {
+                    // A global-profile change may fail during host shutdown or when
+                    // its persistence store is unavailable. Keep the editor and the
+                    // add-in on the previously committed profile rather than letting
+                    // the WinForms event boundary surface an unhandled exception.
+                    synchronizingProfile = true;
+                    try
+                    {
+                        for (var index = 0; index < profileBox.Items.Count; index++)
+                            if (string.Equals((string)profileBox.Items[index], lastAcceptedProfile,
+                                StringComparison.OrdinalIgnoreCase))
+                            {
+                                profileBox.SelectedIndex = index;
+                                break;
+                            }
+                    }
+                    finally { synchronizingProfile = false; }
+                    var message = exception.GetBaseException().Message ?? exception.Message;
+                    statusLabel.Text = "Profile change failed: " + message;
+                    statusToolTip.SetToolTip(statusLabel, exception.ToString());
+                    MessageBox.Show(this, message, Text, MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
             };
             previewButton.Click += async (sender, args) =>
             {
@@ -274,6 +306,8 @@ namespace LaTeXBlocks.PowerPoint
             {
                 previewTimer.Stop();
                 editVersion++;
+                try { service.CancelPreview(); }
+                catch { }
                 foreach (var path in previewFiles)
                     try { File.Delete(path); } catch { }
             };

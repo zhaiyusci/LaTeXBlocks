@@ -138,6 +138,13 @@ namespace LaTeXBlocks.Word
                 displayMathStyle, true);
         }
 
+        internal void CancelPreview()
+        {
+            // Preview renders are intentionally disposable. Committed document work
+            // stays in the backend's FIFO queue and is never canceled from the editor.
+            renderers.CancelLatestPreview();
+        }
+
         private async Task<LaTeXBlockRender> RenderAsync(string source, double widthPt,
             LaTeXBlockLayoutMode mode, string profile, double fontSizePt,
             bool displayMathStyle, bool committed)
@@ -178,15 +185,14 @@ namespace LaTeXBlocks.Word
                 return InsertRenderedAt(target, source, mode, render, metadata, true,
                     () => documentMutated = true);
             }
-            catch
+            catch (Exception exception)
             {
-                if (undoStarted)
-                {
-                    try { application.UndoRecord.EndCustomRecord(); } catch { }
-                    undoStarted = false;
-                    if (documentMutated)
-                        try { document.Undo(); } catch { }
-                }
+                var rollbackFailure = TryRollbackCustomRecord(document, ref undoStarted, documentMutated);
+                if (rollbackFailure != null)
+                    throw new InvalidOperationException(
+                        "Word could not complete the LaTeX Block insertion and could not remove the partial insertion. " +
+                        "Inspect the document before saving.",
+                        new AggregateException(exception, rollbackFailure));
                 throw;
             }
             finally
@@ -246,20 +252,22 @@ namespace LaTeXBlocks.Word
                 if (!field.Update())
                     throw new InvalidOperationException("Word could not create the equation number field.");
                 document.Bookmarks.Add(EquationBookmarkName(metadata.Id), field.Result);
-                UpdateEquationNumbers(document);
+                // The insertion already owns one custom Undo record. Keep the
+                // renumbering work in that same transaction rather than nesting a
+                // second Word Undo record.
+                UpdateEquationNumbers(document, false);
                 ValidateNumberedEquationPlacement(shape, render.SvgBytes, render.FontSizePt);
                 MoveCaretAfterNumberedEquation(field);
                 return shape;
             }
-            catch
+            catch (Exception exception)
             {
-                if (undoStarted)
-                {
-                    try { application.UndoRecord.EndCustomRecord(); } catch { }
-                    undoStarted = false;
-                    if (documentMutated)
-                        try { document.Undo(); } catch { }
-                }
+                var rollbackFailure = TryRollbackCustomRecord(document, ref undoStarted, documentMutated);
+                if (rollbackFailure != null)
+                    throw new InvalidOperationException(
+                        "Word could not complete the numbered-equation insertion and could not remove the partial equation. " +
+                        "Inspect the document before saving.",
+                        new AggregateException(exception, rollbackFailure));
                 throw;
             }
             finally
@@ -418,6 +426,24 @@ namespace LaTeXBlocks.Word
             {
                 application.UndoRecord.StartCustomRecord("Update LaTeX Block");
                 undoStarted = true;
+
+                // Establish or remove the old formula's joiner boundaries while the
+                // old shape is still present. Once Word has deleted it, every remaining
+                // document mutation must already be complete so a late caret/COM error
+                // can never turn a failed update into a missing formula.
+                if (previousUsesInlineWordJoinerBoundaries)
+                {
+                    documentMutated = true;
+                    if (UsesInlineWordJoinerBoundaries(metadata))
+                        EnsureInlineWordJoinerBoundaries(oldShape, previous);
+                    else
+                        RemoveInlineWordJoinerBoundaries(oldShape);
+                }
+                // Inserting/removing a boundary immediately before the old drawing can
+                // shift a live Word Range. Reacquire the insertion point from the old
+                // shape after that preparation instead of trusting the stale collapse.
+                target = oldShape.Range.Duplicate;
+                target.Collapse(WordInterop.WdCollapseDirection.wdCollapseStart);
                 if (numbered)
                 {
                     documentMutated = true;
@@ -428,31 +454,44 @@ namespace LaTeXBlocks.Word
                 documentMutated = true;
                 ApplyContract(replacement, source, metadata, hostPosition);
                 replacement = NormalizeWordInlineDrawing(replacement, svgSize);
-                oldShape.Delete();
-                // The replacement is initially inserted beside the old image. Delete the
-                // old image before ensuring the invisible boundaries so its existing
-                // U+2060 wrappers are reused rather than duplicated.
-                if (UsesInlineWordJoinerBoundaries(metadata))
-                    EnsureInlineWordJoinerBoundaries(replacement, metadata);
-                else if (previousUsesInlineWordJoinerBoundaries)
-                    RemoveInlineWordJoinerBoundaries(replacement);
+
+                // A fixed block has no owned boundary characters. If it becomes an
+                // auto-width formula, install the new boundaries before deleting the
+                // old shape. A joiner already after the old shape will naturally become
+                // the replacement's trailing boundary after that deletion.
+                if (!previousUsesInlineWordJoinerBoundaries && UsesInlineWordJoinerBoundaries(metadata))
+                {
+                    documentMutated = true;
+                    EnsureInlineWordJoiner(replacement, true);
+                    if (!IsWordJoiner(AdjacentCharacter(oldShape.Range, false)))
+                        EnsureInlineWordJoiner(replacement, false);
+                }
                 ApplyHostRunFormat(replacement, metadata, hostPosition);
+                oldShape.Delete();
                 if (selectReplacement)
                 {
-                    if (numbered) MoveCaretAfterNumberedEquation(numberedField);
-                    else MoveCaretAfterInlineFormula(replacement, metadata);
+                    try
+                    {
+                        if (numbered) MoveCaretAfterNumberedEquation(numberedField);
+                        else MoveCaretAfterInlineFormula(replacement, metadata);
+                    }
+                    catch
+                    {
+                        // Selection movement is convenience only. The replacement is
+                        // already complete, so a host selection failure must not invoke
+                        // document rollback after the old formula has been removed.
+                    }
                 }
                 return replacement;
             }
-            catch
+            catch (Exception exception)
             {
-                if (undoStarted)
-                {
-                    try { application.UndoRecord.EndCustomRecord(); } catch { }
-                    undoStarted = false;
-                    if (documentMutated)
-                        try { document.Undo(); } catch { try { replacement?.Delete(); } catch { } }
-                }
+                var rollbackFailure = TryRollbackCustomRecord(document, ref undoStarted, documentMutated);
+                if (rollbackFailure != null)
+                    throw new InvalidOperationException(
+                        "Word could not complete the LaTeX Block update and could not restore its previous state. " +
+                        "The replacement was left in the document for recovery; inspect the formula before saving.",
+                        new AggregateException(exception, rollbackFailure));
                 throw;
             }
             finally
@@ -511,11 +550,17 @@ namespace LaTeXBlocks.Word
 
         internal int UpdateEquationNumbers(WordInterop.Document document = null)
         {
+            return UpdateEquationNumbers(document, true);
+        }
+
+        private int UpdateEquationNumbers(WordInterop.Document document, bool createUndoRecord)
+        {
             document = document ?? application.ActiveDocument;
             if (document == null) return 0;
 
             var mainStory = document.StoryRanges[WordInterop.WdStoryType.wdMainTextStory];
             var reflowedParagraphs = new HashSet<int>();
+            var paragraphs = new List<EquationParagraphUpdate>();
             foreach (WordInterop.InlineShape shape in mainStory.InlineShapes)
             {
                 if (!TryReadContract(shape, out var metadata, out _) ||
@@ -523,21 +568,101 @@ namespace LaTeXBlocks.Word
                     continue;
                 var paragraph = shape.Range.Paragraphs[1];
                 if (!reflowedParagraphs.Add(paragraph.Range.Start)) continue;
-                ConfigureNumberedEquationTabs(paragraph,
-                    GetNumberedEquationLayout(shape.Range, metadata.FontSizePt));
+                paragraphs.Add(new EquationParagraphUpdate(paragraph,
+                    GetNumberedEquationLayout(shape.Range, metadata.FontSizePt)));
             }
 
             var fields = mainStory.Fields;
-            var equationFields = 0;
+            var equationFields = new List<WordInterop.Field>();
             for (var index = 1; index <= fields.Count; index++)
             {
                 var field = fields[index];
-                if (!IsEquationSequenceField(field)) continue;
-                if (!field.Update())
-                    throw new InvalidOperationException("Word could not update equation number " + (equationFields + 1) + ".");
-                equationFields++;
+                if (IsEquationSequenceField(field)) equationFields.Add(field);
             }
-            return equationFields;
+
+            if (paragraphs.Count == 0 && equationFields.Count == 0) return 0;
+
+            var undoStarted = false;
+            var documentMutated = false;
+            try
+            {
+                if (createUndoRecord)
+                {
+                    application.UndoRecord.StartCustomRecord("Update LaTeX Equation Numbers");
+                    undoStarted = true;
+                }
+
+                foreach (var paragraph in paragraphs)
+                {
+                    documentMutated = true;
+                    ConfigureNumberedEquationTabs(paragraph.Paragraph, paragraph.Layout);
+                }
+                for (var index = 0; index < equationFields.Count; index++)
+                {
+                    documentMutated = true;
+                    if (!equationFields[index].Update())
+                        throw new InvalidOperationException("Word could not update equation number " + (index + 1) + ".");
+                }
+                return equationFields.Count;
+            }
+            catch (Exception exception)
+            {
+                var rollbackFailure = createUndoRecord
+                    ? TryRollbackCustomRecord(document, ref undoStarted, documentMutated)
+                    : null;
+                if (rollbackFailure != null)
+                    throw new InvalidOperationException(
+                        "Word could not update the equation numbers and could not restore the previous numbering.",
+                        new AggregateException(exception, rollbackFailure));
+                throw;
+            }
+            finally
+            {
+                if (undoStarted)
+                    try { application.UndoRecord.EndCustomRecord(); } catch { }
+            }
+        }
+
+        private Exception TryRollbackCustomRecord(WordInterop.Document document, ref bool undoStarted,
+            bool documentMutated)
+        {
+            if (!undoStarted) return null;
+
+            Exception endFailure = null;
+            try { application.UndoRecord.EndCustomRecord(); }
+            catch (Exception exception) { endFailure = exception; }
+            undoStarted = false;
+            // Word does not guarantee that Undo still targets this transaction after
+            // EndCustomRecord failed. Calling document.Undo() in that state could undo
+            // an unrelated user edit, so leave the document recoverable and surface
+            // the failed transaction instead.
+            if (endFailure != null) return endFailure;
+            if (!documentMutated) return endFailure;
+
+            try
+            {
+                document.Undo();
+                return null;
+            }
+            catch (Exception undoFailure)
+            {
+                return endFailure == null
+                    ? undoFailure
+                    : new AggregateException(endFailure, undoFailure);
+            }
+        }
+
+        private sealed class EquationParagraphUpdate
+        {
+            internal EquationParagraphUpdate(WordInterop.Paragraph paragraph,
+                NumberedEquationLayout layout)
+            {
+                Paragraph = paragraph;
+                Layout = layout;
+            }
+
+            internal WordInterop.Paragraph Paragraph { get; }
+            internal NumberedEquationLayout Layout { get; }
         }
 
         internal static bool IsEquationSequenceField(WordInterop.Field field)

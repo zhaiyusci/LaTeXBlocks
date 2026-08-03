@@ -69,6 +69,36 @@ namespace LaTeXBlocks.WordSmoke
                     "The editor preview document does not contain the latest SVG.");
                 Assert(staleOne.IsCanceled && staleTwo.IsCanceled,
                     "The single-worker scheduler did not discard superseded queued renders.");
+                Console.WriteLine("StemTeX: testing cancellation of an active latest-only preview...");
+                var activePreview = renderer.RenderLatestAsync(profile, "\\loop\\iftrue\\repeat", 360, true, 11);
+                WaitFor(() => renderer.NativeRenderInProgressForTest, 5000,
+                    "The active-preview cancellation probe did not enter native rendering.");
+                var cancellationTimer = Stopwatch.StartNew();
+                var replacementPreview = renderer.RenderLatestAsync(profile, "$a_4$", 360, true, 11);
+                WaitFor(() => activePreview.IsCompleted, 2000,
+                    "A superseded active preview did not cancel promptly. Native cancel attempts=" +
+                    renderer.NativeCancelAttemptsForTest + ".");
+                try
+                {
+                    activePreview.GetAwaiter().GetResult();
+                    throw new InvalidOperationException("The active superseded preview completed instead of canceling.");
+                }
+                catch (System.Threading.Tasks.TaskCanceledException) { }
+                Assert(cancellationTimer.ElapsedMilliseconds < 2000,
+                    "Active latest-only preview cancellation took " + cancellationTimer.ElapsedMilliseconds + " ms.");
+                Assert(renderer.NativeCancelAttemptsForTest > 0,
+                    "The superseded active preview was not sent to StemTeX cancellation.");
+                var cancellationMilliseconds = cancellationTimer.ElapsedMilliseconds;
+                // The native renderer may need to rebuild a primary worker after killing
+                // the canceled one. Its recovery latency is distinct from cancellation;
+                // the important UI guarantee above is that the obsolete task finishes
+                // promptly and the editor can accept a newer request immediately.
+                WaitFor(() => replacementPreview.IsCompleted, 30000,
+                    "The preview submitted after native cancellation did not recover.");
+                Assert(replacementPreview.GetAwaiter().GetResult().Bytes.Length > 0,
+                    "The preview submitted after native cancellation did not complete.");
+                Console.WriteLine("StemTeX: active preview canceled in " + cancellationMilliseconds +
+                    " ms; replacement recovered in " + cancellationTimer.ElapsedMilliseconds + " ms.");
                 Console.WriteLine("StemTeX: testing fixed-width and inline auto-width rendering...");
                 var svg = renderer.RenderSvg(profile, source, 360, false);
                 var prefix = Encoding.UTF8.GetString(svg.Bytes, 0, Math.Min(svg.Bytes.Length, 512));
@@ -933,6 +963,16 @@ namespace LaTeXBlocks.WordSmoke
                        document.Range(second.Range.Start - 1, second.Range.Start).Text != WordJoiner &&
                        document.Range(second.Range.End, second.Range.End + 1).Text != WordJoiner,
                     "Changing the last adjacent auto formula to Fixed left U+2060 boundaries behind.");
+
+                // The recovery-safe update path prepares a Fixed -> Auto transition
+                // before deleting the old drawing. Verify it still creates exactly the
+                // same two ownership boundaries as a fresh inline formula.
+                second = service.UpdateRendered(second, "$x^2$", 360,
+                    LaTeXBlockLayoutMode.Auto, render, false);
+                AssertInlineWordJoinerBoundary(second, 2,
+                    "Changing a fixed formula back to Auto");
+                Assert(CountOccurrences(document.Content.Text ?? string.Empty, WordJoiner) == 2,
+                    "Changing a fixed formula back to Auto did not create exactly two U+2060 boundaries.");
             }
             finally
             {

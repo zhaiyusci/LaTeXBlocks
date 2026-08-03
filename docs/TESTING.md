@@ -55,7 +55,8 @@ With an installed PowerPoint add-in registered:
 pwsh.exe -NoProfile -File .\tests\Test-PowerPointWidthIntegration.ps1 -Configuration Debug
 ```
 
-To test a local build without leaving it registered, use:
+To test a local build without leaving it registered, use a clean Windows user profile (with no installed LaTeX
+Blocks PowerPoint VSTO deployment):
 
 ```powershell
 pwsh.exe -NoProfile -File .\tests\Test-PowerPointWidthIntegration.ps1 -Configuration Debug -RegisterDevelopmentBuild
@@ -64,6 +65,11 @@ pwsh.exe -NoProfile -File .\tests\Test-PowerPointWidthIntegration.ps1 -Configura
 The latter mode temporarily registers the selected development build, launches PowerPoint, connects the add-in,
 resizes the generated block, and restores the previous PowerPoint registration in its cleanup path. It accepts
 `-ResizeFactor` (default `0.82`) and `-TimeoutSeconds` (default `30`) when investigating event timing.
+
+Do not use this registry-only mode to replace an installed package on the same user profile. VSTO permits a solution
+identity to have only one deployment codebase and will reject the switch with
+`AddInAlreadyInstalledException`. For a release candidate, install the package and run the command without
+`-RegisterDevelopmentBuild`; that is the authoritative PowerPoint integration test.
 
 ## Release configuration
 
@@ -74,5 +80,5 @@ pwsh.exe -NoProfile -File .\scripts\Build-LaTeXBlocks.ps1 -Configuration Release
 pwsh.exe -NoProfile -File .\scripts\Test-LaTeXBlocks.ps1 -Configuration Release -TargetHost Both
 ```
 
-For a package candidate, also run the PowerPoint width integration test against either the intended installed
-candidate or a temporarily registered Release build.
+For a package candidate, install the intended package and run the PowerPoint width integration test against that
+installed candidate.

@@ -28,6 +28,8 @@ namespace LaTeXBlocks.Word
         private readonly bool displayMathStyle;
         private readonly double naturalWidthSentinelPt;
         private bool synchronizingWidth;
+        private bool synchronizingProfile;
+        private string acceptedProfile;
         private int editVersion;
         private int activeRenders;
         private int renderedVersion = -1;
@@ -121,6 +123,7 @@ namespace LaTeXBlocks.Word
             for (var index = 0; index < profileBox.Items.Count; index++)
                 if (string.Equals((string)profileBox.Items[index], profile, StringComparison.OrdinalIgnoreCase))
                     profileBox.SelectedIndex = index;
+            acceptedProfile = Profile;
 
             previewBrowser = new WebBrowser { Dock = DockStyle.Fill, AllowNavigation = true, WebBrowserShortcutsEnabled = false };
             previewButton = new Button { Text = "Preview", AutoSize = true };
@@ -170,11 +173,7 @@ namespace LaTeXBlocks.Word
                 UpdateWidthControlVisibility();
                 QueueLivePreview();
             };
-            profileBox.SelectedIndexChanged += (sender, args) =>
-            {
-                profileChanged(Profile);
-                QueueLivePreview();
-            };
+            profileBox.SelectedIndexChanged += ProfileBox_SelectedIndexChanged;
             widthSlider.ValueChanged += (sender, args) =>
             {
                 if (synchronizingWidth) return;
@@ -227,6 +226,13 @@ namespace LaTeXBlocks.Word
             {
                 previewTimer.Stop();
                 editVersion++;
+                try { service.CancelPreview(); }
+                catch
+                {
+                    // The add-in can be shutting down concurrently with this dialog.
+                    // Closing an editor must remain immediate even if its backend has
+                    // already been disposed.
+                }
                 foreach (var path in previewFiles)
                     try { File.Delete(path); } catch { }
             };
@@ -245,6 +251,45 @@ namespace LaTeXBlocks.Word
         internal void SetWidthPtForTest(double widthPt)
         {
             widthBox.Value = (decimal)LaTeXBlockWidthPolicy.ClampWidth(widthPt);
+        }
+
+        private void ProfileBox_SelectedIndexChanged(object sender, EventArgs args)
+        {
+            if (synchronizingProfile) return;
+            var requestedProfile = Profile;
+            if (string.Equals(requestedProfile, acceptedProfile, StringComparison.OrdinalIgnoreCase)) return;
+
+            try
+            {
+                profileChanged(requestedProfile);
+                acceptedProfile = requestedProfile;
+                QueueLivePreview();
+            }
+            catch (Exception exception)
+            {
+                // The combobox has already changed when this event fires. Revert it
+                // before reporting the problem so the visible choice, the global
+                // Word preference, and subsequent renders keep the same profile.
+                synchronizingProfile = true;
+                try
+                {
+                    for (var index = 0; index < profileBox.Items.Count; index++)
+                        if (string.Equals((string)profileBox.Items[index], acceptedProfile,
+                                StringComparison.OrdinalIgnoreCase))
+                        {
+                            profileBox.SelectedIndex = index;
+                            break;
+                        }
+                }
+                finally { synchronizingProfile = false; }
+
+                var message = (exception.GetBaseException().Message ?? exception.Message)
+                    .Replace('\r', ' ').Replace('\n', ' ').Trim();
+                var shortMessage = message.Length > 90 ? message.Substring(0, 87) + "..." : message;
+                statusLabel.Text = "Profile change failed: " + shortMessage;
+                statusToolTip.SetToolTip(statusLabel, exception.ToString());
+                MessageBox.Show(this, message, Text, MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
         }
 
         private void UpdateWidthControlVisibility()

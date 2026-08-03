@@ -41,11 +41,12 @@ development builds, and a no-argument publish consistent with the shipped packag
 ```powershell
 pwsh.exe -NoProfile -File .\scripts\Build-LaTeXBlocks.ps1 -Configuration Release
 pwsh.exe -NoProfile -File .\scripts\Test-LaTeXBlocks.ps1 -Configuration Release -TargetHost Both
-pwsh.exe -NoProfile -File .\tests\Test-PowerPointWidthIntegration.ps1 -Configuration Release -RegisterDevelopmentBuild
 ```
 
-The width integration test temporarily changes the PowerPoint development registration and restores the prior value
-when it finishes. See [Testing](TESTING.md) for its prerequisites.
+The PowerPoint width integration test is a package-validation gate: run it **after** installing the generated
+candidate, as described below. A VSTO solution identity has one deployment codebase, so a registry-only switch from
+an installed package to `bin\Release` is not a valid release test. See [Testing](TESTING.md) for the clean-profile
+development-build case.
 
 ## Publish
 
@@ -88,6 +89,10 @@ Get-Content "$installer.sha256"
 
 Confirm that the computed SHA-256 matches the checksum file and, when signing was expected, that the signature is
 present and valid for the publishing user. Finally, install the package on a clean user registration, reopen Word and
-PowerPoint, and confirm that each loads **LaTeX Blocks** and can render with the bundled StemTeX runtime. Do not run
-the development registration script after this check unless you intentionally want to switch that host back to a
-local build.
+PowerPoint, and confirm that each loads **LaTeX Blocks** and can render with the bundled StemTeX runtime. Then run:
+
+```powershell
+pwsh.exe -NoProfile -File .\tests\Test-PowerPointWidthIntegration.ps1 -Configuration Release
+```
+
+This verifies the installed PowerPoint VSTO deployment, not a registry-only development substitution.
