@@ -56,8 +56,9 @@ StemTeX's block interface has width—not an independent height—as its layout 
 constraints in the same operation, not a special zoom mode. Translation and rotation leave the source, TeX layout,
 and SVG untouched. **Typesetting width (pt)** remains the direct manual control of the stored layout width, while
 **TeX size (pt)** is the only control that changes the TeX design size. Every result uses real TeX font metrics,
-scripts, line breaking, and optical-size choices; the add-in never stretches or crops SVG artwork. If a fixed-size
-TeX layout cannot satisfy a constrained dimension, its natural safe extent wins on that axis.
+scripts, line breaking, and optical-size choices; the add-in never stretches SVG artwork. If a fixed-size TeX layout
+still cannot satisfy a user-specified frame after reflow, the root SVG viewport remains exactly that frame and clips
+the overflow. The host frame never silently grows back.
 
 The PowerPoint Ribbon deliberately exposes **Insert Block** and **Edit Block**, with no inline-math command.
 Double-clicking a recognized block opens the same editor. The Ribbon also exposes selection-aware
@@ -87,9 +88,10 @@ dvisvgm's SVG viewport.
 
 New auto-height blocks fit their content, so vertical placement has no spare height to distribute. Once a block has a
 fixed native frame height, the SVG viewport supplies the extra room and places the unchanged TeX content at the
-selected Top, Middle, or Bottom position. If the content cannot fit, its natural TeX height wins: the add-in does not
-crop or scale the SVG. The line-spacing control applies to ordinary paragraph leading. It deliberately does not
-redefine the row spacing of math environments such as `align` or `gather`; those have their own TeX layout controls.
+selected Top, Middle, or Bottom position. When the content is taller than that explicit frame, the same alignment
+chooses the preserved edge (or the center) and the SVG viewport clips the rest; it never scales the TeX result or
+grows the frame. The line-spacing control applies to ordinary paragraph leading. It deliberately does not redefine
+the row spacing of math environments such as `align` or `gather`; those have their own TeX layout controls.
 
 These settings belong exclusively to PowerPoint blocks. Word's object model and inline-baseline contract do not use
 this style tag or this UI.

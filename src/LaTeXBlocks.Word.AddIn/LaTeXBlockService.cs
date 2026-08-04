@@ -19,6 +19,11 @@ namespace LaTeXBlocks.Word
         private const double EquationNumberGapPt = 6.0;
         private const double EmusPerPoint = 12700.0;
         private const string WordJoiner = "\u2060";
+        // Word exposes direct font colours as WdColor's BGR integer. Automatic
+        // colour is the only non-RGB value we deliberately retain; all other
+        // undefined/theme sentinel values fall back to it.
+        internal const int AutomaticTextColor = unchecked((int)0xff000000);
+        private const int UndefinedTextColor = 9999999;
         private readonly WordInterop.Application application;
         private readonly StemTeXBackend renderers;
         private readonly string cacheDirectory;
@@ -117,25 +122,28 @@ namespace LaTeXBlocks.Word
         }
 
         internal LaTeXBlockRender RenderPreview(string source, double widthPt, LaTeXBlockLayoutMode mode, string profile,
-            double fontSizePt = 10, bool displayMathStyle = false)
+            double fontSizePt = 10, bool displayMathStyle = false,
+            int textColor = AutomaticTextColor)
         {
-            return RenderPreviewAsync(source, widthPt, mode, profile, fontSizePt, displayMathStyle)
+            return RenderPreviewAsync(source, widthPt, mode, profile, fontSizePt, displayMathStyle,
+                    textColor)
                 .GetAwaiter().GetResult();
         }
 
         internal async Task<LaTeXBlockRender> RenderPreviewAsync(string source, double widthPt,
-            LaTeXBlockLayoutMode mode, string profile, double fontSizePt = 10, bool displayMathStyle = false)
+            LaTeXBlockLayoutMode mode, string profile, double fontSizePt = 10,
+            bool displayMathStyle = false, int textColor = AutomaticTextColor)
         {
             return await RenderAsync(source, widthPt, mode, profile, fontSizePt,
-                displayMathStyle, false);
+                displayMathStyle, false, textColor);
         }
 
         internal async Task<LaTeXBlockRender> RenderCommittedAsync(string source, double widthPt,
             LaTeXBlockLayoutMode mode, string profile, double fontSizePt = 10,
-            bool displayMathStyle = false)
+            bool displayMathStyle = false, int textColor = AutomaticTextColor)
         {
             return await RenderAsync(source, widthPt, mode, profile, fontSizePt,
-                displayMathStyle, true);
+                displayMathStyle, true, textColor);
         }
 
         internal void CancelPreview()
@@ -147,23 +155,29 @@ namespace LaTeXBlocks.Word
 
         private async Task<LaTeXBlockRender> RenderAsync(string source, double widthPt,
             LaTeXBlockLayoutMode mode, string profile, double fontSizePt,
-            bool displayMathStyle, bool committed)
+            bool displayMathStyle, bool committed, int textColor)
         {
             var normalizedSource = NormalizeSourceText(source);
             var renderSource = displayMathStyle ? PrepareDisplayMathSource(normalizedSource) : normalizedSource;
+            textColor = NormalizeTextColor(textColor);
+            renderSource = ApplyTextColor(renderSource, textColor,
+                mode == LaTeXBlockLayoutMode.Auto);
             var result = committed
                 ? await renderers.RenderQueuedAsync(profile, renderSource, widthPt,
                     mode == LaTeXBlockLayoutMode.Auto, fontSizePt)
                 : await renderers.RenderLatestAsync(profile, renderSource, widthPt,
                     mode == LaTeXBlockLayoutMode.Auto, fontSizePt);
-            return new LaTeXBlockRender(WriteSvg(result.Bytes), result.Bytes, result.DepthPt, fontSizePt);
+            return new LaTeXBlockRender(WriteSvg(result.Bytes), result.Bytes, result.DepthPt,
+                fontSizePt, textColor);
         }
 
         internal WordInterop.InlineShape InsertBlock(string source, double widthPt, LaTeXBlockLayoutMode mode, string profile)
         {
             EnsureDocument();
             var fontSizePt = ResolveFontSize(application.Selection, mode, 10);
-            var render = RenderPreview(source, widthPt, mode, profile, fontSizePt);
+            var textColor = ResolveTextColor(application.Selection);
+            var render = RenderPreview(source, widthPt, mode, profile, fontSizePt, false,
+                textColor);
             return InsertRendered(source, widthPt, mode, render);
         }
 
@@ -209,7 +223,9 @@ namespace LaTeXBlocks.Word
             if (mode != LaTeXBlockLayoutMode.Auto)
                 throw new InvalidOperationException("Numbered equations use natural-width display math.");
             var fontSizePt = ResolveFontSize(application.Selection, mode, 10);
-            var render = RenderPreview(source, widthPt, mode, profile, fontSizePt, true);
+            var textColor = ResolveTextColor(application.Selection);
+            var render = RenderPreview(source, widthPt, mode, profile, fontSizePt, true,
+                textColor);
             return InsertNumberedRendered(source, widthPt, mode, render);
         }
 
@@ -292,10 +308,10 @@ namespace LaTeXBlocks.Word
             var svgSize = ReadSvgPhysicalSize(render.SvgBytes);
             var shape = target.InlineShapes.AddPicture(insertionPath, LinkToFile: false, SaveWithDocument: true, Range: target);
             markDocumentMutated?.Invoke();
-            ApplyContract(shape, source, metadata, hostPosition);
+            ApplyContract(shape, source, metadata, render.TextColor, hostPosition);
             shape = NormalizeWordInlineDrawing(shape, svgSize);
             EnsureInlineWordJoinerBoundaries(shape, metadata);
-            ApplyHostRunFormat(shape, metadata, hostPosition);
+            ApplyHostRunFormat(shape, metadata, render.TextColor, hostPosition);
             if (select) MoveCaretAfterInlineFormula(shape, metadata);
             return shape;
         }
@@ -306,7 +322,9 @@ namespace LaTeXBlocks.Word
             var size = fontSizePt ?? ResolveFontSize(oldShape.Range, mode, 10);
             var displayMathStyle = TryReadContract(oldShape, out var metadata, out _) &&
                                    metadata.Role == LaTeXBlockRole.NumberedEquation;
-            var render = RenderPreview(source, widthPt, mode, profile, size, displayMathStyle);
+            var textColor = ResolveTextColor(oldShape.Range);
+            var render = RenderPreview(source, widthPt, mode, profile, size, displayMathStyle,
+                textColor);
             return UpdateRendered(oldShape, source, widthPt, mode, render, selectReplacement);
         }
 
@@ -452,7 +470,7 @@ namespace LaTeXBlocks.Word
                 var insertionPath = PrepareInsertionSvg(render, mode);
                 replacement = target.InlineShapes.AddPicture(insertionPath, LinkToFile: false, SaveWithDocument: true, Range: target);
                 documentMutated = true;
-                ApplyContract(replacement, source, metadata, hostPosition);
+                ApplyContract(replacement, source, metadata, render.TextColor, hostPosition);
                 replacement = NormalizeWordInlineDrawing(replacement, svgSize);
 
                 // A fixed block has no owned boundary characters. If it becomes an
@@ -466,7 +484,7 @@ namespace LaTeXBlocks.Word
                     if (!IsWordJoiner(AdjacentCharacter(oldShape.Range, false)))
                         EnsureInlineWordJoiner(replacement, false);
                 }
-                ApplyHostRunFormat(replacement, metadata, hostPosition);
+                ApplyHostRunFormat(replacement, metadata, render.TextColor, hostPosition);
                 oldShape.Delete();
                 if (selectReplacement)
                 {
@@ -996,17 +1014,17 @@ namespace LaTeXBlocks.Word
             internal double MaximumFormulaWidthPt { get; }
         }
 
-        private static void ApplyContract(WordInterop.InlineShape shape, string source, LaTeXBlockMetadata metadata,
-            int hostPosition)
+        private static void ApplyContract(WordInterop.InlineShape shape, string source,
+            LaTeXBlockMetadata metadata, int textColor, int hostPosition)
         {
             shape.AlternativeText = NormalizeSourceText(source);
             shape.Title = metadata.ToString();
             shape.LockAspectRatio = Office.MsoTriState.msoTrue;
-            ApplyHostRunFormat(shape, metadata, hostPosition);
+            ApplyHostRunFormat(shape, metadata, textColor, hostPosition);
         }
 
-        private static void ApplyHostRunFormat(WordInterop.InlineShape shape, LaTeXBlockMetadata metadata,
-            int hostPosition)
+        private static void ApplyHostRunFormat(WordInterop.InlineShape shape,
+            LaTeXBlockMetadata metadata, int textColor, int hostPosition)
         {
             // The image's physical dimensions already come from the SVG. This run size is
             // Word's semantic host size, used by the Font Size UI and by format-change
@@ -1014,7 +1032,89 @@ namespace LaTeXBlocks.Word
             // both values must be restored on the final normalized InlineShape.
             if (metadata.Mode == LaTeXBlockLayoutMode.Auto)
                 shape.Range.Font.Size = (float)metadata.FontSizePt;
+            // The native Word Font Color is the authoritative user-facing colour.
+            // Its RGB value is also used when generating the SVG, while Alternative
+            // Text remains exactly the author-written TeX source.
+            shape.Range.Font.Color = (WordInterop.WdColor)NormalizeTextColor(textColor);
             ApplyBaselinePosition(shape, metadata, hostPosition);
+        }
+
+        internal static int ResolveTextColor(WordInterop.Range target,
+            int fallback = AutomaticTextColor)
+        {
+            fallback = NormalizeTextColor(fallback);
+            if (target == null) return fallback;
+            if (TryReadTextColor(target.Font, out var color)) return color;
+
+            // Word returns wdUndefined for a mixed selection. The formula replaces
+            // at its start, so use the insertion character's colour just as we do
+            // for a mixed font-size selection.
+            if (target.Start != target.End)
+            {
+                var insertion = target.Duplicate;
+                insertion.Collapse(WordInterop.WdCollapseDirection.wdCollapseStart);
+                if (TryReadTextColor(insertion.Font, out color)) return color;
+            }
+            return fallback;
+        }
+
+        internal static int ResolveTextColor(WordInterop.Selection selection,
+            int fallback = AutomaticTextColor)
+        {
+            fallback = NormalizeTextColor(fallback);
+            if (selection == null) return fallback;
+            // For a collapsed run boundary Selection.Font is Word's actual typing
+            // formatting. Selection.Range.Font may instead describe the character
+            // on the right of the caret.
+            if (TryReadTextColor(selection.Font, out var color)) return color;
+            return ResolveTextColor(selection.Range, fallback);
+        }
+
+        internal static bool TextColorsEqual(int left, int right)
+        {
+            return NormalizeTextColor(left) == NormalizeTextColor(right);
+        }
+
+        internal static int NormalizeTextColor(int color)
+        {
+            return color >= 0 && color <= 0x00ffffff
+                ? color
+                : AutomaticTextColor;
+        }
+
+        internal static string ApplyTextColor(string source, int textColor,
+            bool trimTerminalLineBreaks = false)
+        {
+            textColor = NormalizeTextColor(textColor);
+            if (textColor == AutomaticTextColor) return source;
+            // StemTeX's auto-width measurement wrapper trims terminal line breaks
+            // before it builds its hbox. Do the same before adding this color wrapper,
+            // otherwise a user-facing terminal newline becomes an interior hbox space.
+            // Fixed blocks retain their original source verbatim.
+            if (trimTerminalLineBreaks && source != null)
+                source = source.TrimEnd('\r', '\n');
+            var red = textColor & 0xff;
+            var green = (textColor >> 8) & 0xff;
+            var blue = (textColor >> 16) & 0xff;
+            return "\\begingroup\\color[HTML]{" + red.ToString("X2", CultureInfo.InvariantCulture) +
+                   green.ToString("X2", CultureInfo.InvariantCulture) +
+                   blue.ToString("X2", CultureInfo.InvariantCulture) + "}%\n" +
+                   // This percent is part of the wrapper, not the author's source: an
+                   // un-commented newline after an inline fragment becomes a TeX
+                   // interword glue node inside StemTeXRenderer's measurement hbox.
+                   // That would make changing Word Font.Color change the formula's
+                   // width, even though colour must affect paint only.
+                   source + "%\n\\endgroup";
+        }
+
+        private static bool TryReadTextColor(WordInterop.Font font, out int color)
+        {
+            color = AutomaticTextColor;
+            if (font == null) return false;
+            var raw = (int)font.Color;
+            if (raw == UndefinedTextColor) return false;
+            color = NormalizeTextColor(raw);
+            return true;
         }
 
         private static void ApplyBaselinePosition(WordInterop.InlineShape shape, LaTeXBlockMetadata metadata,
@@ -1381,16 +1481,19 @@ namespace LaTeXBlocks.Word
 
     internal sealed class LaTeXBlockRender
     {
-        internal LaTeXBlockRender(string svgPath, byte[] svgBytes, double depthPt, double fontSizePt)
+        internal LaTeXBlockRender(string svgPath, byte[] svgBytes, double depthPt,
+            double fontSizePt, int textColor = LaTeXBlockService.AutomaticTextColor)
         {
             SvgPath = svgPath;
             SvgBytes = svgBytes ?? throw new ArgumentNullException(nameof(svgBytes));
             DepthPt = depthPt;
             FontSizePt = fontSizePt;
+            TextColor = LaTeXBlockService.NormalizeTextColor(textColor);
         }
         internal string SvgPath { get; }
         internal byte[] SvgBytes { get; }
         internal double DepthPt { get; }
         internal double FontSizePt { get; }
+        internal int TextColor { get; }
     }
 }

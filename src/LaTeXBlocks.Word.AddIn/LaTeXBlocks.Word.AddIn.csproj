@@ -11,7 +11,7 @@
     <LoadBehavior>3</LoadBehavior>
     <TargetFrameworkVersion>v4.8</TargetFrameworkVersion>
     <LangVersion>7.3</LangVersion>
-    <ApplicationVersion>0.2.22.0</ApplicationVersion>
+    <ApplicationVersion>0.2.26.0</ApplicationVersion>
     <DefineConstants>VSTO40;USEOFFICEINTEROP</DefineConstants>
     <BootstrapperEnabled>true</BootstrapperEnabled>
     <IsWebBootstrapper>false</IsWebBootstrapper>

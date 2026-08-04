@@ -265,14 +265,39 @@ namespace LaTeXBlocks.PowerPointSmoke
                 Assert(PowerPointBlockService.ReadSvgHeightPt(looseLeading.SvgBytes) >
                        PowerPointBlockService.ReadSvgHeightPt(tightLeading.SvgBytes) + 8,
                     "The TeX line-spacing control did not change ordinary paragraph leading.");
+                // Top is also the style default. Its bare-SVG path must therefore
+                // honour the chosen vertical policy rather than silently using the
+                // historical centered viewport when a user changes only the host
+                // frame height.
+                var defaultNaturalHeight = PowerPointBlockService.ReadSvgHeightPt(render.SvgBytes);
+                var defaultTopFrame = PowerPointBlockService.FrameSvg(render.SvgBytes,
+                    PowerPointBlockService.ReadSvgWidthPt(render.SvgBytes),
+                    defaultNaturalHeight + 42, LaTeXBlockVerticalAlignment.Top);
+                var defaultMiddleFrame = PowerPointBlockService.FrameSvg(render.SvgBytes,
+                    PowerPointBlockService.ReadSvgWidthPt(render.SvgBytes),
+                    defaultNaturalHeight + 42, LaTeXBlockVerticalAlignment.Middle);
+                var defaultBottomFrame = PowerPointBlockService.FrameSvg(render.SvgBytes,
+                    PowerPointBlockService.ReadSvgWidthPt(render.SvgBytes),
+                    defaultNaturalHeight + 42, LaTeXBlockVerticalAlignment.Bottom);
+                Assert(Math.Abs(ReadSvgViewBoxY(defaultTopFrame) -
+                           ReadSvgViewBoxY(render.SvgBytes)) < 0.001 &&
+                       ReadSvgViewBoxY(defaultTopFrame) >
+                           ReadSvgViewBoxY(defaultMiddleFrame) + 0.1 &&
+                       ReadSvgViewBoxY(defaultMiddleFrame) >
+                           ReadSvgViewBoxY(defaultBottomFrame) + 0.1,
+                    "Top on a default PowerPoint block did not anchor the TeX viewport to the top of its host frame.");
                 var constrainedStyle = new LaTeXBlockStyle(1.2, 6,
                     LaTeXBlockVerticalAlignment.Bottom, Color.Black, true,
                     Color.FromArgb(250, 250, 250), 0.75, Color.Black);
                 var constrainedRender = service.RenderPreviewAsync(leadingSource, 110,
                     profile, inheritedSize, constrainedStyle, 24).GetAwaiter().GetResult();
-                Assert(PowerPointBlockService.ReadSvgHeightPt(constrainedRender.SvgBytes) >
-                       100,
-                    "An SVG-styled block cropped content when its requested height was too small.");
+                Assert(Math.Abs(PowerPointBlockService.ReadSvgWidthPt(constrainedRender.SvgBytes) -
+                           110) < 0.05 &&
+                       Math.Abs(PowerPointBlockService.ReadSvgHeightPt(constrainedRender.SvgBytes) -
+                           24) < 0.05,
+                    "An SVG-styled block did not preserve its deliberately undersized host frame.");
+                AssertSvgRootClipsOverflow(constrainedRender.SvgBytes,
+                    "An undersized SVG-styled block did not declare viewport clipping.");
                 // Styled requests set PreviewBorder to zero at TeX shipout. A later
                 // ordinary block must restore the profile's historical border rather
                 // than inherit that temporary renderer state.
@@ -359,21 +384,17 @@ namespace LaTeXBlocks.PowerPointSmoke
                     .GetAwaiter().GetResult();
                 var horizontalNaturalWidth = PowerPointBlockService.ReadSvgWidthPt(
                     horizontalRender.SvgBytes);
-                var horizontalNaturalHeight = PowerPointBlockService.ReadSvgHeightPt(
-                    horizontalRender.SvgBytes);
                 block = service.UpdateRendered(block, source, metadata.WidthPt,
                     horizontalRender, false, horizontalFrame.FrameHeightPt,
                     horizontalFrame.FrameWidthPt);
                 Assert(PowerPointBlockService.TryReadContract(block, out metadata, out _) &&
                        Math.Abs(metadata.WidthPt - 288) < 0.05,
                     "A native host-frame update changed the stored TeX layout width.");
-                AssertHostFrameGeometry(block,
-                    Math.Max(horizontalNaturalWidth, horizontalFrame.FrameWidthPt),
-                    Math.Max(horizontalNaturalHeight, horizontalFrame.FrameHeightPt),
-                    "A horizontal host-frame update");
+                AssertHostFrameGeometry(block, horizontalFrame.FrameWidthPt,
+                    horizontalFrame.FrameHeightPt, "A horizontal host-frame update");
 
-                // A frame smaller than the unchanged TeX box is clamped rather
-                // than being treated as an instruction to scale or crop the SVG.
+                // A frame smaller than the unchanged TeX box remains the user's
+                // exact frame. The SVG is not scaled; its viewport clips overflow.
                 var requestedShortWidth = Math.Max(1, horizontalNaturalWidth / 2.0);
                 PowerPointFrameUpdate shortWidthFrame = null;
                 block.Tags.Delete(PowerPointBlockService.KindTag);
@@ -402,19 +423,23 @@ namespace LaTeXBlocks.PowerPointSmoke
                     profile, metadata.FontSizePt).GetAwaiter().GetResult();
                 var shortWidthNatural = PowerPointBlockService.ReadSvgWidthPt(
                     shortWidthRender.SvgBytes);
-                var shortWidthNaturalHeight = PowerPointBlockService.ReadSvgHeightPt(
-                    shortWidthRender.SvgBytes);
                 block = service.UpdateRendered(block, source, metadata.WidthPt, shortWidthRender,
                     false, shortWidthFrame.FrameHeightPt, shortWidthFrame.FrameWidthPt);
-                AssertHostFrameGeometry(block, shortWidthNatural,
-                    Math.Max(shortWidthNaturalHeight, shortWidthFrame.FrameHeightPt),
+                AssertHostFrameGeometry(block, shortWidthFrame.FrameWidthPt,
+                    shortWidthFrame.FrameHeightPt,
                     "A too-narrow host-frame update");
-                Assert(block.Width >= shortWidthNatural - 0.05,
-                    "A host frame narrower than the natural TeX SVG clipped the content.");
+                Assert(block.Width < shortWidthNatural - 0.05,
+                    "A deliberately too-narrow host frame was expanded instead of clipping content.");
+                var shortWidthFramedSvg = PowerPointBlockService.FrameSvg(shortWidthRender.SvgBytes,
+                    shortWidthFrame.FrameWidthPt, shortWidthFrame.FrameHeightPt);
+                AssertSvgRootClipsOverflow(shortWidthFramedSvg,
+                    "A too-narrow default SVG frame did not declare viewport clipping.");
+                Assert(ReadSvgViewBoxDimension(shortWidthFramedSvg, 2) <
+                       ReadSvgViewBoxDimension(shortWidthRender.SvgBytes, 2) - 0.1,
+                    "A too-narrow default SVG frame scaled its content instead of selecting a narrower viewport.");
 
                 var verticalRender = service.RenderPreviewAsync(source, metadata.WidthPt,
                     profile, metadata.FontSizePt).GetAwaiter().GetResult();
-                var verticalNaturalWidth = PowerPointBlockService.ReadSvgWidthPt(verticalRender.SvgBytes);
                 var verticalNaturalHeight = PowerPointBlockService.ReadSvgHeightPt(verticalRender.SvgBytes);
                 var requestedVerticalHeight = Math.Max(verticalNaturalHeight + 42, block.Height + 42);
                 PowerPointFrameUpdate verticalFrame = null;
@@ -439,9 +464,8 @@ namespace LaTeXBlocks.PowerPointSmoke
                 }
                 block = service.UpdateRendered(block, source, metadata.WidthPt, verticalRender,
                     false, verticalFrame.FrameHeightPt, verticalFrame.FrameWidthPt);
-                AssertHostFrameGeometry(block,
-                    Math.Max(verticalNaturalWidth, verticalFrame.FrameWidthPt),
-                    Math.Max(verticalNaturalHeight, verticalFrame.FrameHeightPt),
+                AssertHostFrameGeometry(block, verticalFrame.FrameWidthPt,
+                    verticalFrame.FrameHeightPt,
                     "A vertical host-frame update");
                 Assert(block.Height > verticalNaturalHeight + 30,
                     "A vertical host-frame update did not add an empty SVG frame around the natural TeX content.");
@@ -466,15 +490,21 @@ namespace LaTeXBlocks.PowerPointSmoke
                 }
                 var shortRender = service.RenderPreviewAsync(source, metadata.WidthPt, profile,
                     metadata.FontSizePt).GetAwaiter().GetResult();
-                var shortNaturalWidth = PowerPointBlockService.ReadSvgWidthPt(shortRender.SvgBytes);
                 var shortNaturalHeight = PowerPointBlockService.ReadSvgHeightPt(shortRender.SvgBytes);
                 block = service.UpdateRendered(block, source, metadata.WidthPt, shortRender,
                     false, shortFrame.FrameHeightPt, shortFrame.FrameWidthPt);
-                AssertHostFrameGeometry(block,
-                    Math.Max(shortNaturalWidth, shortFrame.FrameWidthPt), shortNaturalHeight,
+                AssertHostFrameGeometry(block, shortFrame.FrameWidthPt,
+                    shortFrame.FrameHeightPt,
                     "A too-short host-frame update");
-                Assert(block.Height >= shortNaturalHeight - 0.05,
-                    "A host frame shorter than the natural TeX SVG clipped the content.");
+                Assert(block.Height < shortNaturalHeight - 0.05,
+                    "A deliberately too-short host frame was expanded instead of clipping content.");
+                var shortFramedSvg = PowerPointBlockService.FrameSvg(shortRender.SvgBytes,
+                    shortFrame.FrameWidthPt, shortFrame.FrameHeightPt);
+                AssertSvgRootClipsOverflow(shortFramedSvg,
+                    "A too-short default SVG frame did not declare viewport clipping.");
+                Assert(ReadSvgViewBoxDimension(shortFramedSvg, 3) <
+                       ReadSvgViewBoxDimension(shortRender.SvgBytes, 3) - 0.1,
+                    "A too-short default SVG frame scaled its content instead of selecting a shorter viewport.");
 
                 PowerPointFrameUpdate cornerFrame = null;
                 var requestedCornerWidth = block.Width * 1.15f;
@@ -499,17 +529,14 @@ namespace LaTeXBlocks.PowerPointSmoke
                 }
                 var cornerRender = service.RenderPreviewAsync(source, metadata.WidthPt,
                     profile, metadata.FontSizePt).GetAwaiter().GetResult();
-                var cornerNaturalWidth = PowerPointBlockService.ReadSvgWidthPt(cornerRender.SvgBytes);
-                var cornerNaturalHeight = PowerPointBlockService.ReadSvgHeightPt(cornerRender.SvgBytes);
                 block = service.UpdateRendered(block, source, metadata.WidthPt,
                     cornerRender, false, cornerFrame.FrameHeightPt,
                     cornerFrame.FrameWidthPt);
                 Assert(PowerPointBlockService.TryReadContract(block, out metadata, out _) &&
                        Math.Abs(metadata.WidthPt - 288) < 0.05,
                     "A corner host-frame update changed the stored TeX layout width.");
-                AssertHostFrameGeometry(block,
-                    Math.Max(cornerNaturalWidth, cornerFrame.FrameWidthPt),
-                    Math.Max(cornerNaturalHeight, cornerFrame.FrameHeightPt),
+                AssertHostFrameGeometry(block, cornerFrame.FrameWidthPt,
+                    cornerFrame.FrameHeightPt,
                     "A corner host-frame update");
 
                 var ordinarySvg = slide.Shapes.AddShape(Office.MsoAutoShapeType.msoShapeRectangle,
@@ -548,10 +575,8 @@ namespace LaTeXBlocks.PowerPointSmoke
                 const string updatedSource = "Updated block: $\\int_0^1 x^2\\,dx=1/3$.";
                 var updatedRender = service.RenderPreviewAsync(updatedSource, 288, profile, 19)
                     .GetAwaiter().GetResult();
-                var expectedWidth = Math.Max(PowerPointBlockService.ReadSvgWidthPt(
-                    updatedRender.SvgBytes), PowerPointBlockService.ReadFrameWidthPt(block));
-                var expectedHeight = Math.Max(PowerPointBlockService.ReadSvgHeightPt(
-                    updatedRender.SvgBytes), PowerPointBlockService.ReadFrameHeightPt(block));
+                var expectedWidth = PowerPointBlockService.ReadFrameWidthPt(block);
+                var expectedHeight = PowerPointBlockService.ReadFrameHeightPt(block);
                 var updated = service.UpdateRendered(block, updatedSource, 288, updatedRender);
                 Assert(PowerPointBlockService.TryReadContract(updated, out var updatedMetadata,
                            out var updatedStoredSource) &&
@@ -669,6 +694,17 @@ namespace LaTeXBlocks.PowerPointSmoke
                 context + " retained obsolete visual-scale metadata.");
         }
 
+        private static void AssertSvgRootClipsOverflow(byte[] svgBytes, string message)
+        {
+            if (svgBytes == null || svgBytes.Length == 0)
+                throw new InvalidOperationException(message + " SVG output was empty.");
+            var document = new System.Xml.XmlDocument();
+            using (var stream = new MemoryStream(svgBytes)) document.Load(stream);
+            var overflow = document.DocumentElement?.GetAttribute("overflow");
+            Assert(string.Equals(overflow, "hidden", StringComparison.OrdinalIgnoreCase),
+                message + " Root overflow was '" + (overflow ?? string.Empty) + "' instead of 'hidden'.");
+        }
+
         private static void AssertSvgRectanglePaintFitsViewport(byte[] svgBytes, string message)
         {
             if (svgBytes == null || svgBytes.Length == 0)
@@ -725,13 +761,18 @@ namespace LaTeXBlocks.PowerPointSmoke
 
         private static double ReadSvgViewBoxY(byte[] svgBytes)
         {
+            return ReadSvgViewBoxDimension(svgBytes, 1);
+        }
+
+        private static double ReadSvgViewBoxDimension(byte[] svgBytes, int index)
+        {
             var document = new System.Xml.XmlDocument();
             using (var stream = new MemoryStream(svgBytes)) document.Load(stream);
             var parts = (document.DocumentElement?.GetAttribute("viewBox") ?? string.Empty)
                 .Split(new[] { ' ', '\t', '\r', '\n', ',' }, StringSplitOptions.RemoveEmptyEntries);
-            if (parts.Length != 4)
+            if (parts.Length != 4 || index < 0 || index >= parts.Length)
                 throw new InvalidOperationException("SVG root had no usable viewBox.");
-            return ParseSvgNumber(parts[1]);
+            return ParseSvgNumber(parts[index]);
         }
 
         private static string ReadTag(PowerPointInterop.Shape shape, string name)

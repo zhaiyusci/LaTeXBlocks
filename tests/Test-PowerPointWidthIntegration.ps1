@@ -53,6 +53,7 @@ $replacementShape = $null
 $shrinkShape = $null
 $reflowShape = $null
 $verticalShape = $null
+$clippedShape = $null
 $cornerShape = $null
 $nonReflowShape = $null
 $rapidResizeShape = $null
@@ -168,6 +169,16 @@ function Get-LaTeXBlockShape([object]$Presentation, [string]$StableId = '') {
                 try {
                     if ((Get-ShapeTag $candidate 'LATEXBLOCKS_KIND') -ne 'LATEX_BLOCK') { continue }
                     if ([string]::IsNullOrEmpty($StableId)) {
+                        # PowerPoint can enumerate a just-replaced SVG picture
+                        # before its title/metadata has propagated. A block is not
+                        # usable for the initial integration assertion until its
+                        # complete semantic contract is visible as well.
+                        try {
+                            $null = ConvertFrom-LaTeXBlockTitle ([string]$candidate.Title)
+                        }
+                        catch {
+                            continue
+                        }
                         $keep = $true
                         return $candidate
                     }
@@ -242,7 +253,7 @@ function Wait-ForHostFrame([object]$Presentation, [string]$StableId,
 function Wait-ForReflowedFrame([object]$Presentation, [string]$StableId,
     [double]$TargetFrameWidthPt, [double]$PreviousLayoutWidthPt,
     [double]$ExpectedFontSizePt,
-    [ValidateSet('Increase', 'Decrease')][string]$LayoutDirection,
+    [ValidateSet('Increase', 'Decrease', 'Change')][string]$LayoutDirection,
     [int]$TimeoutSeconds, [string]$Description) {
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     while ([DateTime]::UtcNow -lt $deadline) {
@@ -253,11 +264,10 @@ function Wait-ForReflowedFrame([object]$Presentation, [string]$StableId,
         $keep = $false
         try {
             $metadata = ConvertFrom-LaTeXBlockTitle $candidate.Title
-            $layoutChangedInExpectedDirection = if ($LayoutDirection -eq 'Increase') {
-                [double]$metadata.widthPt -gt $PreviousLayoutWidthPt + 0.15
-            }
-            else {
-                [double]$metadata.widthPt -lt $PreviousLayoutWidthPt - 0.15
+            $layoutChangedInExpectedDirection = switch ($LayoutDirection) {
+                'Increase' { [double]$metadata.widthPt -gt $PreviousLayoutWidthPt + 0.15 }
+                'Decrease' { [double]$metadata.widthPt -lt $PreviousLayoutWidthPt - 0.15 }
+                default { [Math]::Abs([double]$metadata.widthPt - $PreviousLayoutWidthPt) -gt 0.15 }
             }
             if ([Math]::Abs([double]$candidate.Width - $TargetFrameWidthPt) -gt 0.15 -or
                 -not $layoutChangedInExpectedDirection -or
@@ -313,6 +323,26 @@ function Set-HostFrameWidth([object]$Presentation, [object]$Shape, [string]$Stab
         if ($null -eq $replacement) { throw }
         try {
             $replacement.Width = [single]$WidthPt
+        }
+        finally {
+            Release-ComObject $replacement
+        }
+    }
+}
+
+function Set-HostFrameHeight([object]$Presentation, [object]$Shape, [string]$StableId,
+    [double]$HeightPt) {
+    try {
+        $Shape.Height = [single]$HeightPt
+        return
+    }
+    catch {
+        # A prior native-frame render may replace the picture between gestures.
+        # Reacquire by the persistent block ID, then apply the user's latest drag.
+        $replacement = Get-LaTeXBlockShape $Presentation $StableId
+        if ($null -eq $replacement) { throw }
+        try {
+            $replacement.Height = [single]$HeightPt
         }
         finally {
             Release-ComObject $replacement
@@ -378,7 +408,11 @@ try {
     # Every host-frame size change is a true TeX layout request. This expansion
     # must therefore change the stored StemTeX measure rather than merely adding
     # transparent picture padding around the old SVG.
-    $replacementShape = Wait-ForReflowedFrame $presentation $stableId $horizontalTargetWidth $layoutWidthBefore $fontSizeBefore 'Increase' $TimeoutSeconds 'Horizontal resize'
+    # A previous user frame may already crop an intentionally wider TeX layout.
+    # Widening that *frame* still triggers a fresh reflow, but the new best layout
+    # width can be either direction relative to old metadata. Require a true layout
+    # change and the exact requested host frame, not a guessed direction.
+    $replacementShape = Wait-ForReflowedFrame $presentation $stableId $horizontalTargetWidth $layoutWidthBefore $fontSizeBefore 'Change' $TimeoutSeconds 'Horizontal resize'
     $after = ConvertFrom-LaTeXBlockTitle $replacementShape.Title
     $visibleWidthAfter = [double]$replacementShape.Width
     $visibleHeightAfter = [double]$replacementShape.Height
@@ -399,9 +433,9 @@ try {
     $visibleHeightAfter = [double]$shrinkShape.Height
     $currentLayoutWidth = [double]$shrinkMetadata.widthPt
 
-    # A smaller-than-natural width is not a crop or image zoom. The add-in must
-    # ask TeX for a narrower line measure, then use the resulting (possibly
-    # taller) TeX box inside the requested external frame.
+    # A smaller-than-natural width first asks TeX for a narrower line measure.
+    # If that result still cannot fit, the final SVG uses this exact external
+    # frame and clips overflow; it never applies an image zoom or grows the frame.
     $reflowTargetWidth = [Math]::Max(36.0, $visibleWidthBefore * $AutoReflowFactor)
     Set-HostFrameWidth $presentation $shrinkShape $stableId $reflowTargetWidth
     Release-ComObject $shrinkShape
@@ -433,13 +467,33 @@ try {
     $visibleWidthAfter = [double]$verticalShape.Width
     $visibleHeightAfter = [double]$verticalShape.Height
 
+    # An impossibly short user frame remains exact. The add-in may attempt TeX
+    # reflow where a width changed, but a height-only drag never silently widens
+    # the block or restores its natural height: the SVG viewport clips overflow.
+    $clippedTargetHeight = [Math]::Max(1.0, [Math]::Min(8.0, $visibleHeightAfter - 1.0))
+    Set-HostFrameHeight $presentation $verticalShape $stableId $clippedTargetHeight
+    Release-ComObject $verticalShape
+    $verticalShape = $null
+
+    $clippedShape = Wait-ForHostFrame $presentation $stableId $visibleWidthAfter $clippedTargetHeight $currentLayoutWidth $fontSizeBefore $TimeoutSeconds 'Undersized vertical resize'
+    $clippedExpected = [pscustomobject]@{
+        widthPt = $currentLayoutWidth
+        fontSizePt = $fontSizeBefore
+    }
+    $null = Assert-HostFrameContract $clippedShape $clippedExpected $visibleWidthAfter $clippedTargetHeight 'Undersized vertical frame'
+    if ([double]$clippedShape.Height -ge $visibleHeightAfter - 0.15) {
+        throw 'An undersized vertical frame was expanded instead of retaining the user height.'
+    }
+    $visibleWidthAfter = [double]$clippedShape.Width
+    $visibleHeightAfter = [double]$clippedShape.Height
+
     # A corner resize follows the same reflow contract and changes the TeX
     # measure because its target width changes too.
     $cornerTargetWidth = $visibleWidthAfter * $CornerResizeFactor
     $cornerTargetHeight = [Math]::Max($visibleHeightAfter + $FrameHeightPaddingPt, 120.0)
-    Set-CornerFrame $presentation $verticalShape $stableId $cornerTargetWidth $cornerTargetHeight
-    Release-ComObject $verticalShape
-    $verticalShape = $null
+    Set-CornerFrame $presentation $clippedShape $stableId $cornerTargetWidth $cornerTargetHeight
+    Release-ComObject $clippedShape
+    $clippedShape = $null
 
     $cornerShape = Wait-ForReflowedFrame $presentation $stableId $cornerTargetWidth $currentLayoutWidth $fontSizeBefore 'Increase' $TimeoutSeconds 'Corner resize'
     $cornerExpected = ConvertFrom-LaTeXBlockTitle $cornerShape.Title
@@ -509,6 +563,7 @@ try {
         AutoReflowLayoutWidthPt = [Math]::Round([double]$reflowMetadata.widthPt, 3)
         VerticalFrameHeightPt = [Math]::Round($verticalTargetHeight, 3)
         VerticalTriggeredReflow = $true
+        ClippedFrameHeightPt = [Math]::Round($clippedTargetHeight, 3)
         CornerLayoutWidthPt = [Math]::Round([double]$cornerExpected.widthPt, 3)
         ConsecutiveLayoutWidthPt = [Math]::Round([double]$lastGestureExpected.widthPt, 3)
         CornerFrameWidthPt = [Math]::Round($cornerTargetWidth, 3)
@@ -526,6 +581,7 @@ finally {
     Release-ComObject $shrinkShape
     Release-ComObject $reflowShape
     Release-ComObject $verticalShape
+    Release-ComObject $clippedShape
     Release-ComObject $cornerShape
     Release-ComObject $nonReflowShape
     Release-ComObject $rapidResizeShape

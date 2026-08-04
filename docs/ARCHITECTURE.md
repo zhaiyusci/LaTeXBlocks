@@ -43,9 +43,9 @@ Every PowerPoint LaTeX Block is one native host frame around unscaled TeX SVG co
 use the same contract; there is no side-handle, corner-handle, or vertical-handle zoom mode. A width or height change
 is debounced and sent through the asynchronous StemTeX layout path. A changed width derives a fresh typesetting
 measure from the prior real SVG root; a height-only change still rerenders the current measure. Translation and
-rotation do not enter that path. The TeX coordinates, aspect ratio, and physical scale remain 1:1; if no fixed-size
-TeX layout can meet a constrained dimension, the frame grows to the natural safe extent rather than stretching or
-cropping content.
+rotation do not enter that path. The TeX coordinates, aspect ratio, and physical scale remain 1:1. A native target
+frame is authoritative: if reflow cannot make its TeX content fit, the final SVG uses that exact viewport and clips
+the overflow rather than stretching the artwork or growing the frame.
 
 `VisualScale` is deliberately absent from the model. The persisted native shape geometry is the host frame, while
 the rendering metadata records the TeX layout width and design size that produced its content.
@@ -72,6 +72,9 @@ The visual SVG and its source are one semantic object, not an image plus a dupli
 - The SVG is portable display output.
 - Alternative Text is the authoritative TeX source, normalized to LF line endings.
 - Title metadata stores only identity and rendering/layout facts needed to edit the object.
+- For Word blocks, the drawing run's native `Font.Color` is the authoritative text color. The renderer scopes that
+  value into the SVG TeX input; it is deliberately not copied into metadata or Alternative Text. Selection-aware
+  refresh detects a changed color for inline, fixed-width, and numbered display blocks without background polling.
 - PowerPoint-only style values live in a separate versioned shape tag. Before a styled preview or committed render,
   the PowerPoint service constructs a scoped TeX wrapper only for leading and text color, then composes padding,
   background, border, and vertical placement into the SVG root. It never rewrites Alternative Text or relies on

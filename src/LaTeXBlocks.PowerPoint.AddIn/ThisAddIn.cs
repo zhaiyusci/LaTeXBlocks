@@ -227,9 +227,10 @@ namespace LaTeXBlocks.PowerPoint
             var targetFrameWidthPt = currentFrameWidthPt;
             var targetFrameHeightPt = currentFrameHeightPt;
             // A native resize supplies one frame-fitting request. These flags say
-            // which axes the user actually constrained; they do not create
-            // different side/corner resize modes. A horizontal drag, for example,
-            // may let a reflowed block grow naturally in height.
+            // which axes the user actually moved; they do not create different
+            // side/corner resize modes. The complete resulting frame is always
+            // authoritative. A render may reflow its TeX layout, but it never
+            // enlarges the user-specified PowerPoint box.
             var constrainFrameWidth = frameWidthPt.HasValue;
             var constrainFrameHeight = frameHeightPt.HasValue;
             var targetNativeFrameGestureSequence = nativeFrameGestureSequence;
@@ -367,7 +368,8 @@ namespace LaTeXBlocks.PowerPoint
                     // Every native size change has already started a real TeX
                     // layout pass. If its first measured result still misses a
                     // constrained edge, retry with a corrected typesetting width.
-                    // This is reflow, never SVG scale or crop operation.
+                    // If it still cannot fit, the exact SVG viewport clips overflow;
+                    // it must not enlarge the user's host frame.
                     pendingBlockFormats[pending.Key] = reflowPending;
                     return;
                 }
@@ -467,13 +469,9 @@ namespace LaTeXBlocks.PowerPoint
                     return correctedWidthPt;
                 return double.NaN;
             }
-            if (heightOverflows)
-            {
-                // A height-only resize leaves width unconstrained. Try the widest
-                // user-editable TeX measure once; it gives text the best chance to
-                // reduce line count without introducing a host-side scale.
-                return NativeReflowMaximumWidthPt;
-            }
+            // A height-only gesture does not authorize a different layout width.
+            // Its rerender keeps the existing measure, then the exact SVG viewport
+            // clips any content that remains too tall.
             return double.NaN;
         }
 

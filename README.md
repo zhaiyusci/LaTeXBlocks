@@ -17,6 +17,7 @@ Git submodule of this repository; see [StemTeX integration](docs/STEMTEX_INTEGRA
 | Edit source on the visual object | Yes | Yes |
 | Source storage | SVG `AlternativeText` | Shape `AlternativeText` |
 | Host font-size integration | Selection-aware inline refresh | Snapshot text size at insertion; explicit block-size control thereafter |
+| Text-color integration | Native Word Font Color drives SVG text for inline and display blocks | Per-block text-color control |
 | Block styling | Not exposed | Line spacing, padding, vertical placement, text/fill/border color, and border width |
 
 Word auto-width content formulas are the only objects surrounded by U+2060 WORD JOINER characters. This keeps a
@@ -35,6 +36,11 @@ The **LaTeX Blocks** Ribbon tab provides **Insert Inline Formula**, **Insert LaT
 Equation**, and **Edit LaTeX Block**. Select a recognized block to edit its authoritative source. The selected
 profile is a preference of the Word host, not of an individual block.
 
+**Font Color** in Word's Home tab is also the formula-color control. A new inline, fixed-width, or numbered formula
+inherits the typing color at its insertion point. To recolor an existing formula, select it, apply Font Color, then
+move the selection away; LaTeX Blocks queues one asynchronous SVG refresh from that native color. It does not poll
+the document, change the LaTeX source, or store a second color value in Alternative Text.
+
 Numbered equations use Word fields. After moving, copying, or deleting complete numbered-equation lines, run
 **Update Numbers** (or Word's own field-update command). Deleting only the SVG is not a semantic equation deletion:
 the Word field and tab scaffold remain.
@@ -45,9 +51,10 @@ Use **Insert Block** or **Edit Block**. A new block starts with the ordinary tex
 when one exists. **Typesetting width (pt)** is an explicit TeX layout control; **TeX size (pt)** rerenders at a
 different design size. Every native PowerPoint *size* change also queues a real TeX layout pass: a changed width
 derives a new typesetting measure, while a height-only change rerenders at the current measure under the new frame.
-Moving or rotating the shape does not render. SVG artwork is never visually scaled or cropped. If fixed-size TeX
-cannot satisfy a constrained dimension after reflow, the frame retains the natural safe extent on that axis. Use
-**TeX size (pt)** when the formula itself should become larger or smaller.
+Moving or rotating the shape does not render. SVG artwork is never visually scaled. The final SVG viewport always
+matches the native PowerPoint frame exactly: after a reflow attempt, content that still exceeds a user-shrunk frame
+is clipped rather than enlarging that frame. Use **TeX size (pt)** when the formula itself should become larger or
+smaller.
 
 The block editor also exposes **Line spacing**, uniform **Padding**, **Top / Middle / Bottom** vertical placement,
 text color, background fill, and border color/width. StemTeX owns the typographic portion (leading and text color);

@@ -26,6 +26,7 @@ namespace LaTeXBlocks.Word
         private readonly Action<string> profileChanged;
         private readonly double fontSizePt;
         private readonly bool displayMathStyle;
+        private readonly int textColor;
         private readonly double naturalWidthSentinelPt;
         private bool synchronizingWidth;
         private bool synchronizingProfile;
@@ -43,12 +44,14 @@ namespace LaTeXBlocks.Word
         internal LaTeXBlockEditorForm(LaTeXBlockService service, string source, double widthPt,
             LaTeXBlockLayoutMode mode, string profile,
             Action<string> profileChanged, bool editing, double fontSizePt = 10,
-            string windowTitle = null, bool displayMathStyle = false)
+            string windowTitle = null, bool displayMathStyle = false,
+            int textColor = LaTeXBlockService.AutomaticTextColor)
         {
             this.service = service ?? throw new ArgumentNullException(nameof(service));
             this.profileChanged = profileChanged ?? throw new ArgumentNullException(nameof(profileChanged));
             this.fontSizePt = fontSizePt;
             this.displayMathStyle = displayMathStyle;
+            this.textColor = LaTeXBlockService.NormalizeTextColor(textColor);
             naturalWidthSentinelPt = widthPt > 0 && !double.IsNaN(widthPt) &&
                 !double.IsInfinity(widthPt) ? widthPt : LaTeXBlockWidthPolicy.DefaultWidthPt;
             widthPt = LaTeXBlockWidthPolicy.ClampWidth(widthPt);
@@ -331,7 +334,7 @@ namespace LaTeXBlocks.Word
             try
             {
                 var render = await service.RenderPreviewAsync(source, width, mode, profile, fontSizePt,
-                    displayMathStyle);
+                    displayMathStyle, textColor);
                 phase = "Preview update";
                 if (IsDisposed) return;
                 if (version == editVersion)

@@ -5,6 +5,37 @@ Word-and-PowerPoint package line.
 
 ## [Unreleased]
 
+## [0.2.26] — 2026-08-04
+
+### Word
+
+- Fixed a color-rendering regression where the wrapper could append a TeX word space to an auto-width inline formula.
+  Word Font Color now changes paint only: the exact TeX box width is unchanged, including when the source ends in a line break.
+
+## [0.2.25] — 2026-08-04
+
+### Word
+
+- Inline formulas, fixed-width blocks, and numbered display equations now inherit the native Word **Font Color** at
+  insertion. Recoloring an existing block uses that same Word formatting as the source of truth and asynchronously
+  rerenders its SVG without changing the authoritative LaTeX stored in Alternative Text.
+
+## [0.2.24] — 2026-08-04
+
+### PowerPoint
+
+- Fixed fixed-height bare blocks with **Vertical: Top**: the TeX SVG viewport now
+  begins at the host frame's top edge instead of remaining vertically centered.
+  Middle and Bottom retain their respective viewport placements, including when
+  the block otherwise uses the default style.
+
+## [0.2.23] — 2026-08-04
+
+### PowerPoint
+
+- Native PowerPoint frame dimensions are now authoritative. When a reflowed TeX block still exceeds a user-shrunk
+  frame, its SVG keeps the exact requested viewport and clips overflow instead of expanding back to a natural size.
+
 ## [0.2.22] — 2026-08-04
 
 ### PowerPoint

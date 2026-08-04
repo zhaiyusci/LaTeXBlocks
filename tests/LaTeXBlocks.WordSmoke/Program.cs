@@ -29,6 +29,7 @@ namespace LaTeXBlocks.WordSmoke
             var documentPath = Path.Combine(artifactDirectory, "LaTeXBlocks-Smoke.docx");
             var numberedDocumentPath = Path.Combine(artifactDirectory, "LaTeXBlocks-Numbered-Smoke.docx");
             var spacingDocumentPath = Path.Combine(artifactDirectory, "LaTeXBlocks-Inline-Spacing-Smoke.docx");
+            var textColorDocumentPath = Path.Combine(artifactDirectory, "LaTeXBlocks-Text-Color-Smoke.docx");
             try
             {
                 Directory.CreateDirectory(artifactDirectory);
@@ -108,6 +109,21 @@ namespace LaTeXBlocks.WordSmoke
                 Assert(svg.DepthPt > 0, "StemTeX inline baseline marker did not produce a positive TeX depth.");
                 var autoSvg = renderer.RenderSvg(profile, source, 360, true);
                 var autoSvg11 = renderer.RenderSvg(profile, source, 360, true, 11);
+                var terminalNewlineAutoSvg = renderer.RenderSvg(profile, source + "\n", 360, true);
+                var coloredAutoSvg = renderer.RenderSvg(profile,
+                    LaTeXBlockService.ApplyTextColor(source, 0x00ff0000, true), 360, true);
+                var coloredTerminalNewlineSvg = renderer.RenderSvg(profile,
+                    LaTeXBlockService.ApplyTextColor(source + "\n", 0x00ff0000, true), 360, true);
+                Assert(Math.Abs(LaTeXBlockService.ReadSvgWidthPt(autoSvg.Bytes) -
+                                LaTeXBlockService.ReadSvgWidthPt(coloredAutoSvg.Bytes)) < 0.01,
+                    "The TeX color wrapper changed the auto-width formula's logical box.");
+                Assert(Math.Abs(LaTeXBlockService.ReadSvgWidthPt(autoSvg.Bytes) -
+                                LaTeXBlockService.ReadSvgWidthPt(terminalNewlineAutoSvg.Bytes)) < 0.01,
+                    "A terminal inline-source newline changed the automatic TeX box.");
+                Assert(Math.Abs(LaTeXBlockService.ReadSvgWidthPt(autoSvg.Bytes) -
+                                LaTeXBlockService.ReadSvgWidthPt(coloredTerminalNewlineSvg.Bytes)) < 0.01,
+                    "The TeX color wrapper turned a terminal inline-source newline into horizontal space.");
+                Console.WriteLine("StemTeX: color wrapper preserves auto-width geometry.");
                 // A deliberately edge-trimmed reference must have the same width. If
                 // the measurement wrapper contributes either of its own line-break
                 // spaces, the ordinary render is wider by a font interword space.
@@ -349,6 +365,10 @@ namespace LaTeXBlocks.WordSmoke
                     editor.Close();
                 }
                 Console.WriteLine("Word: exact point-width editor passed.");
+                // Run the independent Font.Color path before the longer inline-spacing
+                // matrix, so a host-specific spacing tolerance cannot mask a color
+                // geometry regression.
+                RunTextColorSmoke(word, service, profile, textColorDocumentPath);
                 RunInlineSpacingSmoke(word, service, profile, spacingDocumentPath);
                 const string fractionSource = "$\\frac{1}{2}E=mc^2$";
                 var fractionStart = document.Content.End - 1;
@@ -786,6 +806,124 @@ namespace LaTeXBlocks.WordSmoke
                     Release(word);
                 }
                 renderer?.Dispose();
+            }
+        }
+
+        private static void RunTextColorSmoke(WordInterop.Application word,
+            LaTeXBlockService service, string profile, string documentPath)
+        {
+            const string inlineSource = "$E=mc^2$";
+            const string displaySource = "\\[E=mc^2\\]";
+            const int wordRed = 0x0000ff;   // WdColor is BGR, so this is RGB FF0000.
+            const int wordBlue = 0x00ff0000; // WdColor is BGR, so this is RGB 0000FF.
+            WordInterop.Document document = null;
+            try
+            {
+                Assert(LaTeXBlockService.ApplyTextColor(inlineSource, wordRed)
+                           .IndexOf("\\color[HTML]{FF0000}", StringComparison.Ordinal) >= 0 &&
+                       LaTeXBlockService.ApplyTextColor(inlineSource, wordBlue)
+                           .IndexOf("\\color[HTML]{0000FF}", StringComparison.Ordinal) >= 0 &&
+                       LaTeXBlockService.ApplyTextColor(inlineSource,
+                           LaTeXBlockService.AutomaticTextColor) == inlineSource,
+                    "Word BGR text colors were not converted into the intended TeX RGB colors.");
+
+                Console.WriteLine("Word: testing native text color for inline and display formulas...");
+                if (File.Exists(documentPath)) File.Delete(documentPath);
+                document = word.Documents.Add();
+                document.Content.Font.Name = "Times New Roman";
+                document.Content.Font.Size = 14;
+                document.Range(0, 0).Select();
+                word.Selection.Font.Color = (WordInterop.WdColor)wordRed;
+                Assert(LaTeXBlockService.TextColorsEqual(
+                        LaTeXBlockService.ResolveTextColor(word.Selection), wordRed),
+                    "A collapsed Word selection did not expose its native text color.");
+
+                var automaticRender = service.RenderPreview(inlineSource, 360,
+                    LaTeXBlockLayoutMode.Auto, profile, 14);
+                var inline = service.InsertBlock(inlineSource, 360,
+                    LaTeXBlockLayoutMode.Auto, profile);
+                Assert(inline.AlternativeText == inlineSource &&
+                       LaTeXBlockService.TextColorsEqual((int)inline.Range.Font.Color, wordRed),
+                    "An inline formula did not preserve its raw TeX source and native Word text color.");
+                var inlineRedSvg = service.RenderPreview(inlineSource, 360,
+                    LaTeXBlockLayoutMode.Auto, profile, 14, false, wordRed);
+                Assert(Convert.ToBase64String(automaticRender.SvgBytes) !=
+                       Convert.ToBase64String(inlineRedSvg.SvgBytes),
+                    "The SVG generated for an explicit Word text color is identical to automatic text color.");
+                Assert(Math.Abs(LaTeXBlockService.ReadSvgWidthPt(automaticRender.SvgBytes) -
+                                LaTeXBlockService.ReadSvgWidthPt(inlineRedSvg.SvgBytes)) < 0.01,
+                    "Applying Word Font.Color changed the inline formula's TeX box width.");
+
+                // A native color command changes the drawing run first. The event-driven
+                // refresh path then renders the SVG from that same authoritative value.
+                inline.Range.Font.Color = (WordInterop.WdColor)wordBlue;
+                var recoloredInline = service.UpdateBlock(inline, inlineSource, 360,
+                    LaTeXBlockLayoutMode.Auto, profile, 14, false);
+                Assert(recoloredInline.AlternativeText == inlineSource &&
+                       LaTeXBlockService.TextColorsEqual((int)recoloredInline.Range.Font.Color,
+                           wordBlue),
+                    "Updating an inline formula lost the user-selected Word text color.");
+                document.SaveAs2(documentPath, WordInterop.WdSaveFormat.wdFormatXMLDocument);
+                document.Close(WordInterop.WdSaveOptions.wdSaveChanges);
+                Release(document);
+                document = null;
+
+                document = word.Documents.Open(documentPath, ReadOnly: false);
+                var reopenedInline = document.InlineShapes[1];
+                Assert(reopenedInline.AlternativeText == inlineSource &&
+                       LaTeXBlockService.TextColorsEqual((int)reopenedInline.Range.Font.Color,
+                           wordBlue),
+                    "The recolored inline formula did not preserve its Word text color after save and reopen.");
+                document.Close(WordInterop.WdSaveOptions.wdDoNotSaveChanges);
+                Release(document);
+                document = null;
+
+                document = word.Documents.Add();
+                document.Content.Font.Name = "Times New Roman";
+                document.Content.Font.Size = 14;
+                document.Range(0, 0).Select();
+                word.Selection.Font.Color = (WordInterop.WdColor)wordRed;
+                var display = service.InsertBlock(displaySource, 300,
+                    LaTeXBlockLayoutMode.Fixed, profile);
+                Assert(display.AlternativeText == displaySource &&
+                       LaTeXBlockService.TextColorsEqual((int)display.Range.Font.Color, wordRed),
+                    "A fixed-width display formula did not inherit Word's text color.");
+                display.Range.Font.Color = (WordInterop.WdColor)wordBlue;
+                var recoloredDisplay = service.UpdateBlock(display, displaySource, 300,
+                    LaTeXBlockLayoutMode.Fixed, profile, 14, false);
+                Assert(LaTeXBlockService.TextColorsEqual((int)recoloredDisplay.Range.Font.Color,
+                           wordBlue),
+                    "Updating a fixed-width display formula lost the Word text color.");
+                document.Close(WordInterop.WdSaveOptions.wdDoNotSaveChanges);
+                Release(document);
+                document = null;
+
+                document = word.Documents.Add();
+                document.Content.Font.Name = "Times New Roman";
+                document.Content.Font.Size = 14;
+                document.Range(0, 0).Select();
+                word.Selection.Font.Color = (WordInterop.WdColor)wordRed;
+                var numbered = service.InsertNumberedBlock(displaySource, 360,
+                    LaTeXBlockLayoutMode.Auto, profile);
+                Assert(numbered.AlternativeText == displaySource &&
+                       LaTeXBlockService.TextColorsEqual((int)numbered.Range.Font.Color, wordRed),
+                    "A numbered display formula did not inherit Word's text color.");
+                numbered.Range.Font.Color = (WordInterop.WdColor)wordBlue;
+                var recoloredNumbered = service.UpdateBlock(numbered, displaySource, 360,
+                    LaTeXBlockLayoutMode.Auto, profile, 14, false);
+                Assert(recoloredNumbered.AlternativeText == displaySource &&
+                       LaTeXBlockService.TextColorsEqual((int)recoloredNumbered.Range.Font.Color,
+                           wordBlue),
+                    "Updating a numbered display formula lost the Word text color.");
+                Console.WriteLine("Word: text color insertion, refresh, and persistence passed.");
+            }
+            finally
+            {
+                if (document != null)
+                {
+                    document.Close(WordInterop.WdSaveOptions.wdDoNotSaveChanges);
+                    Release(document);
+                }
             }
         }
 

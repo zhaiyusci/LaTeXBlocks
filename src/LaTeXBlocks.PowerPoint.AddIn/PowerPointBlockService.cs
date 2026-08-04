@@ -152,7 +152,7 @@ namespace LaTeXBlocks.PowerPoint
             // extension.
             var framedSvg = style.IsDefault
                 ? FrameSvg(render.SvgBytes, ReadSvgWidthPt(render.SvgBytes),
-                    ReadSvgHeightPt(render.SvgBytes))
+                    ReadSvgHeightPt(render.SvgBytes), style.VerticalAlignment)
                 : render.SvgBytes;
             var size = ReadSvgSize(framedSvg);
             var framedPath = WriteSvg(framedSvg);
@@ -207,11 +207,12 @@ namespace LaTeXBlocks.PowerPoint
             // A non-default render already contains its complete SVG shell:
             // padding, background, border, and vertical placement. Never add a
             // second host-side transparent frame; it would make the PowerPoint
-            // extent disagree with the authored SVG frame. If content cannot fit,
-            // the SVG compositor keeps its natural safe extent.
+            // extent disagree with the authored SVG frame. The requested frame is
+            // authoritative: if its viewport is smaller than the TeX result, SVG
+            // clips the overflow instead of silently enlarging the PowerPoint box.
             var framedSvg = style.IsDefault
                 ? FrameSvg(render.SvgBytes, requestedFrameWidthPt,
-                    requestedFrameHeightPt)
+                    requestedFrameHeightPt, style.VerticalAlignment)
                 : render.SvgBytes;
             var sourceSize = ReadSvgSize(framedSvg);
             var framedPath = WriteSvg(framedSvg);
@@ -554,26 +555,35 @@ namespace LaTeXBlocks.PowerPoint
             if (style == null) throw new ArgumentNullException(nameof(style));
 
             var naturalSize = ReadSvgSize(svgBytes);
-            var frameWidthPt = Math.Max(naturalSize.WidthPt + 2 * style.OuterInsetPt,
-                ClampHostFrameWidth(requestedFrameWidthPt));
+            // A native PowerPoint frame is an explicit user instruction. Keep its
+            // physical size exactly, even when the unchanged TeX content will not
+            // fit. The root SVG viewport below provides the intentional clip.
+            var frameWidthPt = ClampHostFrameWidth(requestedFrameWidthPt);
             var requestedHeight = requestedFrameHeightPt.HasValue &&
                 requestedFrameHeightPt.Value > 0 &&
                 !double.IsNaN(requestedFrameHeightPt.Value) &&
                 !double.IsInfinity(requestedFrameHeightPt.Value)
                 ? ClampHostFrameHeight(requestedFrameHeightPt.Value)
                 : 0;
-            var frameHeightPt = Math.Max(naturalSize.HeightPt + 2 * style.OuterInsetPt,
-                requestedHeight);
+            // A newly inserted auto-height block has no requested host height, so
+            // it starts at the natural content extent. Once a height is supplied,
+            // including one smaller than that extent, it is exact.
+            var frameHeightPt = requestedHeight > 0
+                ? requestedHeight
+                : naturalSize.HeightPt + 2 * style.OuterInsetPt;
 
             // The content remains at its original scale. Any extra horizontal
             // space is symmetric; vertical extra space follows the selected
             // Top/Middle/Bottom policy. The border is part of the inner inset.
-            var horizontalSlackPt = Math.Max(0, frameWidthPt -
-                naturalSize.WidthPt - 2 * style.OuterInsetPt);
+            // Slack deliberately remains signed. For an undersized frame that
+            // produces a centered horizontal crop; vertically it lets the selected
+            // Top/Middle/Bottom alignment decide which edge is preserved.
+            var horizontalSlackPt = frameWidthPt -
+                naturalSize.WidthPt - 2 * style.OuterInsetPt;
             var leftPt = style.OuterInsetPt + horizontalSlackPt / 2.0;
             var rightPt = frameWidthPt - naturalSize.WidthPt - leftPt;
-            var verticalSlackPt = Math.Max(0, frameHeightPt -
-                naturalSize.HeightPt - 2 * style.OuterInsetPt);
+            var verticalSlackPt = frameHeightPt -
+                naturalSize.HeightPt - 2 * style.OuterInsetPt;
             double topPt;
             switch (style.VerticalAlignment)
             {
@@ -625,6 +635,10 @@ namespace LaTeXBlocks.PowerPoint
             rootTag = ReplaceSvgAttribute(rootTag, "height",
                 FormatSvgNumber(frameHeightPt) + "pt");
             rootTag = ReplaceSvgAttribute(rootTag, "viewBox", newViewBox);
+            // PowerPoint hosts the SVG as one image, but state the clip on the SVG
+            // itself as well: a deliberately undersized frame must not leak paint
+            // outside its authored viewport in another SVG consumer.
+            rootTag = ReplaceSvgAttribute(rootTag, "overflow", "hidden");
 
             var frame = new StringBuilder();
             frame.Append("<g data-latexblocks-frame='1'>");
@@ -692,24 +706,22 @@ namespace LaTeXBlocks.PowerPoint
             return value.ToString("0.#########", CultureInfo.InvariantCulture);
         }
 
-        // Extending the root viewport (rather than changing the picture's geometry)
-        // leaves all TeX coordinates at their original 1:1 physical scale and merely
-        // adds transparent frame space around the natural TeX result. The natural
-        // TeX box is a lower bound for a particular render: callers that need a
-        // smaller frame first ask StemTeX for a reflowed render, never scale or crop
-        // this SVG. If no fixed-size TeX render can satisfy the request, this
-        // method deliberately returns the natural lower bound as the safe fallback.
+        // Reframe the root SVG without changing the TeX coordinate scale. A larger
+        // target adds transparent viewport space; a smaller target selects a
+        // sub-viewport and clips overflow. Horizontal placement is centered;
+        // vertical placement follows the requested Top/Middle/Bottom policy. The
+        // physical SVG dimensions therefore always equal the user-specified
+        // PowerPoint frame.
         internal static byte[] FrameSvg(byte[] svgBytes, double requestedFrameWidthPt,
-            double requestedFrameHeightPt)
+            double requestedFrameHeightPt, LaTeXBlockVerticalAlignment verticalAlignment =
+                LaTeXBlockVerticalAlignment.Middle)
         {
             if (svgBytes == null || svgBytes.Length == 0)
                 throw new ArgumentException("StemTeX returned an empty SVG.", nameof(svgBytes));
 
             var naturalSize = ReadSvgSize(svgBytes);
-            var frameWidthPt = Math.Max(naturalSize.WidthPt,
-                ClampHostFrameWidth(requestedFrameWidthPt));
-            var frameHeightPt = Math.Max(naturalSize.HeightPt,
-                ClampHostFrameHeight(requestedFrameHeightPt));
+            var frameWidthPt = ClampHostFrameWidth(requestedFrameWidthPt);
+            var frameHeightPt = ClampHostFrameHeight(requestedFrameHeightPt);
             if (Math.Abs(frameWidthPt - naturalSize.WidthPt) < 0.001 &&
                 Math.Abs(frameHeightPt - naturalSize.HeightPt) < 0.001) return svgBytes;
 
@@ -732,13 +744,29 @@ namespace LaTeXBlocks.PowerPoint
                 throw new InvalidDataException("StemTeX SVG has no numeric root viewBox.");
 
             // The root's physical dimensions and viewBox can use different units.
-            // Extend each axis by the same ratio in physical and viewBox space. This
-            // preserves the original TeX coordinate scale exactly; the additional
-            // frame area is transparent and keeps the formula centered.
+            // Change each axis by the same ratio in physical and viewBox space.
+            // This preserves the original TeX coordinate scale exactly; a larger
+            // frame adds transparent space and a smaller one crops. The bare SVG
+            // path is deliberately given the same vertical policy as decorated
+            // blocks: `Top` means the original TeX viewport starts at the host
+            // frame's top edge, including when that style is otherwise default.
             var frameViewBoxWidth = viewBoxWidth * frameWidthPt / naturalSize.WidthPt;
             var frameViewBoxX = viewBoxX - (frameViewBoxWidth - viewBoxWidth) / 2.0;
             var frameViewBoxHeight = viewBoxHeight * frameHeightPt / naturalSize.HeightPt;
-            var frameViewBoxY = viewBoxY - (frameViewBoxHeight - viewBoxHeight) / 2.0;
+            var verticalExpansion = frameViewBoxHeight - viewBoxHeight;
+            double frameViewBoxY;
+            switch (verticalAlignment)
+            {
+                case LaTeXBlockVerticalAlignment.Top:
+                    frameViewBoxY = viewBoxY;
+                    break;
+                case LaTeXBlockVerticalAlignment.Bottom:
+                    frameViewBoxY = viewBoxY - verticalExpansion;
+                    break;
+                default:
+                    frameViewBoxY = viewBoxY - verticalExpansion / 2.0;
+                    break;
+            }
             var number = CultureInfo.InvariantCulture;
             var newViewBox = frameViewBoxX.ToString("0.######", number) + " " +
                              frameViewBoxY.ToString("0.######", number) + " " +
@@ -749,6 +777,7 @@ namespace LaTeXBlocks.PowerPoint
             rootTag = ReplaceSvgAttribute(rootTag, "height",
                 frameHeightPt.ToString("0.######", number) + "pt");
             rootTag = ReplaceSvgAttribute(rootTag, "viewBox", newViewBox);
+            rootTag = ReplaceSvgAttribute(rootTag, "overflow", "hidden");
             svg = svg.Substring(0, root.Index) + rootTag +
                   svg.Substring(root.Index + root.Length);
             return Encoding.UTF8.GetBytes(svg);

@@ -37,7 +37,7 @@ PowerPoint executable.
 
 | Test | Office behavior | Main coverage |
 | --- | --- | --- |
-| Word smoke | Starts a separate hidden Word instance and closes it when complete. It rejects an accidental attachment to an existing visible Word instance. | StemTeX startup/shutdown, rendering, SVG insertion and replacement, metadata, baseline/inline behavior, numbered equations, and DOCX persistence. |
+| Word smoke | Starts a separate hidden Word instance and closes it when complete. It rejects an accidental attachment to an existing visible Word instance. | StemTeX startup/shutdown, rendering, SVG insertion and replacement, metadata, baseline/inline behavior, native Font Color for inline/fixed/numbered formulas, numbered equations, and DOCX persistence. |
 | PowerPoint smoke | Requires PowerPoint to be closed, then starts a visible temporary PowerPoint instance and closes it when complete. | Rendering, block insertion and editing, SVG-shell style rendering/persistence, profile/TeX-size/width controls, unified host-frame resize handling, and PPTX persistence. |
 
 The tests leave diagnostic documents under ignored `artifacts` directories. They are useful when diagnosing a failed
@@ -47,11 +47,12 @@ Office assertion but are not release artifacts.
 
 The separate PowerPoint integration test exercises the unified native host-frame contract through direct horizontal,
 vertical, and corner resizes. Every size change must submit a real StemTeX layout pass: width changes update the stored
-typesetting width, while height-only changes rerender the current width. It verifies that SVG content remains 1:1 with
-neither stretching nor cropping, then explicitly checks that move and rotation preserve the same Shape ID and do not
-rerender. It also sends two native gestures in succession after the first debounce window, so a late render from the
-first may not overwrite the second. It uses the presentation created by the PowerPoint smoke test, so run that smoke
-test first.
+typesetting width, while height-only changes rerender the current width. It verifies that SVG content remains 1:1
+without stretching, that every final SVG root exactly matches the user frame, and that an undersized viewport clips
+overflow instead of growing the frame. It then explicitly checks that move and rotation preserve the same Shape ID and
+do not rerender. It also sends two native gestures in succession after the first debounce window, so a late render
+from the first may not overwrite the second. It uses the presentation created by the PowerPoint smoke test, so run
+that smoke test first.
 
 With an installed PowerPoint add-in registered:
 
