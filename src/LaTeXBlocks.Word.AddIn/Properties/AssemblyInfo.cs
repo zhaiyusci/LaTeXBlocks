@@ -8,6 +8,6 @@ using System.Runtime.InteropServices;
 [assembly: AssemblyCopyright("Copyright 2026")]
 [assembly: ComVisible(false)]
 [assembly: Guid("5E1EBAB5-F36A-42FB-BB07-684F194B8EE3")]
-[assembly: AssemblyVersion("0.2.38.0")]
-[assembly: AssemblyFileVersion("0.2.38.0")]
+[assembly: AssemblyVersion("0.2.39.0")]
+[assembly: AssemblyFileVersion("0.2.39.0")]
 [assembly: InternalsVisibleTo("LaTeXBlocks.WordSmoke")]

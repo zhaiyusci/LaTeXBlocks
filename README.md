@@ -33,8 +33,12 @@ text run or simulate inline baseline behavior; see [PowerPoint scope](docs/POWER
 ### Word
 
 The **LaTeX Blocks** Ribbon tab provides **Insert Inline Formula**, **Insert LaTeX Block**, **Insert Numbered
-Equation**, and **Edit LaTeX Block**. Select a recognized block to edit its authoritative source. The selected
-profile is a preference of the Word host, not of an individual block.
+Equation**, **Edit LaTeX Block**, and **Copy as LaTeX**. Select a recognized block to edit its authoritative source.
+Select ordinary Word text containing inline LaTeX Blocks and choose **Copy as LaTeX** to place a LaTeX-safe version
+on the clipboard: ordinary text is escaped, each recognized inline Block is replaced by its exact author source,
+and Word-only U+2060 and numbered-equation scaffolds are omitted. Floating Blocks are not part of Word's selected
+text stream and are therefore not included. The selected profile is a preference of the Word host, not of an
+individual block.
 
 A fixed-width **LaTeX Block** owns an outer frame independently of TeX's layout width. That remains true whether Word
 keeps it **In Line with Text** or gives it any floating Layout Option, including **Square**, **In Front of Text**, and

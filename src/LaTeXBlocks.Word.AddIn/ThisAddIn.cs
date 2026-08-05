@@ -327,6 +327,17 @@ namespace LaTeXBlocks.Word
                 : "Updated " + count + " LaTeX equation numbers.";
         }
 
+        internal void CopySelectionAsLaTeX()
+        {
+            if (Application.Documents.Count == 0)
+                throw new InvalidOperationException("Open a Word document first.");
+            var latex = WordSelectionLaTeXExporter.Export(Application.Selection.Range.Duplicate);
+            if (string.IsNullOrEmpty(latex))
+                throw new InvalidOperationException("The selection does not contain exportable text or LaTeX Blocks.");
+            Clipboard.SetText(latex, TextDataFormat.UnicodeText);
+            Application.StatusBar = "Copied " + latex.Length + " characters as LaTeX.";
+        }
+
         internal void ShowEditEditor()
         {
             WordInterop.InlineShape inlineShape = null;

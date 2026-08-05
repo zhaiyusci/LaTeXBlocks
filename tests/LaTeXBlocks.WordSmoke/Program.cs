@@ -55,6 +55,9 @@ namespace LaTeXBlocks.WordSmoke
                 RunRenderHostClientSmoke(profile);
                 Console.WriteLine("StemTeX: warming the default profile...");
                 renderer.WarmUp(profile);
+                Assert(WordSelectionLaTeXExporter.EscapeText("10% & x_1 # {a} ~ ^ \\") ==
+                    "10\\% \\& x\\_1 \\# \\{a\\} \\textasciitilde{} \\textasciicircum{} \\textbackslash{}",
+                    "Word text was not escaped safely for LaTeX export.");
                 if (string.Equals(Environment.GetEnvironmentVariable("LATEXBLOCKS_SMOKE_SHUTDOWN_ONLY"), "1",
                     StringComparison.Ordinal))
                 {
@@ -569,6 +572,11 @@ namespace LaTeXBlocks.WordSmoke
                     runningText.Font.Position == 0 && runningText.NoProofing == 0 &&
                     document.Range(inserted.Range.End, inserted.Range.End + 1).Text == WordJoiner,
                     "Text typed after an inline formula inherited the picture run's baseline or no-proof formatting.");
+                var inlineExport = WordSelectionLaTeXExporter.Export(document.Range(
+                    inserted.Range.Start - 1, runningText.End));
+                Assert(inlineExport == source + " running" &&
+                    inlineExport.IndexOf(WordJoiner, StringComparison.Ordinal) < 0,
+                    "Selected Word text did not export the inline Block as its exact LaTeX source.");
                 document.Range(0, 0).Select();
                 var hostSizeBeforeSelection = (double)inserted.Range.Font.Size;
                 inserted.Range.Select();
@@ -760,6 +768,9 @@ namespace LaTeXBlocks.WordSmoke
                 Assert(firstParagraphText.StartsWith("Alpha\v\t", StringComparison.Ordinal) &&
                     firstParagraphText.IndexOf("\t(1)\v beta", StringComparison.Ordinal) >= 0,
                     "The numbered equation does not use the expected manual-break/tab scaffold.");
+                var numberedExport = WordSelectionLaTeXExporter.Export(document.Content);
+                Assert(numberedExport == "Alpha\n" + numberedSource + "\n beta",
+                    "A numbered equation exported its Word tab, parentheses, or SEQ-field scaffold.");
                 AssertEquationTabStops(document.Paragraphs[1]);
                 var insertedParagraphFormat = document.Paragraphs[1].Range.ParagraphFormat;
                 Assert(Math.Abs(insertedParagraphFormat.LeftIndent - 24) < 0.01 &&

@@ -5,6 +5,14 @@ Word-and-PowerPoint package line.
 
 ## [Unreleased]
 
+## [0.2.39] — 2026-08-06
+
+### Word
+
+- Added **Copy as LaTeX** for selected Word text. Ordinary text is escaped for LaTeX, recognized inline Blocks are
+  replaced losslessly by their authoritative Alternative Text source, and Word-only inline boundaries and numbered
+  equation tab/field scaffolds are omitted.
+
 ## [0.2.38] — 2026-08-05
 
 ### Block vertical alignment
