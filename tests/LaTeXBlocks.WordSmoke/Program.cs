@@ -58,6 +58,46 @@ namespace LaTeXBlocks.WordSmoke
                 Assert(WordSelectionLaTeXExporter.EscapeText("10% & x_1 # {a} ~ ^ \\") ==
                     "10\\% \\& x\\_1 \\# \\{a\\} \\textasciitilde{} \\textasciicircum{} \\textbackslash{}",
                     "Word text was not escaped safely for LaTeX export.");
+                var mixedImport = LaTeXMixedContentParser.Parse(
+                    "完成率 95\\%，价格 \\$10；由 $x^2$ 和 \\(y^2\\) 得到。% $ignored$\n" +
+                    "\\[z^2\\]\n\\begin{align}a&=b\\end{align}");
+                Assert(mixedImport.Count == 8 &&
+                       mixedImport[0].Kind == LaTeXContentKind.Text &&
+                       mixedImport[0].Source == "完成率 95%，价格 $10；由 " &&
+                       mixedImport[1].Kind == LaTeXContentKind.InlineMath &&
+                       mixedImport[1].Source == "$x^2$" &&
+                       mixedImport[2].Kind == LaTeXContentKind.Text &&
+                       mixedImport[2].Source == " 和 " &&
+                       mixedImport[3].Kind == LaTeXContentKind.InlineMath &&
+                       mixedImport[3].Source == "\\(y^2\\)" &&
+                       mixedImport[4].Kind == LaTeXContentKind.Text &&
+                       mixedImport[4].Source == " 得到。\n" &&
+                       mixedImport[5].Kind == LaTeXContentKind.DisplayMath &&
+                       mixedImport[5].Source == "\\[z^2\\]" &&
+                       mixedImport[6].Kind == LaTeXContentKind.Text &&
+                       mixedImport[6].Source == "\n" &&
+                       mixedImport[7].Kind == LaTeXContentKind.DisplayMath &&
+                       mixedImport[7].Source == "\\begin{align}a&=b\\end{align}",
+                    "Mixed LaTeX text was not separated into literal text and real math modes.");
+                var escapedOnly = LaTeXMixedContentParser.Parse("\\% \\& \\# \\_ \\{ \\} \\$");
+                Assert(escapedOnly.Count == 1 && escapedOnly[0].Kind == LaTeXContentKind.Text &&
+                       escapedOnly[0].Source == "% & # _ { } $",
+                    "Escaped LaTeX text characters were incorrectly classified as formulas.");
+                var styledText = LaTeXMixedContentParser.Parse(
+                    "\\textit{AB}\\textsf{AB}\\textbf{C \\texttt{D}}");
+                Assert(styledText.Count == 4 &&
+                       styledText[0].Source == "AB" && styledText[0].Italic &&
+                       styledText[0].FontFamily == LaTeXTextFontFamily.Inherited &&
+                       styledText[1].Source == "AB" && !styledText[1].Italic &&
+                       styledText[1].FontFamily == LaTeXTextFontFamily.SansSerif &&
+                       styledText[2].Source == "C " && styledText[2].Bold &&
+                       styledText[3].Source == "D" && styledText[3].Bold &&
+                       styledText[3].FontFamily == LaTeXTextFontFamily.Monospace,
+                    "LaTeX text-family and emphasis commands were not converted into Word text styles.");
+                var unmatchedMathRejected = false;
+                try { LaTeXMixedContentParser.Parse("text $x"); }
+                catch (ArgumentException) { unmatchedMathRejected = true; }
+                Assert(unmatchedMathRejected, "An unterminated LaTeX math delimiter was silently imported as text.");
                 if (string.Equals(Environment.GetEnvironmentVariable("LATEXBLOCKS_SMOKE_SHUTDOWN_ONLY"), "1",
                     StringComparison.Ordinal))
                 {

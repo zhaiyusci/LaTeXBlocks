@@ -39,6 +39,7 @@ namespace LaTeXBlocks.Word
                    "\" label=\"Reflow Frame\" imageMso=\"RefreshAll\" getEnabled=\"GetReflowFrameEnabled\" onAction=\"OnReflowFrame\"/>" +
                    "<button id=\"LaTeXBlocks.UpdateEquationNumbers\" label=\"Update Numbers\" imageMso=\"FieldsUpdate\" onAction=\"OnUpdateEquationNumbers\"/>" +
                    "<button id=\"LaTeXBlocks.CopyAsLaTeX\" label=\"Copy as LaTeX\" imageMso=\"Copy\" onAction=\"OnCopyAsLaTeX\"/>" +
+                   "<button id=\"LaTeXBlocks.PasteFromLaTeX\" label=\"Paste from LaTeX\" imageMso=\"Paste\" onAction=\"OnPasteFromLaTeX\"/>" +
                    "<editBox id=\"" + WidthControlId +
                    "\" label=\"Typesetting width (pt)\" sizeString=\"000.0\" getText=\"GetWidthText\" getEnabled=\"GetWidthEnabled\" onChange=\"OnWidthChanged\"/>" +
                    "</group></tab></tabs></ribbon></customUI>";
@@ -53,6 +54,7 @@ namespace LaTeXBlocks.Word
         public void OnReflowFrame(Office.IRibbonControl control) { Run(addIn.ReflowSelectedBlockFrame); }
         public void OnUpdateEquationNumbers(Office.IRibbonControl control) { Run(addIn.UpdateEquationNumbers); }
         public void OnCopyAsLaTeX(Office.IRibbonControl control) { Run(addIn.CopySelectionAsLaTeX); }
+        public void OnPasteFromLaTeX(Office.IRibbonControl control) { Run(addIn.PasteFromLaTeX); }
         public bool GetReflowFrameEnabled(Office.IRibbonControl control)
         {
             try { return addIn.HasSelectedBlockFrame(); }

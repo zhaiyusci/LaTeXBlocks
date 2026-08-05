@@ -338,6 +338,166 @@ namespace LaTeXBlocks.Word
             Application.StatusBar = "Copied " + latex.Length + " characters as LaTeX.";
         }
 
+        internal void PasteFromLaTeX()
+        {
+            if (Application.Documents.Count == 0)
+                throw new InvalidOperationException("Open a Word document first.");
+            if (!Clipboard.ContainsText(TextDataFormat.UnicodeText) &&
+                !Clipboard.ContainsText(TextDataFormat.Text))
+                throw new InvalidOperationException("The clipboard does not contain LaTeX text.");
+
+            var source = Clipboard.GetText(TextDataFormat.UnicodeText);
+            if (string.IsNullOrEmpty(source)) source = Clipboard.GetText(TextDataFormat.Text);
+            var segments = LaTeXMixedContentParser.Parse(source);
+            var profile = currentProfile ?? Renderers.DefaultAvailableProfile;
+            var fontSizePt = LaTeXBlockService.ResolveFontSize(Application.Selection,
+                LaTeXBlockLayoutMode.Auto, 10);
+            var textColor = LaTeXBlockService.ResolveTextColor(Application.Selection);
+            var baseTextFormat = WordTextFormatSnapshot.Capture(Application.Selection);
+            var prepared = new List<PreparedLaTeXImportSegment>();
+            foreach (var segment in segments)
+            {
+                if (segment.Kind == LaTeXContentKind.Text)
+                {
+                    prepared.Add(new PreparedLaTeXImportSegment(segment, null, 0));
+                    continue;
+                }
+                var mode = segment.Kind == LaTeXContentKind.InlineMath
+                    ? LaTeXBlockLayoutMode.Auto : LaTeXBlockLayoutMode.Fixed;
+                var width = mode == LaTeXBlockLayoutMode.Auto
+                    ? 360 : LaTeXBlockWidthPolicy.ResolveDefaultFixedWidth();
+                var render = Blocks.RenderPreview(segment.Source, width, mode, profile,
+                    fontSizePt, false, textColor);
+                prepared.Add(new PreparedLaTeXImportSegment(segment, render, width));
+            }
+
+            RunProgrammaticMutation(() =>
+            {
+                var target = Application.Selection.Range.Duplicate;
+                target.Text = string.Empty;
+                target.Collapse(WordInterop.WdCollapseDirection.wdCollapseStart);
+                target.Select();
+                foreach (var item in prepared)
+                {
+                    if (item.Segment.Kind == LaTeXContentKind.Text)
+                    {
+                        baseTextFormat.Apply(Application.Selection);
+                        var textStart = Application.Selection.Start;
+                        Application.Selection.TypeText(item.Segment.Source.Replace("\n", "\r"));
+                        var textEnd = Application.Selection.Start;
+                        if (textEnd > textStart &&
+                            (item.Segment.Bold || item.Segment.Italic ||
+                             item.Segment.FontFamily != LaTeXTextFontFamily.Inherited))
+                        {
+                            var insertedText = Application.ActiveDocument.Range(textStart, textEnd);
+                            if (item.Segment.Bold) insertedText.Font.Bold = -1;
+                            if (item.Segment.Italic) insertedText.Font.Italic = -1;
+                            var fonts = ResolveImportedTextFonts(item.Segment.FontFamily, profile);
+                            if (!string.IsNullOrEmpty(fonts.Western))
+                            {
+                                insertedText.Font.Name = fonts.Western;
+                                insertedText.Font.NameAscii = fonts.Western;
+                            }
+                            if (!string.IsNullOrEmpty(fonts.FarEast))
+                                insertedText.Font.NameFarEast = fonts.FarEast;
+                            // Formatting an inserted Range also changes Word's live
+                            // insertion format at its trailing edge. Restore the
+                            // caller's format so a scoped LaTeX command cannot leak
+                            // into the following plain-text segment.
+                            baseTextFormat.Apply(Application.Selection);
+                        }
+                        continue;
+                    }
+                    var mode = item.Segment.Kind == LaTeXContentKind.InlineMath
+                        ? LaTeXBlockLayoutMode.Auto : LaTeXBlockLayoutMode.Fixed;
+                    Blocks.InsertRendered(item.Segment.Source, item.WidthPt, mode, item.Render);
+                }
+            });
+            Application.StatusBar = "Pasted LaTeX text with " +
+                prepared.FindAll(item => item.Render != null).Count + " formula Blocks.";
+        }
+
+        private sealed class PreparedLaTeXImportSegment
+        {
+            internal PreparedLaTeXImportSegment(LaTeXContentSegment segment,
+                LaTeXBlockRender render, double widthPt)
+            {
+                Segment = segment;
+                Render = render;
+                WidthPt = widthPt;
+            }
+            internal LaTeXContentSegment Segment { get; }
+            internal LaTeXBlockRender Render { get; }
+            internal double WidthPt { get; }
+        }
+
+        private static ImportedTextFonts ResolveImportedTextFonts(LaTeXTextFontFamily family,
+            string profile)
+        {
+            if (family == LaTeXTextFontFamily.Inherited) return default(ImportedTextFonts);
+            var arialCjk = (profile ?? string.Empty).IndexOf("arial_lete_simhei",
+                StringComparison.OrdinalIgnoreCase) >= 0;
+            var cjk = arialCjk || (profile ?? string.Empty).IndexOf("cjk",
+                StringComparison.OrdinalIgnoreCase) >= 0;
+            switch (family)
+            {
+                case LaTeXTextFontFamily.SansSerif:
+                    return new ImportedTextFonts("Arial", cjk ? "SimHei" : null);
+                case LaTeXTextFontFamily.Monospace:
+                    return new ImportedTextFonts("Consolas", cjk ? (arialCjk ? "SimHei" : "SimSun") : null);
+                default:
+                    return new ImportedTextFonts(arialCjk ? "Arial" : "Times New Roman",
+                        cjk ? (arialCjk ? "SimHei" : "SimSun") : null);
+            }
+        }
+
+        private struct ImportedTextFonts
+        {
+            internal ImportedTextFonts(string western, string farEast)
+            {
+                Western = western;
+                FarEast = farEast;
+            }
+            internal string Western { get; }
+            internal string FarEast { get; }
+        }
+
+        private sealed class WordTextFormatSnapshot
+        {
+            private string name;
+            private string nameAscii;
+            private string nameFarEast;
+            private int bold;
+            private int italic;
+            private float size;
+            private WordInterop.WdColor color;
+
+            internal static WordTextFormatSnapshot Capture(WordInterop.Selection selection)
+            {
+                return new WordTextFormatSnapshot
+                {
+                    name = selection.Font.Name,
+                    nameAscii = selection.Font.NameAscii,
+                    nameFarEast = selection.Font.NameFarEast,
+                    bold = selection.Font.Bold,
+                    italic = selection.Font.Italic,
+                    size = selection.Font.Size,
+                    color = selection.Font.Color
+                };
+            }
+
+            internal void Apply(WordInterop.Selection selection)
+            {
+                if (!string.IsNullOrEmpty(name)) selection.Font.Name = name;
+                if (!string.IsNullOrEmpty(nameAscii)) selection.Font.NameAscii = nameAscii;
+                if (!string.IsNullOrEmpty(nameFarEast)) selection.Font.NameFarEast = nameFarEast;
+                selection.Font.Bold = bold;
+                selection.Font.Italic = italic;
+                if (size > 0) selection.Font.Size = size;
+                selection.Font.Color = color;
+            }
+        }
+
         internal void ShowEditEditor()
         {
             WordInterop.InlineShape inlineShape = null;

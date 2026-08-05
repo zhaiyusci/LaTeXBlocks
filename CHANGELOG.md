@@ -5,6 +5,36 @@ Word-and-PowerPoint package line.
 
 ## [Unreleased]
 
+## [0.2.43] — 2026-08-06
+
+### Word
+
+- Scoped imported text styles now restore the original Word insertion format, so `\textit`, `\textsf`, and related
+  commands cannot affect following plain text. Font-family commands now apply separate Western and CJK faces from
+  the selected profile semantics, including Arial + SimHei for `\textsf` under CJK profiles.
+
+## [0.2.42] — 2026-08-06
+
+### Word
+
+- Fixed **Paste from LaTeX** failing with Word error `0x800A16D4` when `\textsf`, `\textrm`, or `\texttt` tried to
+  apply a Western font family through Word's incompatible East Asian font property.
+
+## [0.2.41] — 2026-08-06
+
+### Word
+
+- **Paste from LaTeX** now converts `\textit`, `\emph`, `\textbf`, `\textsf`, `\textrm`, and `\texttt` into
+  corresponding Word text formatting, including nested combinations, instead of inserting the commands literally.
+
+## [0.2.40] — 2026-08-06
+
+### Word
+
+- Added **Paste from LaTeX** for mixed clipboard text. The mode-aware parser leaves escaped text such as `\%` as
+  ordinary Word characters, ignores comments, rejects unmatched math delimiters, and creates editable Blocks only
+  for genuine inline/display math delimiters and standard mathematical environments.
+
 ## [0.2.39] — 2026-08-06
 
 ### Word
