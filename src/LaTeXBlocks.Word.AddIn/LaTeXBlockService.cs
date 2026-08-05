@@ -13,22 +13,32 @@ namespace LaTeXBlocks.Word
 {
     internal sealed class LaTeXBlockService
     {
-        internal const string EquationSequenceIdentifier = "LaTeXEquation";
+        // Word uses the SEQ identifier as the native category of a caption-like
+        // item.  Keep it deliberately separate from the SVG metadata role: the
+        // former is public Word document semantics and powers Cross-reference;
+        // the latter tells this add-in how to lay out the object.
+        internal const string EquationCategoryIdentifier = "LaTeXBlockEq";
+        internal const string EquationSequenceIdentifier = EquationCategoryIdentifier;
+        private const string LegacyEquationSequenceIdentifier = "LaTeXEquation";
         internal const string EquationBookmarkPrefix = "LTXEQ_";
         private const double EquationNumberReservePt = 36.0;
         private const double EquationNumberGapPt = 6.0;
         private const double EmusPerPoint = 12700.0;
         private const string WordJoiner = "\u2060";
+        // Current Word exposes a floating SVG as an Office Graphic (28), but the
+        // Office 15 PIA bundled with this project predates that enum member.
+        private const int WordSvgFloatingShapeType = 28;
         // Word exposes direct font colours as WdColor's BGR integer. Automatic
         // colour is the only non-RGB value we deliberately retain; all other
         // undefined/theme sentinel values fall back to it.
         internal const int AutomaticTextColor = unchecked((int)0xff000000);
         private const int UndefinedTextColor = 9999999;
         private readonly WordInterop.Application application;
-        private readonly StemTeXBackend renderers;
+        private readonly IStemTeXBackend renderers;
         private readonly string cacheDirectory;
+        private bool equationCategoryRegistered;
 
-        internal LaTeXBlockService(WordInterop.Application application, StemTeXBackend renderers)
+        internal LaTeXBlockService(WordInterop.Application application, IStemTeXBackend renderers)
         {
             this.application = application ?? throw new ArgumentNullException(nameof(application));
             this.renderers = renderers ?? throw new ArgumentNullException(nameof(renderers));
@@ -39,6 +49,58 @@ namespace LaTeXBlocks.Word
         }
 
         internal string[] Profiles => renderers.Profiles;
+
+        /// <summary>
+        /// Makes the public Word category behind numbered LaTeX Blocks visible to
+        /// Word's native Caption and Cross-reference UI. Caption labels live in
+        /// Word's application settings, while the actual document target remains
+        /// the per-equation bookmark created around the SEQ result.
+        /// </summary>
+        internal void EnsureEquationCategory()
+        {
+            if (equationCategoryRegistered) return;
+            if (HasCaptionLabel(EquationCategoryIdentifier))
+            {
+                equationCategoryRegistered = true;
+                return;
+            }
+
+            WordInterop.CaptionLabel added = null;
+            try
+            {
+                added = application.CaptionLabels.Add(EquationCategoryIdentifier);
+            }
+            finally
+            {
+                if (added != null) Marshal.FinalReleaseComObject(added);
+            }
+
+            if (!HasCaptionLabel(EquationCategoryIdentifier))
+                throw new InvalidOperationException(
+                    "Word could not register the LaTeXBlockEq equation category.");
+            equationCategoryRegistered = true;
+        }
+
+        private bool HasCaptionLabel(string name)
+        {
+            var labels = application.CaptionLabels;
+            for (var index = 1; index <= labels.Count; index++)
+            {
+                object item = index;
+                WordInterop.CaptionLabel label = null;
+                try
+                {
+                    label = labels.get_Item(ref item);
+                    if (string.Equals(label.Name, name, StringComparison.OrdinalIgnoreCase))
+                        return true;
+                }
+                finally
+                {
+                    if (label != null) Marshal.FinalReleaseComObject(label);
+                }
+            }
+            return false;
+        }
 
         internal double ResolveTextAreaWidth(WordInterop.Range range, double fallbackPt = 360)
         {
@@ -123,27 +185,32 @@ namespace LaTeXBlocks.Word
 
         internal LaTeXBlockRender RenderPreview(string source, double widthPt, LaTeXBlockLayoutMode mode, string profile,
             double fontSizePt = 10, bool displayMathStyle = false,
-            int textColor = AutomaticTextColor)
+            int textColor = AutomaticTextColor, LaTeXBlockStyle style = null,
+            double? outerHeightPt = null, double? outerWidthPt = null)
         {
             return RenderPreviewAsync(source, widthPt, mode, profile, fontSizePt, displayMathStyle,
-                    textColor)
+                    textColor, style, outerHeightPt, outerWidthPt)
                 .GetAwaiter().GetResult();
         }
 
         internal async Task<LaTeXBlockRender> RenderPreviewAsync(string source, double widthPt,
             LaTeXBlockLayoutMode mode, string profile, double fontSizePt = 10,
-            bool displayMathStyle = false, int textColor = AutomaticTextColor)
+            bool displayMathStyle = false, int textColor = AutomaticTextColor,
+            LaTeXBlockStyle style = null, double? outerHeightPt = null,
+            double? outerWidthPt = null)
         {
             return await RenderAsync(source, widthPt, mode, profile, fontSizePt,
-                displayMathStyle, false, textColor);
+                displayMathStyle, false, textColor, style, outerHeightPt, outerWidthPt);
         }
 
         internal async Task<LaTeXBlockRender> RenderCommittedAsync(string source, double widthPt,
             LaTeXBlockLayoutMode mode, string profile, double fontSizePt = 10,
-            bool displayMathStyle = false, int textColor = AutomaticTextColor)
+            bool displayMathStyle = false, int textColor = AutomaticTextColor,
+            LaTeXBlockStyle style = null, double? outerHeightPt = null,
+            double? outerWidthPt = null)
         {
             return await RenderAsync(source, widthPt, mode, profile, fontSizePt,
-                displayMathStyle, true, textColor);
+                displayMathStyle, true, textColor, style, outerHeightPt, outerWidthPt);
         }
 
         internal void CancelPreview()
@@ -155,20 +222,52 @@ namespace LaTeXBlocks.Word
 
         private async Task<LaTeXBlockRender> RenderAsync(string source, double widthPt,
             LaTeXBlockLayoutMode mode, string profile, double fontSizePt,
-            bool displayMathStyle, bool committed, int textColor)
+            bool displayMathStyle, bool committed, int textColor, LaTeXBlockStyle style,
+            double? outerHeightPt, double? outerWidthPt)
         {
             var normalizedSource = NormalizeSourceText(source);
             var renderSource = displayMathStyle ? PrepareDisplayMathSource(normalizedSource) : normalizedSource;
-            textColor = NormalizeTextColor(textColor);
-            renderSource = ApplyTextColor(renderSource, textColor,
-                mode == LaTeXBlockLayoutMode.Auto);
+            // Fixed Content Blocks use the shared PowerPoint/Word style model. TeX
+            // owns leading and foreground paint; the SVG owns the physical shell.
+            // Auto formulas and numbered equations deliberately remain on Word's
+            // native font-colour path and never acquire a block-style wrapper.
+            var styledFixedContent = mode == LaTeXBlockLayoutMode.Fixed && style != null;
+            var rendererWidthPt = widthPt;
+            if (styledFixedContent)
+            {
+                textColor = ToWordColor(style.TextColor);
+                // A non-null style is an explicit acceptance of the Word Block
+                // editor, even when all visible controls happen to show their
+                // defaults. Keep that promise literal: 1.20× leading and the
+                // foreground colour must still be authored in TeX, while the SVG
+                // shell makes the requested outer viewport exact. Older blocks
+                // without a style payload continue through the legacy bare path.
+                var contentWidthPt = Math.Max(0.1,
+                    widthPt - 2 * style.OuterInsetPt);
+                rendererWidthPt = LaTeXBlockStyle.ToTeXLengthPt(contentWidthPt);
+                renderSource = style.WrapSource(renderSource, fontSizePt, true);
+            }
+            else
+            {
+                textColor = NormalizeTextColor(textColor);
+                // Styled block requests set PreviewBorder globally at TeX shipout.
+                // Restore the legacy border before every unstyled Auto, numbered,
+                // or pre-style Fixed render so one Block cannot leak viewport state
+                // into the next request in the warm StemTeX worker.
+                renderSource = "\\global\\PreviewBorder=1pt\n" + ApplyTextColor(renderSource, textColor,
+                    mode == LaTeXBlockLayoutMode.Auto);
+            }
             var result = committed
-                ? await renderers.RenderQueuedAsync(profile, renderSource, widthPt,
+                ? await renderers.RenderQueuedAsync(profile, renderSource, rendererWidthPt,
                     mode == LaTeXBlockLayoutMode.Auto, fontSizePt)
-                : await renderers.RenderLatestAsync(profile, renderSource, widthPt,
+                : await renderers.RenderLatestAsync(profile, renderSource, rendererWidthPt,
                     mode == LaTeXBlockLayoutMode.Auto, fontSizePt);
-            return new LaTeXBlockRender(WriteSvg(result.Bytes), result.Bytes, result.DepthPt,
-                fontSizePt, textColor);
+            var finalSvg = styledFixedContent
+                ? LaTeXBlockSvgFrame.Decorate(result.Bytes, style,
+                    outerWidthPt ?? widthPt, outerHeightPt)
+                : result.Bytes;
+            return new LaTeXBlockRender(WriteSvg(finalSvg), finalSvg, result.DepthPt,
+                fontSizePt, textColor, result.Bytes, styledFixedContent ? style : null);
         }
 
         internal WordInterop.InlineShape InsertBlock(string source, double widthPt, LaTeXBlockLayoutMode mode, string profile)
@@ -184,11 +283,21 @@ namespace LaTeXBlocks.Word
         internal WordInterop.InlineShape InsertRendered(string source, double widthPt, LaTeXBlockLayoutMode mode,
             LaTeXBlockRender render)
         {
+            return InsertRendered(source, widthPt, mode, render, null);
+        }
+
+        internal WordInterop.InlineShape InsertRendered(string source, double widthPt,
+            LaTeXBlockLayoutMode mode, LaTeXBlockRender render, LaTeXBlockStyle style)
+        {
             EnsureDocument();
             if (render == null) throw new ArgumentNullException(nameof(render));
+            // The style editor belongs to Fixed Content Blocks. A caller can reuse
+            // the same editor while switching to Auto, but that must never leave
+            // latent Block-only metadata on the inline formula.
+            if (mode != LaTeXBlockLayoutMode.Fixed) style = null;
             var target = application.Selection.Range.Duplicate;
             var metadata = LaTeXBlockMetadata.Create(widthPt, render.DepthPt, mode, render.FontSizePt,
-                LaTeXBlockRole.Content);
+                LaTeXBlockRole.Content, style);
             var document = target.Document;
             var undoStarted = false;
             var documentMutated = false;
@@ -237,6 +346,10 @@ namespace LaTeXBlocks.Word
             if (mode != LaTeXBlockLayoutMode.Auto)
                 throw new InvalidOperationException("Numbered equations use natural-width display math.");
 
+            // Register the matching CaptionLabel before mutating the document, so
+            // this SEQ identifier is immediately exposed as one Word-native
+            // Cross-reference category rather than a private add-in convention.
+            EnsureEquationCategory();
             var document = application.ActiveDocument;
             var target = application.Selection.Range.Duplicate;
             ValidateNumberedEquationTarget(target);
@@ -306,6 +419,11 @@ namespace LaTeXBlocks.Word
             target.Collapse(WordInterop.WdCollapseDirection.wdCollapseStart);
             var insertionPath = PrepareInsertionSvg(render, mode);
             var svgSize = ReadSvgPhysicalSize(render.SvgBytes);
+            // Title is the only durable per-shape metadata Word exposes on an SVG.
+            // Keep the root SVG's physical frame separate from the TeX layout width:
+            // once a fixed block becomes floating, its frame is what native resize
+            // gestures alter, while WidthPt remains the TeX measure.
+            metadata = metadata.WithFrameSize(svgSize.WidthPt, svgSize.HeightPt);
             var shape = target.InlineShapes.AddPicture(insertionPath, LinkToFile: false, SaveWithDocument: true, Range: target);
             markDocumentMutated?.Invoke();
             ApplyContract(shape, source, metadata, render.TextColor, hostPosition);
@@ -322,10 +440,19 @@ namespace LaTeXBlocks.Word
             var size = fontSizePt ?? ResolveFontSize(oldShape.Range, mode, 10);
             var displayMathStyle = TryReadContract(oldShape, out var metadata, out _) &&
                                    metadata.Role == LaTeXBlockRole.NumberedEquation;
-            var textColor = ResolveTextColor(oldShape.Range);
+            var style = metadata != null && metadata.HasExplicitStyle ? metadata.Style : null;
+            var textColor = style != null ? ToWordColor(style.TextColor) : ResolveTextColor(oldShape.Range);
             var render = RenderPreview(source, widthPt, mode, profile, size, displayMathStyle,
-                textColor);
-            return UpdateRendered(oldShape, source, widthPt, mode, render, selectReplacement);
+                textColor, style);
+            // UpdateBlock is also used by callers outside the editor. Preserve a
+            // Fixed Content Block's exact Word-owned outer viewport there too;
+            // otherwise replacing the SVG would silently restore its natural
+            // content size and discard a user resize.
+            if (metadata != null && metadata.Mode == LaTeXBlockLayoutMode.Fixed &&
+                metadata.Role == LaTeXBlockRole.Content && mode == LaTeXBlockLayoutMode.Fixed)
+                render = FrameFloatingRender(render, oldShape.Width, oldShape.Height, style);
+            return UpdateRendered(oldShape, source, widthPt, mode, render, selectReplacement,
+                style);
         }
 
         internal static string PrepareDisplayMathSource(string source)
@@ -411,7 +538,8 @@ namespace LaTeXBlocks.Word
         }
 
         internal WordInterop.InlineShape UpdateRendered(WordInterop.InlineShape oldShape, string source, double widthPt,
-            LaTeXBlockLayoutMode mode, LaTeXBlockRender render, bool selectReplacement = true)
+            LaTeXBlockLayoutMode mode, LaTeXBlockRender render, bool selectReplacement = true,
+            LaTeXBlockStyle style = null)
         {
             if (oldShape == null) throw new ArgumentNullException(nameof(oldShape));
             if (render == null) throw new ArgumentNullException(nameof(render));
@@ -430,11 +558,15 @@ namespace LaTeXBlocks.Word
             }
 
             var target = oldShape.Range.Duplicate;
-            var metadata = new LaTeXBlockMetadata(previous.Id, widthPt, render.DepthPt, mode, render.FontSizePt,
-                previous.Role);
+            var svgSize = ReadSvgPhysicalSize(render.SvgBytes);
+            var styleData = mode == LaTeXBlockLayoutMode.Fixed &&
+                previous.Role == LaTeXBlockRole.Content
+                ? (style != null ? style.ToMetadataValue() : previous.StyleData)
+                : null;
+            var metadata = new LaTeXBlockMetadata(previous.Id, widthPt, render.DepthPt, mode,
+                render.FontSizePt, previous.Role, svgSize.WidthPt, svgSize.HeightPt, styleData);
             var previousUsesInlineWordJoinerBoundaries = UsesInlineWordJoinerBoundaries(previous);
             var hostPosition = ResolveHostBaselinePosition(oldShape, previous);
-            var svgSize = ReadSvgPhysicalSize(render.SvgBytes);
             target.Collapse(WordInterop.WdCollapseDirection.wdCollapseStart);
             WordInterop.InlineShape replacement = null;
             var document = oldShape.Range.Document;
@@ -519,6 +651,86 @@ namespace LaTeXBlocks.Word
             }
         }
 
+        /// <summary>
+        /// Updates a user-floated content block without changing its Word layout
+        /// contract. Word has no in-place SVG source replacement for a Shape, so
+        /// the object is temporarily converted to its lossless InlineShape form,
+        /// updated through the normal SVG path, then converted back and given its
+        /// original wrapping and position. This is deliberately opt-in through a
+        /// selected, contract-verified Shape; ordinary pictures are never touched.
+        /// </summary>
+        internal WordInterop.Shape UpdateFloatingRendered(WordInterop.Shape oldShape, string source, double widthPt,
+            LaTeXBlockLayoutMode mode, LaTeXBlockRender render, bool selectReplacement = true,
+            LaTeXBlockStyle style = null)
+        {
+            if (oldShape == null) throw new ArgumentNullException(nameof(oldShape));
+            if (render == null) throw new ArgumentNullException(nameof(render));
+            if (!TryReadContract(oldShape, out var previous, out _))
+                throw new InvalidOperationException("The selected image is not a LaTeX Block.");
+            if (previous.Role != LaTeXBlockRole.Content || previous.Mode != LaTeXBlockLayoutMode.Fixed)
+                throw new InvalidOperationException(
+                    "Only fixed-width LaTeX Blocks can remain floating. Inline formulas and numbered equations must remain inline.");
+            if (mode != LaTeXBlockLayoutMode.Fixed)
+                throw new InvalidOperationException(
+                    "A floating LaTeX Block must remain fixed-width. Convert it back to In Line with Text before changing it to an auto-width formula.");
+
+            var layout = FloatingShapeLayout.Capture(oldShape);
+            WordInterop.InlineShape inline = null;
+            WordInterop.Shape replacement = null;
+            try
+            {
+                inline = oldShape.ConvertToInlineShape();
+                var updated = UpdateRendered(inline, source, widthPt, mode, render, false,
+                    style);
+                replacement = updated.ConvertToShape();
+                layout.Apply(replacement);
+                // A LaTeX Block's outer frame has text-box semantics: its width and
+                // height are independent user instructions, not an image aspect-ratio
+                // constraint.  The SVG inside is reframed before this conversion, so
+                // leaving Word free to resize either axis does not become persisted
+                // visual scaling after the subsequent reflow.
+                replacement.LockAspectRatio = Office.MsoTriState.msoFalse;
+                if (selectReplacement)
+                    try { replacement.Select(); } catch { }
+                return replacement;
+            }
+            catch
+            {
+                // Before a successful replacement, Word still has the original
+                // drawing as an InlineShape. Best-effort conversion restores the
+                // user's chosen floating layout; the original source remains in
+                // Alternative Text even if the host rejects the conversion.
+                if (replacement == null && inline != null)
+                {
+                    try
+                    {
+                        var restored = inline.ConvertToShape();
+                        layout.Apply(restored);
+                    }
+                    catch { }
+                }
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// Rebuilds a fixed Block at its exact Word frame. Styled blocks start from
+        /// the original TeX content SVG, so padding, fill, border and vertical
+        /// alignment move with the new edge instead of becoming a second frame.
+        /// </summary>
+        internal LaTeXBlockRender FrameFloatingRender(LaTeXBlockRender render,
+            double frameWidthPt, double frameHeightPt, LaTeXBlockStyle style = null)
+        {
+            if (render == null) throw new ArgumentNullException(nameof(render));
+            style = style ?? render.Style;
+            var framedBytes = style != null
+                ? LaTeXBlockSvgFrame.Decorate(render.ContentSvgBytes, style,
+                    frameWidthPt, frameHeightPt)
+                : FrameSvg(render.SvgBytes, frameWidthPt, frameHeightPt);
+            return new LaTeXBlockRender(WriteSvg(framedBytes), framedBytes, render.DepthPt,
+                render.FontSizePt, render.TextColor, render.ContentSvgBytes, style);
+        }
+
         internal bool TryGetSelectedBlock(out WordInterop.InlineShape shape, out LaTeXBlockMetadata metadata)
         {
             shape = null;
@@ -535,6 +747,27 @@ namespace LaTeXBlocks.Word
                 }
             }
             return false;
+        }
+
+        internal bool TryGetSelectedFloatingBlock(out WordInterop.Shape shape, out LaTeXBlockMetadata metadata)
+        {
+            shape = null;
+            metadata = null;
+            if (application.Documents.Count == 0 || application.Selection == null) return false;
+            try
+            {
+                var selection = application.Selection;
+                if (selection.ShapeRange.Count != 1) return false;
+                var candidate = selection.ShapeRange[1];
+                if (!TryReadContract(candidate, out metadata, out _)) return false;
+                shape = candidate;
+                return true;
+            }
+            catch (COMException)
+            {
+                metadata = null;
+                return false;
+            }
         }
 
         internal static bool TryReadContract(WordInterop.InlineShape shape, out LaTeXBlockMetadata metadata,
@@ -558,6 +791,27 @@ namespace LaTeXBlocks.Word
             catch (NotImplementedException) { metadata = null; source = null; return false; }
         }
 
+        internal static bool TryReadContract(WordInterop.Shape shape, out LaTeXBlockMetadata metadata,
+            out string source)
+        {
+            metadata = null;
+            source = null;
+            if (shape == null) return false;
+            try
+            {
+                // Never treat an arbitrary text box, chart, or OLE object as a
+                // block just because it exposes an AlternativeText property. SVGs
+                // imported by current Word use the otherwise unnamed type 28.
+                if (!IsSupportedFloatingShapeType(shape.Type)) return false;
+                if (!LaTeXBlockMetadata.TryParse(shape.Title, out metadata)) return false;
+                source = shape.AlternativeText;
+                if (string.IsNullOrWhiteSpace(source)) { metadata = null; source = null; return false; }
+                return true;
+            }
+            catch (COMException) { metadata = null; source = null; return false; }
+            catch (NotImplementedException) { metadata = null; source = null; return false; }
+        }
+
         internal static bool IsSupportedInlineShapeType(WordInterop.WdInlineShapeType type)
         {
             const int WordSvgInlineShapeType = 17; // Current Word value; absent from the shipped Office PIA enum.
@@ -566,9 +820,115 @@ namespace LaTeXBlocks.Word
                    (int)type == WordSvgInlineShapeType;
         }
 
+        private static bool IsSupportedFloatingShapeType(Office.MsoShapeType type)
+        {
+            return type == Office.MsoShapeType.msoPicture ||
+                   type == Office.MsoShapeType.msoLinkedPicture ||
+                   (int)type == WordSvgFloatingShapeType;
+        }
+
         internal int UpdateEquationNumbers(WordInterop.Document document = null)
         {
             return UpdateEquationNumbers(document, true);
+        }
+
+        internal IReadOnlyList<EquationReferenceTarget> GetEquationReferenceTargets(
+            WordInterop.Document document = null)
+        {
+            document = document ?? application.ActiveDocument;
+            if (document == null) return new EquationReferenceTarget[0];
+
+            var targets = new List<EquationReferenceTarget>();
+            var seenIds = new HashSet<Guid>();
+            var mainStory = document.StoryRanges[WordInterop.WdStoryType.wdMainTextStory];
+            foreach (WordInterop.InlineShape shape in mainStory.InlineShapes)
+            {
+                if (!TryReadContract(shape, out var metadata, out var source) ||
+                    metadata.Role != LaTeXBlockRole.NumberedEquation ||
+                    shape.Range.Tables.Count > 0 || seenIds.Contains(metadata.Id))
+                    continue;
+
+                try
+                {
+                    var field = FindEquationNumberField(shape, metadata);
+                    var number = (field.Result.Text ?? string.Empty).Trim();
+                    if (string.IsNullOrWhiteSpace(number)) continue;
+                    targets.Add(new EquationReferenceTarget(metadata.Id,
+                        EquationBookmarkName(metadata.Id), number, source, shape.Range.Start));
+                    seenIds.Add(metadata.Id);
+                }
+                catch (COMException)
+                {
+                    // A copied or manually damaged equation can have metadata but no
+                    // matching bookmark/field. It must not silently become a target
+                    // for a reference to a different equation.
+                }
+                catch (InvalidOperationException)
+                {
+                    // See the COM case above. A future repair command will assign a
+                    // fresh identity to copied or otherwise incomplete equations.
+                }
+            }
+            targets.Sort((left, right) => left.Position.CompareTo(right.Position));
+            return targets;
+        }
+
+        internal WordInterop.Field InsertEquationReference(EquationReferenceTarget reference)
+        {
+            EnsureDocument();
+            if (reference == null) throw new ArgumentNullException(nameof(reference));
+
+            var document = application.ActiveDocument;
+            ValidateEquationReferenceTarget(document, reference);
+            var target = application.Selection.Range.Duplicate;
+            if (target.StoryType != WordInterop.WdStoryType.wdMainTextStory)
+                throw new InvalidOperationException(
+                    "Equation references can currently be inserted only in the main document text.");
+            var undoStarted = false;
+            var documentMutated = false;
+            try
+            {
+                application.UndoRecord.StartCustomRecord("Insert Equation Reference");
+                undoStarted = true;
+
+                // Parentheses are ordinary author-visible text. The number itself is
+                // a native REF field so it follows its target on renumbering and is a
+                // hyperlink through \h, rather than a copied number managed by us.
+                var insertionStart = target.Start;
+                target.Text = "(";
+                documentMutated = true;
+                var fieldRange = document.Range(insertionStart + 1, insertionStart + 1);
+                var field = document.Fields.Add(fieldRange, WordInterop.WdFieldType.wdFieldRef,
+                    reference.BookmarkName + " \\h", true);
+                documentMutated = true;
+                if (!field.Update())
+                    throw new InvalidOperationException("Word could not create the equation reference field.");
+
+                // Insert the closing parenthesis only after Word has materialized
+                // the field. Pre-creating both characters lets Fields.Add consume
+                // the closing character on some Word builds.
+                var closingPosition = field.Result.End + 1;
+                var closingParenthesis = document.Range(closingPosition, closingPosition);
+                closingParenthesis.Text = ")";
+                var afterReference = document.Range(closingPosition + 1, closingPosition + 1);
+                afterReference.Select();
+                return field;
+            }
+            catch (Exception exception)
+            {
+                var rollbackFailure = TryRollbackCustomRecord(document, ref undoStarted, documentMutated);
+                if (rollbackFailure != null)
+                    throw new InvalidOperationException(
+                        "Word could not complete the equation-reference insertion and could not remove the partial reference. " +
+                        "Inspect the document before saving.",
+                        new AggregateException(exception, rollbackFailure));
+                throw;
+            }
+            finally
+            {
+                if (undoStarted)
+                    try { application.UndoRecord.EndCustomRecord(); } catch { }
+            }
         }
 
         private int UpdateEquationNumbers(WordInterop.Document document, bool createUndoRecord)
@@ -592,13 +952,16 @@ namespace LaTeXBlocks.Word
 
             var fields = mainStory.Fields;
             var equationFields = new List<WordInterop.Field>();
+            var referenceFields = new List<WordInterop.Field>();
             for (var index = 1; index <= fields.Count; index++)
             {
                 var field = fields[index];
                 if (IsEquationSequenceField(field)) equationFields.Add(field);
+                else if (IsEquationReferenceField(field)) referenceFields.Add(field);
             }
 
-            if (paragraphs.Count == 0 && equationFields.Count == 0) return 0;
+            if (paragraphs.Count == 0 && equationFields.Count == 0 && referenceFields.Count == 0) return 0;
+            if (equationFields.Count > 0) EnsureEquationCategory();
 
             var undoStarted = false;
             var documentMutated = false;
@@ -618,8 +981,17 @@ namespace LaTeXBlocks.Word
                 for (var index = 0; index < equationFields.Count; index++)
                 {
                     documentMutated = true;
+                    MigrateLegacyEquationSequenceField(equationFields[index]);
                     if (!equationFields[index].Update())
                         throw new InvalidOperationException("Word could not update equation number " + (index + 1) + ".");
+                }
+                // REF results cache the previous bookmark text. Update them only
+                // after all SEQ fields have settled, otherwise a reference can keep
+                // the number from before a preceding equation was moved or deleted.
+                for (var index = 0; index < referenceFields.Count; index++)
+                {
+                    documentMutated = true;
+                    referenceFields[index].Update();
                 }
                 return equationFields.Count;
             }
@@ -683,12 +1055,74 @@ namespace LaTeXBlocks.Word
             internal NumberedEquationLayout Layout { get; }
         }
 
+        internal sealed class EquationReferenceTarget
+        {
+            internal EquationReferenceTarget(Guid id, string bookmarkName, string number,
+                string source, int position)
+            {
+                Id = id;
+                BookmarkName = bookmarkName;
+                Number = number;
+                Source = source;
+                Position = position;
+            }
+
+            internal Guid Id { get; }
+            internal string BookmarkName { get; }
+            internal string Number { get; }
+            internal string Source { get; }
+            internal int Position { get; }
+        }
+
         internal static bool IsEquationSequenceField(WordInterop.Field field)
         {
             if (field == null || field.Type != WordInterop.WdFieldType.wdFieldSequence) return false;
             var code = field.Code.Text ?? string.Empty;
-            return Regex.IsMatch(code, "^\\s*SEQ\\s+" + EquationSequenceIdentifier + "(?:\\s|$)",
+            return Regex.IsMatch(code, "^\\s*SEQ\\s+(?:" + EquationSequenceIdentifier + "|" +
+                LegacyEquationSequenceIdentifier + ")(?:\\s|$)",
                 RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        }
+
+        internal static bool IsEquationReferenceField(WordInterop.Field field)
+        {
+            if (field == null || field.Type != WordInterop.WdFieldType.wdFieldRef) return false;
+            var code = field.Code.Text ?? string.Empty;
+            return Regex.IsMatch(code, "^\\s*REF\\s+" + EquationBookmarkPrefix + "[0-9a-f]{32}(?:\\s|$)",
+                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        }
+
+        private static void MigrateLegacyEquationSequenceField(WordInterop.Field field)
+        {
+            if (field == null) return;
+            var code = field.Code.Text ?? string.Empty;
+            if (!Regex.IsMatch(code, "^\\s*SEQ\\s+" + LegacyEquationSequenceIdentifier + "(?:\\s|$)",
+                    RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
+                return;
+            var migrated = Regex.Replace(code,
+                "^(\\s*SEQ\\s+)" + LegacyEquationSequenceIdentifier + "(?=\\s|$)",
+                "$1" + EquationSequenceIdentifier,
+                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+            field.Code.Text = migrated;
+        }
+
+        private static void ValidateEquationReferenceTarget(WordInterop.Document document,
+            EquationReferenceTarget reference)
+        {
+            if (!string.Equals(reference.BookmarkName, EquationBookmarkName(reference.Id),
+                    StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("The selected equation reference is not a LaTeXBlockEq target.");
+            if (!document.Bookmarks.Exists(reference.BookmarkName))
+                throw new InvalidOperationException("The selected equation no longer has its Word bookmark.");
+
+            var bookmark = document.Bookmarks[reference.BookmarkName].Range;
+            foreach (WordInterop.Field field in bookmark.Paragraphs[1].Range.Fields)
+            {
+                if (IsEquationSequenceField(field) && field.Result.Start == bookmark.Start &&
+                    field.Result.End == bookmark.End)
+                    return;
+            }
+            throw new InvalidOperationException(
+                "The selected equation bookmark no longer identifies its Word number field.");
         }
 
         internal static string EquationBookmarkName(Guid id)
@@ -751,6 +1185,127 @@ namespace LaTeXBlocks.Word
                 default: throw new InvalidDataException("StemTeX SVG " + attribute + " uses an unsupported unit: " +
                     match.Groups["unit"].Value);
             }
+        }
+
+        // A floating Word Shape is an outer frame, not a request to scale the
+        // mathematics.  Re-author the root viewport at the requested physical
+        // dimensions while preserving the original TeX coordinate scale.  The
+        // frame therefore adds transparent space when enlarged and clips when
+        // reduced; it never stretches glyphs or rules.
+        internal static byte[] FrameSvg(byte[] svgBytes, double requestedFrameWidthPt,
+            double requestedFrameHeightPt)
+        {
+            if (svgBytes == null || svgBytes.Length == 0)
+                throw new ArgumentException("StemTeX returned an empty SVG.", nameof(svgBytes));
+
+            var naturalWidthPt = ReadSvgWidthPt(svgBytes);
+            var naturalHeightPt = ReadSvgHeightPt(svgBytes);
+            var frameWidthPt = ClampFloatingFrameExtent(requestedFrameWidthPt);
+            var frameHeightPt = ClampFloatingFrameExtent(requestedFrameHeightPt);
+            if (Math.Abs(frameWidthPt - naturalWidthPt) < 0.001 &&
+                Math.Abs(frameHeightPt - naturalHeightPt) < 0.001)
+                return svgBytes;
+
+            var svg = Encoding.UTF8.GetString(svgBytes);
+            var root = Regex.Match(svg, "<svg\\b[^>]*>",
+                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+            if (!root.Success)
+                throw new InvalidDataException("StemTeX SVG has no root svg element.");
+
+            var rootTag = root.Value;
+            var viewBox = Regex.Match(rootTag,
+                "\\bviewBox=(?<q>['\"])(?<x>[-+0-9.eE]+)\\s+(?<y>[-+0-9.eE]+)\\s+" +
+                "(?<w>[-+0-9.eE]+)\\s+(?<h>[-+0-9.eE]+)\\k<q>",
+                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+            if (!viewBox.Success ||
+                !TryReadFiniteSvgNumber(viewBox.Groups["w"].Value, out var viewBoxWidth) ||
+                !TryReadFiniteSvgNumber(viewBox.Groups["h"].Value, out var viewBoxHeight) ||
+                !TryReadFiniteSvgNumber(viewBox.Groups["x"].Value, out var viewBoxX) ||
+                !TryReadFiniteSvgNumber(viewBox.Groups["y"].Value, out var viewBoxY) ||
+                !(viewBoxWidth > 0) || !(viewBoxHeight > 0))
+                throw new InvalidDataException("StemTeX SVG has no numeric root viewBox.");
+
+            // The ratio applied to physical dimensions is also applied to the
+            // corresponding viewBox axis.  Consequently one SVG coordinate maps
+            // to exactly the same physical length before and after framing.
+            var frameViewBoxWidth = viewBoxWidth * frameWidthPt / naturalWidthPt;
+            var frameViewBoxX = viewBoxX - (frameViewBoxWidth - viewBoxWidth) / 2.0;
+            var frameViewBoxHeight = viewBoxHeight * frameHeightPt / naturalHeightPt;
+            // Word has no block vertical-alignment UI.  Match the default
+            // PowerPoint block policy: the TeX viewport begins at the top edge,
+            // so reducing a frame height preserves the first rendered line.
+            var frameViewBoxY = viewBoxY;
+            var number = CultureInfo.InvariantCulture;
+            var newViewBox = frameViewBoxX.ToString("0.######", number) + " " +
+                             frameViewBoxY.ToString("0.######", number) + " " +
+                             frameViewBoxWidth.ToString("0.######", number) + " " +
+                             frameViewBoxHeight.ToString("0.######", number);
+            rootTag = ReplaceSvgRootAttribute(rootTag, "width",
+                frameWidthPt.ToString("0.######", number) + "pt");
+            rootTag = ReplaceSvgRootAttribute(rootTag, "height",
+                frameHeightPt.ToString("0.######", number) + "pt");
+            rootTag = ReplaceSvgRootAttribute(rootTag, "viewBox", newViewBox);
+            rootTag = ReplaceSvgRootAttribute(rootTag, "overflow", "hidden");
+            svg = svg.Substring(0, root.Index) + rootTag +
+                  svg.Substring(root.Index + root.Length);
+            return Encoding.UTF8.GetBytes(svg);
+        }
+
+        internal static double ClampFloatingFrameExtent(double extentPt)
+        {
+            // This is a validity guard, not a layout policy. A Word Block owns its
+            // native outer frame, including widths beyond the editor's historical
+            // 2000 pt typesetting range. Silently capping that frame changes the
+            // user-visible SVG viewport after a drag. Word cannot retain a zero-size
+            // picture, so only preserve a tiny positive floor for malformed/zero
+            // values; otherwise retain the supplied finite physical extent exactly.
+            if (double.IsNaN(extentPt) || double.IsInfinity(extentPt) || !(extentPt > 0))
+                return 0.01;
+            return extentPt;
+        }
+
+        // The native gesture path deliberately observes only dimensions. This is
+        // shared with smoke tests so a move/rotation cannot silently regress into a
+        // render-triggering geometry change.
+        internal static bool HasNativeFrameGeometryChanged(double previousWidthPt,
+            double previousHeightPt, double currentWidthPt, double currentHeightPt)
+        {
+            const double tolerancePt = 0.05;
+            return Math.Abs(previousWidthPt - currentWidthPt) > tolerancePt ||
+                   Math.Abs(previousHeightPt - currentHeightPt) > tolerancePt;
+        }
+
+        internal static double ComposeNativeFrameLayoutWidth(double previousLayoutWidthPt,
+            double previousFrameWidthPt, double currentFrameWidthPt)
+        {
+            var widthPt = previousLayoutWidthPt + currentFrameWidthPt - previousFrameWidthPt;
+            if (double.IsNaN(widthPt) || double.IsInfinity(widthPt))
+                return LaTeXBlockWidthPolicy.MinimumWidthPt;
+            // The TeX layout policy remains independently bounded, while FrameSvg
+            // above preserves the outer Word frame exactly even beyond this range.
+            return Math.Max(LaTeXBlockWidthPolicy.MinimumWidthPt,
+                Math.Min(LaTeXBlockWidthPolicy.MaximumWidthPt, widthPt));
+        }
+
+        private static bool TryReadFiniteSvgNumber(string text, out double value)
+        {
+            return double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture,
+                       out value) && !double.IsNaN(value) && !double.IsInfinity(value);
+        }
+
+        private static string ReplaceSvgRootAttribute(string rootTag, string name, string value)
+        {
+            var attribute = Regex.Match(rootTag,
+                "\\b" + Regex.Escape(name) + "=(?<q>['\"])[^'\"]*\\k<q>",
+                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+            var replacement = name + "='" + value + "'";
+            if (attribute.Success)
+                return rootTag.Substring(0, attribute.Index) + replacement +
+                       rootTag.Substring(attribute.Index + attribute.Length);
+            var insertion = rootTag.EndsWith("/>", StringComparison.Ordinal)
+                ? rootTag.Length - 2
+                : rootTag.Length - 1;
+            return rootTag.Insert(insertion, " " + replacement);
         }
 
         internal static void ValidateNumberedEquationTarget(WordInterop.Range target)
@@ -1019,7 +1574,9 @@ namespace LaTeXBlocks.Word
         {
             shape.AlternativeText = NormalizeSourceText(source);
             shape.Title = metadata.ToString();
-            shape.LockAspectRatio = Office.MsoTriState.msoTrue;
+            shape.LockAspectRatio = HasIndependentFrameResize(metadata)
+                ? Office.MsoTriState.msoFalse
+                : Office.MsoTriState.msoTrue;
             ApplyHostRunFormat(shape, metadata, textColor, hostPosition);
         }
 
@@ -1037,6 +1594,20 @@ namespace LaTeXBlocks.Word
             // Text remains exactly the author-written TeX source.
             shape.Range.Font.Color = (WordInterop.WdColor)NormalizeTextColor(textColor);
             ApplyBaselinePosition(shape, metadata, hostPosition);
+            // InsertXML used by NormalizeWordInlineDrawing rebuilds the DrawingML
+            // object and may restore Word's default aspect lock. Fixed Content Blocks
+            // intentionally own a two-dimensional frame, so restore that setting
+            // after every normalize/update. Do not rewrite an Auto/numbered drawing
+            // here: toggling its aspect lock after normalization can make Word add
+            // effect extents to an otherwise exact inline SVG.
+            if (HasIndependentFrameResize(metadata))
+                shape.LockAspectRatio = Office.MsoTriState.msoFalse;
+        }
+
+        private static bool HasIndependentFrameResize(LaTeXBlockMetadata metadata)
+        {
+            return metadata != null && metadata.Mode == LaTeXBlockLayoutMode.Fixed &&
+                   metadata.Role == LaTeXBlockRole.Content;
         }
 
         internal static int ResolveTextColor(WordInterop.Range target,
@@ -1080,6 +1651,12 @@ namespace LaTeXBlocks.Word
             return color >= 0 && color <= 0x00ffffff
                 ? color
                 : AutomaticTextColor;
+        }
+
+        internal static int ToWordColor(System.Drawing.Color color)
+        {
+            // WdColor is BGR in the low 24 bits, while System.Drawing.Color is RGB.
+            return color.R | (color.G << 8) | (color.B << 16);
         }
 
         internal static string ApplyTextColor(string source, int textColor,
@@ -1363,8 +1940,77 @@ namespace LaTeXBlocks.Word
             var pattern = "(\\b" + Regex.Escape(attribute) + "=\")[^\"]*(\")";
             return Regex.Replace(element, pattern,
                 match => match.Groups[1].Value + value.ToString(CultureInfo.InvariantCulture) +
-                         match.Groups[2].Value,
+                    match.Groups[2].Value,
                 RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
+        }
+
+        private sealed class FloatingShapeLayout
+        {
+            private readonly int wrapType;
+            private readonly int wrapSide;
+            private readonly float distanceLeft;
+            private readonly float distanceRight;
+            private readonly float distanceTop;
+            private readonly float distanceBottom;
+            private readonly int allowOverlap;
+            private readonly int relativeHorizontalPosition;
+            private readonly int relativeVerticalPosition;
+            private readonly float left;
+            private readonly float top;
+            private readonly float rotation;
+            private readonly int layoutInCell;
+            private readonly int lockAnchor;
+
+            private FloatingShapeLayout(WordInterop.Shape shape)
+            {
+                var wrap = shape.WrapFormat;
+                wrapType = (int)wrap.Type;
+                wrapSide = (int)wrap.Side;
+                distanceLeft = wrap.DistanceLeft;
+                distanceRight = wrap.DistanceRight;
+                distanceTop = wrap.DistanceTop;
+                distanceBottom = wrap.DistanceBottom;
+                allowOverlap = wrap.AllowOverlap;
+                relativeHorizontalPosition = (int)shape.RelativeHorizontalPosition;
+                relativeVerticalPosition = (int)shape.RelativeVerticalPosition;
+                left = shape.Left;
+                top = shape.Top;
+                rotation = shape.Rotation;
+                layoutInCell = shape.LayoutInCell;
+                lockAnchor = shape.LockAnchor;
+            }
+
+            internal static FloatingShapeLayout Capture(WordInterop.Shape shape)
+            {
+                if (shape == null) throw new ArgumentNullException(nameof(shape));
+                return new FloatingShapeLayout(shape);
+            }
+
+            internal void Apply(WordInterop.Shape shape)
+            {
+                if (shape == null) throw new ArgumentNullException(nameof(shape));
+                var wrap = shape.WrapFormat;
+                // Word derives several values from each other during conversion.
+                // Restore the reference frame before the wrap, then absolute
+                // coordinates, then margins; the reverse order shifts a correctly
+                // positioned floating block back to Word's default margin anchor.
+                shape.RelativeHorizontalPosition =
+                    (WordInterop.WdRelativeHorizontalPosition)relativeHorizontalPosition;
+                shape.RelativeVerticalPosition =
+                    (WordInterop.WdRelativeVerticalPosition)relativeVerticalPosition;
+                wrap.Type = (WordInterop.WdWrapType)wrapType;
+                shape.Left = left;
+                shape.Top = top;
+                wrap.Side = (WordInterop.WdWrapSideType)wrapSide;
+                wrap.DistanceLeft = distanceLeft;
+                wrap.DistanceRight = distanceRight;
+                wrap.DistanceTop = distanceTop;
+                wrap.DistanceBottom = distanceBottom;
+                wrap.AllowOverlap = allowOverlap;
+                shape.Rotation = rotation;
+                shape.LayoutInCell = layoutInCell;
+                shape.LockAnchor = lockAnchor;
+            }
         }
 
         private struct SvgPhysicalSize
@@ -1374,12 +2020,16 @@ namespace LaTeXBlocks.Word
                 if (!(widthPt > 0) || !(heightPt > 0) || double.IsNaN(widthPt) ||
                     double.IsNaN(heightPt) || double.IsInfinity(widthPt) || double.IsInfinity(heightPt))
                     throw new ArgumentOutOfRangeException(nameof(widthPt), "SVG dimensions must be finite and positive.");
+                WidthPt = widthPt;
+                HeightPt = heightPt;
                 WidthEmu = checked((long)Math.Round(widthPt * EmusPerPoint,
                     MidpointRounding.AwayFromZero));
                 HeightEmu = checked((long)Math.Round(heightPt * EmusPerPoint,
                     MidpointRounding.AwayFromZero));
             }
 
+            internal double WidthPt { get; }
+            internal double HeightPt { get; }
             internal long WidthEmu { get; }
             internal long HeightEmu { get; }
         }
@@ -1482,18 +2132,26 @@ namespace LaTeXBlocks.Word
     internal sealed class LaTeXBlockRender
     {
         internal LaTeXBlockRender(string svgPath, byte[] svgBytes, double depthPt,
-            double fontSizePt, int textColor = LaTeXBlockService.AutomaticTextColor)
+            double fontSizePt, int textColor = LaTeXBlockService.AutomaticTextColor,
+            byte[] contentSvgBytes = null, LaTeXBlockStyle style = null)
         {
             SvgPath = svgPath;
             SvgBytes = svgBytes ?? throw new ArgumentNullException(nameof(svgBytes));
             DepthPt = depthPt;
             FontSizePt = fontSizePt;
             TextColor = LaTeXBlockService.NormalizeTextColor(textColor);
+            ContentSvgBytes = contentSvgBytes ?? SvgBytes;
+            Style = style;
         }
         internal string SvgPath { get; }
         internal byte[] SvgBytes { get; }
         internal double DepthPt { get; }
         internal double FontSizePt { get; }
         internal int TextColor { get; }
+        // The decorated SVG is what Office inserts and previews.  Keep the raw TeX
+        // content alongside it so a subsequent native resize can repaint the shell
+        // at the new frame edges rather than nesting transparent SVG frames.
+        internal byte[] ContentSvgBytes { get; }
+        internal LaTeXBlockStyle Style { get; }
     }
 }

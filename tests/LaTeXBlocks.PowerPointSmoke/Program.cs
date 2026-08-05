@@ -5,6 +5,7 @@ using System.Globalization;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.RegularExpressions;
 using LaTeXBlocks.PowerPoint;
 using Office = Microsoft.Office.Core;
 using PowerPointInterop = Microsoft.Office.Interop.PowerPoint;
@@ -160,6 +161,8 @@ namespace LaTeXBlocks.PowerPointSmoke
                 const string source = "PowerPoint block with $E=mc^2$.";
                 var render = service.RenderPreviewAsync(source, 288, profile,
                     inheritedSize).GetAwaiter().GetResult();
+                Assert(!render.StyleWasApplied,
+                    "A legacy default PowerPoint block unexpectedly opted into the new style viewport.");
                 var smallerRender = service.RenderPreviewAsync(source, 288, profile, 10)
                     .GetAwaiter().GetResult();
                 Assert(PowerPointBlockService.ReadSvgHeightPt(render.SvgBytes) >
@@ -178,6 +181,8 @@ namespace LaTeXBlocks.PowerPointSmoke
                 Assert(string.Equals(block.Tags[PowerPointBlockService.KindTag],
                            PowerPointBlockService.KindValue, StringComparison.OrdinalIgnoreCase),
                     "The inserted PowerPoint block lost its explicit identity tag.");
+                Assert(!PowerPointBlockService.IsStyleApplied(block),
+                    "A legacy default PowerPoint block was not kept on the compatible bare SVG route.");
                 Assert(Math.Abs(block.Width - PowerPointBlockService.ReadSvgWidthPt(
                            render.SvgBytes)) < 0.02 &&
                        Math.Abs(block.Height - PowerPointBlockService.ReadSvgHeightPt(
@@ -189,6 +194,30 @@ namespace LaTeXBlocks.PowerPointSmoke
                     PowerPointBlockService.ReadSvgWidthPt(render.SvgBytes),
                     PowerPointBlockService.ReadSvgHeightPt(render.SvgBytes),
                     "The inserted PowerPoint block");
+                // An editor-accepted default is not equivalent to a legacy default
+                // tag: it literally requests the visible 1.20× leading and an SVG
+                // frame, matching Word's explicit Fixed Block style semantics.
+                var explicitDefaultStyle = LaTeXBlockStyle.Default;
+                var explicitDefaultWrapper = explicitDefaultStyle.WrapSource(source,
+                    inheritedSize, true);
+                Assert(explicitDefaultWrapper.IndexOf("\\renewcommand{\\baselinestretch}{1.2}",
+                           StringComparison.Ordinal) >= 0,
+                    "An explicitly accepted default PowerPoint style did not author 1.20× leading in TeX.");
+                var explicitDefaultRender = service.RenderPreviewAsync(source, 288,
+                    profile, inheritedSize, explicitDefaultStyle, null, null, true)
+                    .GetAwaiter().GetResult();
+                Assert(explicitDefaultRender.StyleWasApplied &&
+                       Encoding.UTF8.GetString(explicitDefaultRender.SvgBytes).IndexOf(
+                           "data-latexblocks-frame='1'", StringComparison.Ordinal) >= 0,
+                    "An explicitly accepted default PowerPoint style did not create its SVG viewport.");
+                var explicitDefaultBlock = service.InsertRendered(source, 288,
+                    explicitDefaultRender, explicitDefaultStyle, true);
+                Assert(PowerPointBlockService.IsStyleApplied(explicitDefaultBlock) &&
+                       string.Equals(explicitDefaultBlock.Tags[
+                           PowerPointBlockService.StyleAppliedTag], "1", StringComparison.Ordinal),
+                    "An explicitly accepted default PowerPoint style was not persisted separately from legacy defaults.");
+                explicitDefaultBlock.Delete();
+                Release(explicitDefaultBlock);
                 // TeX owns content colour and leading. The SVG owns padding, fill,
                 // border and vertical placement; PowerPoint still receives one
                 // ordinary picture whose author-facing source remains unchanged.
@@ -208,11 +237,58 @@ namespace LaTeXBlocks.PowerPointSmoke
                            StringComparison.Ordinal) >= 0 &&
                        styledWrapper.IndexOf("\\renewcommand{\\baselinestretch}{1.5}",
                            StringComparison.Ordinal) >= 0 &&
+                       styledWrapper.IndexOf("\\setbox\\strutbox=\\hbox", StringComparison.Ordinal) >= 0 &&
+                       styledWrapper.IndexOf("\\noindent\\strut%", StringComparison.Ordinal) >= 0 &&
+                       styledWrapper.IndexOf("\\ifhmode\\strut\\fi", StringComparison.Ordinal) >= 0 &&
                        styledWrapper.IndexOf("\\fbox", StringComparison.Ordinal) < 0 &&
                        styledWrapper.IndexOf("\\colorbox", StringComparison.Ordinal) < 0 &&
                        styledWrapper.IndexOf("\\vbox to ", StringComparison.Ordinal) < 0 &&
                        styledWrapper.IndexOf(styledSource, StringComparison.Ordinal) >= 0,
-                    "The PowerPoint TeX wrapper still contains outer-box styling.");
+                    "The PowerPoint TeX wrapper did not retain a typographic line box without moving frame styling into TeX.");
+                // A short lowercase glyph must retain normal ascender/descender
+                // room when a Block is aligned at its top, rather than letting the
+                // SVG crop shrink to the x-height.  The same single-line box is
+                // expected for x-height, cap-height, and descender-bearing text.
+                var typographicBoxStyle = new LaTeXBlockStyle(1.2, 0,
+                    LaTeXBlockVerticalAlignment.Top);
+                var xHeightRender = service.RenderPreviewAsync("x", 180, profile,
+                    inheritedSize, typographicBoxStyle, null, null, true).GetAwaiter().GetResult();
+                var capHeightRender = service.RenderPreviewAsync("A", 180, profile,
+                    inheritedSize, typographicBoxStyle, null, null, true).GetAwaiter().GetResult();
+                var descenderRender = service.RenderPreviewAsync("g", 180, profile,
+                    inheritedSize, typographicBoxStyle, null, null, true).GetAwaiter().GetResult();
+                var terminalParagraphRender = service.RenderPreviewAsync("x\\par", 180,
+                    profile, inheritedSize, typographicBoxStyle, null, null, true)
+                    .GetAwaiter().GetResult();
+                var xHeightPt = PowerPointBlockService.ReadSvgHeightPt(xHeightRender.SvgBytes);
+                Assert(Math.Abs(xHeightPt - PowerPointBlockService.ReadSvgHeightPt(capHeightRender.SvgBytes)) < 0.05 &&
+                       Math.Abs(xHeightPt - PowerPointBlockService.ReadSvgHeightPt(descenderRender.SvgBytes)) < 0.05 &&
+                       Math.Abs(xHeightPt - PowerPointBlockService.ReadSvgHeightPt(terminalParagraphRender.SvgBytes)) < 0.05 &&
+                       Math.Abs(xHeightPt - inheritedSize * typographicBoxStyle.LineSpacing) < 0.25,
+                    "A styled fixed Block still aligns a one-line text glyph's ink instead of its final TeX line box.");
+                var displayWrapper = typographicBoxStyle.WrapSource("\\[E=mc^2\\]",
+                    inheritedSize, true);
+                Assert(displayWrapper.IndexOf("\\noindent", StringComparison.Ordinal) < 0 &&
+                       displayWrapper.IndexOf("\\strut", StringComparison.Ordinal) < 0 &&
+                       displayWrapper.IndexOf("\\color{latexblocksforeground}", StringComparison.Ordinal) < 0 &&
+                       displayWrapper.IndexOf("\\par", StringComparison.Ordinal) < 0,
+                    "A display-style Block gained paragraph material outside its TeX display.");
+                var bareDisplayResult = backend.RenderQueuedAsync(profile,
+                    "\\global\\PreviewBorder=0pt\n\\[E=mc^2\\]", 180, false,
+                    inheritedSize).GetAwaiter().GetResult();
+                var expectedDisplaySvg = LaTeXBlockSvgFrame.Decorate(bareDisplayResult.Bytes,
+                    typographicBoxStyle, 180, null);
+                var styledDisplayRender = service.RenderPreviewAsync("\\[E=mc^2\\]", 180, profile,
+                    inheritedSize, typographicBoxStyle, null, null, true).GetAwaiter().GetResult();
+                Assert(Math.Abs(PowerPointBlockService.ReadSvgWidthPt(expectedDisplaySvg) -
+                                PowerPointBlockService.ReadSvgWidthPt(styledDisplayRender.SvgBytes)) < 0.05 &&
+                       Math.Abs(PowerPointBlockService.ReadSvgHeightPt(expectedDisplaySvg) -
+                                PowerPointBlockService.ReadSvgHeightPt(styledDisplayRender.SvgBytes)) < 0.05,
+                    "A display-style Block changed size merely because typographic text-line metrics were enabled.");
+                var displayRoot = Regex.Match(Encoding.UTF8.GetString(styledDisplayRender.SvgBytes),
+                    "<svg\\b[^>]*>", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant).Value;
+                Assert(displayRoot.IndexOf("fill='#000000'", StringComparison.OrdinalIgnoreCase) >= 0,
+                    "A standalone display did not receive its SVG-inherited text colour.");
                 var styledRender = service.RenderPreviewAsync(styledSource, 288, profile,
                     inheritedSize, styledStyle, 126).GetAwaiter().GetResult();
                 Assert(styledRender.SvgBytes.Length > 0,

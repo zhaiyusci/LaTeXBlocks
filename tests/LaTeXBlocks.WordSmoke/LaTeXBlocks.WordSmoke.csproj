@@ -4,6 +4,13 @@
   <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug|AnyCPU' "><DebugSymbols>true</DebugSymbols><DebugType>full</DebugType><Optimize>false</Optimize><OutputPath>bin\Debug\</OutputPath><DefineConstants>DEBUG;TRACE</DefineConstants><WarningLevel>4</WarningLevel></PropertyGroup>
   <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Release|AnyCPU' "><DebugType>pdbonly</DebugType><Optimize>true</Optimize><OutputPath>bin\Release\</OutputPath><DefineConstants>TRACE</DefineConstants><WarningLevel>4</WarningLevel></PropertyGroup>
   <ItemGroup><Reference Include="System"/><Reference Include="System.Core"/><Reference Include="System.Drawing"/><Reference Include="System.Windows.Forms"/><Reference Include="Microsoft.CSharp"/><Reference Include="Office, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c"><Private>False</Private><EmbedInteropTypes>true</EmbedInteropTypes></Reference><Reference Include="Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c"><Private>False</Private><EmbedInteropTypes>true</EmbedInteropTypes></Reference></ItemGroup>
-  <ItemGroup><ProjectReference Include="..\..\src\LaTeXBlocks.Word.AddIn\LaTeXBlocks.Word.AddIn.csproj"><Project>{C7D9074C-D91D-45AF-BA64-9A67AF3B1E02}</Project><Name>LaTeXBlocks.Word.AddIn</Name></ProjectReference></ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\LaTeXBlocks.Word.AddIn\LaTeXBlocks.Word.AddIn.csproj"><Project>{C7D9074C-D91D-45AF-BA64-9A67AF3B1E02}</Project><Name>LaTeXBlocks.Word.AddIn</Name></ProjectReference>
+    <!-- The smoke invokes the same external broker as an installed add-in. Keep
+         its executable beside the test assembly rather than exercising an
+         accidental in-process fallback. -->
+    <ProjectReference Include="..\..\src\LaTeXBlocks.RenderHost\LaTeXBlocks.RenderHost.csproj"><Project>{E60B5C1A-7A1B-4C8E-9EA2-EA226D9CDAB6}</Project><Name>LaTeXBlocks.RenderHost</Name><ReferenceOutputAssembly>False</ReferenceOutputAssembly></ProjectReference>
+  </ItemGroup>
+  <ItemGroup><Content Include="..\..\src\LaTeXBlocks.RenderHost\bin\$(Configuration)\LaTeXBlocks.RenderHost.host"><Link>LaTeXBlocks.RenderHost.host</Link><CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory></Content></ItemGroup>
   <ItemGroup><Compile Include="Program.cs"/></ItemGroup><Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
 </Project>

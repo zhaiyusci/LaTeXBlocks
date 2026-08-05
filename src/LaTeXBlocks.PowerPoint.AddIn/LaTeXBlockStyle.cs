@@ -3,7 +3,11 @@ using System.Drawing;
 using System.Globalization;
 using System.Text;
 
+#if POWERPOINT
 namespace LaTeXBlocks.PowerPoint
+#else
+namespace LaTeXBlocks.Word
+#endif
 {
     // The source-facing part of a PowerPoint block style belongs to TeX: leading
     // and foreground colour affect the actual mathematics and text. The outer
@@ -65,9 +69,9 @@ namespace LaTeXBlocks.PowerPoint
         // outer edge just as \fboxsep + \fboxrule would have done in TeX.
         internal double OuterInsetPt => PaddingPt + (HasBorder ? BorderThicknessPt : 0);
 
-        // A default block keeps the historical bare-snippet route byte-for-byte at
-        // the TeX level. This avoids silently changing existing slides merely by
-        // opening them with a newer add-in.
+        // Hosts can use this to retain their legacy bare-snippet route for blocks
+        // written before the style editor existed. An explicitly accepted style
+        // may still apply the default typography (see WrapSource).
         internal bool IsDefault =>
             NearlyEqual(LineSpacing, DefaultLineSpacing) &&
             NearlyEqual(PaddingPt, 0) &&
@@ -157,12 +161,75 @@ namespace LaTeXBlocks.PowerPoint
             return true;
         }
 
-        internal string WrapSource(string source, double fontSizePt)
+        // Word has no Shape.Tags collection that works across both InlineShape and
+        // floating Shape. Its compact Title metadata is semicolon-delimited, so the
+        // verbose PowerPoint tag representation above cannot be embedded there
+        // directly. Keep the Word payload deliberately small and delimiter-safe.
+        // The value is not an author-facing format; it is a durable bridge between
+        // the same style value object and Word's per-picture metadata contract.
+        internal string ToMetadataValue()
+        {
+            return "1," + FormatDecimal(LineSpacing) + "," +
+                FormatDecimal(PaddingPt) + "," + MetadataVerticalAlignment(VerticalAlignment) +
+                "," + ToHex(TextColor) + "," +
+                (HasBackgroundFill ? ToHex(BackgroundColor) : "-") + "," +
+                FormatDecimal(BorderThicknessPt) + "," + ToHex(BorderColor);
+        }
+
+        internal static LaTeXBlockStyle ReadFromMetadataValue(string value)
+        {
+            if (TryParseMetadataValue(value, out var style)) return style;
+            return Default;
+        }
+
+        internal static bool TryParseMetadataValue(string value, out LaTeXBlockStyle style)
+        {
+            style = null;
+            if (string.IsNullOrWhiteSpace(value)) return false;
+            var parts = value.Split(',');
+            if (parts.Length != 8 || !string.Equals(parts[0], "1", StringComparison.Ordinal))
+                return false;
+            if (!double.TryParse(parts[1], NumberStyles.Float, CultureInfo.InvariantCulture,
+                    out var lineSpacing) ||
+                !double.TryParse(parts[2], NumberStyles.Float, CultureInfo.InvariantCulture,
+                    out var paddingPt) ||
+                !double.TryParse(parts[6], NumberStyles.Float, CultureInfo.InvariantCulture,
+                    out var borderThicknessPt) ||
+                !TryParseHexColor(parts[4], out var textColor) ||
+                !TryParseHexColor(parts[7], out var borderColor))
+                return false;
+
+            var verticalAlignment = LaTeXBlockVerticalAlignment.Top;
+            if (string.Equals(parts[3], "m", StringComparison.OrdinalIgnoreCase))
+                verticalAlignment = LaTeXBlockVerticalAlignment.Middle;
+            else if (string.Equals(parts[3], "b", StringComparison.OrdinalIgnoreCase))
+                verticalAlignment = LaTeXBlockVerticalAlignment.Bottom;
+            else if (!string.Equals(parts[3], "t", StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            var hasBackgroundFill = !string.Equals(parts[5], "-", StringComparison.Ordinal);
+            var backgroundColor = Color.White;
+            if (hasBackgroundFill && !TryParseHexColor(parts[5], out backgroundColor))
+                return false;
+
+            style = new LaTeXBlockStyle(lineSpacing, paddingPt, verticalAlignment,
+                textColor, hasBackgroundFill, backgroundColor, borderThicknessPt,
+                borderColor);
+            return true;
+        }
+
+        internal string WrapSource(string source, double fontSizePt,
+            bool applyDefaultTypography = false)
         {
             if (source == null) throw new ArgumentNullException(nameof(source));
             if (!(fontSizePt > 0) || double.IsNaN(fontSizePt) || double.IsInfinity(fontSizePt))
                 throw new ArgumentOutOfRangeException(nameof(fontSizePt));
-            if (IsDefault) return source;
+            // A host can distinguish a legacy bare block from a block that the
+            // user explicitly accepted in the style editor.  In the latter case,
+            // 1.20× is a real requested leading, not merely a display value in
+            // the editor, so allow the caller to force the typography wrapper
+            // even when every visual style field has its default value.
+            if (IsDefault && !applyDefaultTypography) return source;
 
             var tex = new StringBuilder();
             tex.AppendLine("\\begingroup");
@@ -180,17 +247,39 @@ namespace LaTeXBlocks.PowerPoint
             // cached and a leading-only style change has no visible effect.
             tex.AppendLine("\\setlength{\\baselineskip}{" + FormatDecimal(
                 fontSizePt * LineSpacing) + "pt}");
-            // \color may enter horizontal mode. Establish the paragraph with no
-            // indent first, so the content SVG uses the requested typesetting
-            // width rather than a profile-defined paragraph indent.
-            tex.AppendLine("\\noindent");
-            tex.AppendLine("\\color{latexblocksforeground}");
-
-            tex.AppendLine(source);
-            // Finish the author paragraph while the leading/color scope is still
-            // active. Otherwise the worker's outer \par runs only after
-            // \endgroup and silently restores the profile's leading.
-            tex.AppendLine("\\par");
+            // The SVG frame must align a typographic line box, not a visible glyph
+            // outline. A tight preview of just "x" otherwise starts at the x-height,
+            // whereas a text box's Top edge is above it by the font's ascender space.
+            // A standalone display already owns a vertical TeX list. Do not insert
+            // *anything* which opens a paragraph before or after it: \noindent,
+            // \color and \par can all change a tight preview's display geometry.
+            var standaloneDisplay =
+                StemTeXRenderer.StartsWithFullDisplayOrPageWidthEnvironment(source);
+            if (standaloneDisplay)
+            {
+                // The SVG shell supplies the inherited foreground colour for this
+                // branch. It leaves explicit colours authored in the TeX source
+                // untouched while keeping the display's own vertical spacing exact.
+                tex.AppendLine(source);
+            }
+            else
+            {
+                // Rebuild the strut after assigning the final concrete baseline
+                // distance. \selectfont has made a strut for its prior baseline,
+                // which can otherwise disagree with the user-selected leading.
+                tex.AppendLine("\\setbox\\strutbox=\\hbox{\\vrule height .7\\baselineskip depth .3\\baselineskip width 0pt}");
+                // The first and final real text lines retain a normal LaTeX strut.
+                // Thus their SVG viewport has a stable ascent/depth even for x-height
+                // lowercase text, while tall mathematics still grows it naturally.
+                tex.AppendLine("\\noindent\\strut%");
+                tex.AppendLine("\\color{latexblocksforeground}%");
+                // A wrapper newline must not become a trailing TeX space. Preserve
+                // every author-entered space, trimming only terminal line endings.
+                tex.Append(source.TrimEnd('\r', '\n'));
+                tex.AppendLine("%");
+                tex.AppendLine("\\ifhmode\\strut\\fi");
+                tex.AppendLine("\\par");
+            }
             tex.AppendLine("\\endgroup");
             return tex.ToString();
         }
@@ -242,6 +331,16 @@ namespace LaTeXBlocks.PowerPoint
                 case LaTeXBlockVerticalAlignment.Middle: return "middle";
                 case LaTeXBlockVerticalAlignment.Bottom: return "bottom";
                 default: return "top";
+            }
+        }
+
+        private static string MetadataVerticalAlignment(LaTeXBlockVerticalAlignment alignment)
+        {
+            switch (alignment)
+            {
+                case LaTeXBlockVerticalAlignment.Middle: return "m";
+                case LaTeXBlockVerticalAlignment.Bottom: return "b";
+                default: return "t";
             }
         }
 

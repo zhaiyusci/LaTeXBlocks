@@ -13,7 +13,7 @@ namespace LaTeXBlocks.Word
 {
     public partial class ThisAddIn
     {
-        private StemTeXBackend rendererPool;
+        private IStemTeXBackend rendererPool;
         private LaTeXBlockService blocks;
         private RuntimeDiagnostics diagnostics;
         private string currentProfile;
@@ -22,13 +22,24 @@ namespace LaTeXBlocks.Word
         private Office.CommandBarComboBox nativeFontSizeControl;
         private bool refreshingNativeFontSize;
         private List<SelectionFontSnapshot> previousSelectionFontSnapshots = new List<SelectionFontSnapshot>();
+        private BlockFrameSnapshot previousBlockFrameSnapshot;
         private Control wordUiDispatcher;
+        private WordMouseCaptureMonitor wordMouseCaptureMonitor;
+        private WordInterop.ApplicationEvents4_Event applicationEvents;
         private LaTeXBlocksRibbon ribbon;
         private readonly Dictionary<long, PendingFormatRefresh> pendingFormatRefreshes =
             new Dictionary<long, PendingFormatRefresh>();
         private readonly HashSet<long> formatRefreshesInFlight = new HashSet<long>();
         private long formatRefreshSequence;
+        // A metadata id is intentionally not a scheduling key: Word retains Title
+        // metadata when a user copies a Block, while the two COM picture objects
+        // must still be allowed to render independently.
+        private readonly Dictionary<long, PendingBlockFrameReflow> pendingBlockFrameReflows =
+            new Dictionary<long, PendingBlockFrameReflow>();
+        private readonly HashSet<long> blockFrameReflowsInFlight = new HashSet<long>();
+        private long blockFrameReflowSequence;
         private int programmaticMutationDepth;
+        private int hostResourcesReleased;
         private bool shuttingDown;
         private bool hostEventProcessingEnabled;
         private const int NativeFontSizeControlId = 1731;
@@ -38,7 +49,7 @@ namespace LaTeXBlocks.Word
         private const string LegacySettingsKey = @"Software\LaTeXBlocks";
         internal WordInterop.Application WordApplication => Application;
 
-        private StemTeXBackend Renderers => rendererPool ?? (rendererPool = new StemTeXBackend());
+        private IStemTeXBackend Renderers => rendererPool ?? (rendererPool = new RenderHostClientBackend());
         private LaTeXBlockService Blocks => blocks ?? (blocks = new LaTeXBlockService(Application, Renderers));
 
         private void ThisAddIn_Startup(object sender, EventArgs e)
@@ -47,6 +58,12 @@ namespace LaTeXBlocks.Word
             {
                 wordUiDispatcher = new Control();
                 wordUiDispatcher.CreateControl();
+                // Word's application Quit event is raised while the COM server is
+                // still accepting event unsubscriptions.  VSTO's AddIn Shutdown can
+                // arrive later in the host's teardown sequence, after Word has begun
+                // waiting on event sinks.  Clean up at the earlier boundary too.
+                applicationEvents = (WordInterop.ApplicationEvents4_Event)Application;
+                applicationEvents.Quit += Application_Quit;
                 Application.WindowBeforeDoubleClick += Application_WindowBeforeDoubleClick;
                 Application.WindowSelectionChange += Application_WindowSelectionChange;
                 AttachNativeFontSizeControl();
@@ -59,6 +76,20 @@ namespace LaTeXBlocks.Word
                 pool.SwitchProfile(startupProfile);
                 backendStatus = pool.Status;
                 hostEventProcessingEnabled = true;
+                AttachWordMouseCaptureMonitor();
+
+                // A CaptionLabel is Word application state rather than DOCX data.
+                // Register the category when the add-in starts so Word recognizes
+                // existing numbered equations under one native category. The actual
+                // per-equation target remains its document bookmark; manual-break
+                // lines are not independently listed by Word's built-in dialog.
+                // Failure here must not disable the renderer or the rest of the
+                // add-in; number insertion retries the registration transactionally.
+                try
+                {
+                    Blocks.EnsureEquationCategory();
+                }
+                catch { }
             }
             catch (Exception exception)
             {
@@ -74,19 +105,34 @@ namespace LaTeXBlocks.Word
             ReleaseHostResources();
         }
 
+        private void Application_Quit()
+        {
+            shuttingDown = true;
+            ReleaseHostResources();
+        }
+
         private void ReleaseHostResources()
         {
+            if (Interlocked.Exchange(ref hostResourcesReleased, 1) != 0) return;
             hostEventProcessingEnabled = false;
             Interlocked.Increment(ref formatRefreshSequence);
             pendingFormatRefreshes.Clear();
             formatRefreshesInFlight.Clear();
+            Interlocked.Increment(ref blockFrameReflowSequence);
+            pendingBlockFrameReflows.Clear();
+            blockFrameReflowsInFlight.Clear();
             // Word is already part-way through COM teardown when this event runs. One
             // failed event unsubscription must never prevent the renderer shutdown
             // path from being reached: otherwise the background worker is left alive
             // until the process finally exits.
+            var events = applicationEvents;
+            applicationEvents = null;
+            if (events != null)
+                RunBestEffortCleanup(() => events.Quit -= Application_Quit);
             RunBestEffortCleanup(() => Application.WindowBeforeDoubleClick -= Application_WindowBeforeDoubleClick);
             RunBestEffortCleanup(() => Application.WindowSelectionChange -= Application_WindowSelectionChange);
             RunBestEffortCleanup(DetachNativeFontSizeControl);
+            RunBestEffortCleanup(DetachWordMouseCaptureMonitor);
             RunBestEffortCleanup(ClearPreviousSelectionSnapshot);
 
             var pool = rendererPool;
@@ -109,6 +155,86 @@ namespace LaTeXBlocks.Word
             }
         }
 
+        private void AttachWordMouseCaptureMonitor()
+        {
+            // The monitor is an enhancement over Word's selection-change fallback.
+            // A locked-down desktop can refuse a WinEvent hook; formula rendering
+            // and normal document editing must still start successfully in that case.
+            try
+            {
+                wordMouseCaptureMonitor = new WordMouseCaptureMonitor(wordUiDispatcher);
+                wordMouseCaptureMonitor.CaptureStarted += WordMouseCaptureMonitor_CaptureStarted;
+                wordMouseCaptureMonitor.CaptureEnded += WordMouseCaptureMonitor_CaptureEnded;
+                wordMouseCaptureMonitor.Start();
+            }
+            catch
+            {
+                DetachWordMouseCaptureMonitor();
+            }
+        }
+
+        private void DetachWordMouseCaptureMonitor()
+        {
+            var monitor = wordMouseCaptureMonitor;
+            wordMouseCaptureMonitor = null;
+            if (monitor == null) return;
+            try { monitor.CaptureStarted -= WordMouseCaptureMonitor_CaptureStarted; } catch { }
+            try { monitor.CaptureEnded -= WordMouseCaptureMonitor_CaptureEnded; } catch { }
+            try { monitor.Dispose(); } catch { }
+        }
+
+        private void WordMouseCaptureMonitor_CaptureStarted(object sender, EventArgs e)
+        {
+            if (shuttingDown || !hostEventProcessingEnabled || programmaticMutationDepth > 0)
+                return;
+            // Selection change normally captured the pre-drag geometry already.
+            // An out-of-context WinEvent callback may be dispatched only after
+            // Word's modal drag loop has returned, so overwriting that snapshot here
+            // would turn the final geometry into its own baseline. Capture only when
+            // there is no valid prior selection snapshot (for example a keyboard
+            // selection path that did not raise WindowSelectionChange).
+            if (!IsBlockFrameSnapshotStillSelected(previousBlockFrameSnapshot))
+                previousBlockFrameSnapshot = CaptureBlockFrameSnapshot();
+        }
+
+        private void WordMouseCaptureMonitor_CaptureEnded(object sender, EventArgs e)
+        {
+            if (shuttingDown || !hostEventProcessingEnabled || programmaticMutationDepth > 0)
+                return;
+            try
+            {
+                // This path runs after one queued UI turn following WM_LBUTTONUP;
+                // it is a native gesture completion, not a recurring geometry poll.
+                // Preserve the block selection if the user left it selected while
+                // StemTeX renders; later selection changes never get stolen back.
+                QueueBlockFrameReflow(CreateBlockFrameReflowRequest(
+                    previousBlockFrameSnapshot, false, true));
+            }
+            catch (COMException)
+            {
+                // The shape can disappear through Undo/Delete before the queued UI
+                // turn runs.  In that case there is simply nothing to commit.
+            }
+            finally
+            {
+                ribbon?.InvalidateWidthControl();
+            }
+        }
+
+        private bool IsBlockFrameSnapshotStillSelected(BlockFrameSnapshot snapshot)
+        {
+            if (snapshot == null) return false;
+            try
+            {
+                if (snapshot.IsFloating)
+                    return Blocks.TryGetSelectedFloatingBlock(out var selectedFloating, out _) &&
+                        GetComIdentity(selectedFloating) == snapshot.ShapeKey;
+                return Blocks.TryGetSelectedBlock(out var selectedInline, out _) &&
+                    GetComIdentity(selectedInline) == snapshot.ShapeKey;
+            }
+            catch (COMException) { return false; }
+        }
+
         internal void ShowInsertFormulaEditor()
         {
             if (Application.Documents.Count == 0) throw new InvalidOperationException("Open a Word document first.");
@@ -123,7 +249,8 @@ namespace LaTeXBlocks.Word
                 if (editor.ShowDialog(new LaTeXBlocksRibbon.WordWindow(Application)) == DialogResult.OK)
                 {
                     RunProgrammaticMutation(() =>
-                        Blocks.InsertRendered(editor.Source, editor.WidthPt, editor.Mode, editor.CurrentRender));
+                        Blocks.InsertRendered(editor.Source, editor.WidthPt, editor.Mode,
+                            editor.CurrentRender));
                 }
             }
         }
@@ -132,16 +259,20 @@ namespace LaTeXBlocks.Word
         {
             if (Application.Documents.Count == 0) throw new InvalidOperationException("Open a Word document first.");
             var widthPt = LaTeXBlockWidthPolicy.ResolveDefaultFixedWidth();
+            var fontSizePt = LaTeXBlockService.ResolveFontSize(Application.Selection,
+                LaTeXBlockLayoutMode.Fixed, 10);
             var textColor = LaTeXBlockService.ResolveTextColor(Application.Selection);
             using (var editor = new LaTeXBlockEditorForm(Blocks, "\\[E=mc^2\\]", widthPt,
                 LaTeXBlockLayoutMode.Fixed,
-                currentProfile ?? Renderers.DefaultAvailableProfile, SetCurrentProfile, false, 10,
+                currentProfile ?? Renderers.DefaultAvailableProfile, SetCurrentProfile, false,
+                fontSizePt,
                 null, false, textColor))
             {
                 if (editor.ShowDialog(new LaTeXBlocksRibbon.WordWindow(Application)) == DialogResult.OK)
                 {
                     RunProgrammaticMutation(() =>
-                        Blocks.InsertRendered(editor.Source, editor.WidthPt, editor.Mode, editor.CurrentRender));
+                        Blocks.InsertRendered(editor.Source, editor.WidthPt, editor.Mode,
+                            editor.CurrentRender, editor.AcceptedStyle));
                 }
             }
         }
@@ -167,6 +298,25 @@ namespace LaTeXBlocks.Word
             }
         }
 
+        internal void ShowInsertEquationReference()
+        {
+            if (Application.Documents.Count == 0) throw new InvalidOperationException("Open a Word document first.");
+            var references = Blocks.GetEquationReferenceTargets(Application.ActiveDocument);
+            if (references.Count == 0)
+                throw new InvalidOperationException(
+                    "This document has no intact numbered LaTeX equations to reference.");
+
+            using (var picker = new EquationReferenceForm(references))
+            {
+                if (picker.ShowDialog(new LaTeXBlocksRibbon.WordWindow(Application)) != DialogResult.OK)
+                    return;
+                var reference = picker.SelectedReference;
+                if (reference == null) return;
+                RunProgrammaticMutation(() => Blocks.InsertEquationReference(reference));
+                Application.StatusBar = "Inserted equation reference (" + reference.Number + ").";
+            }
+        }
+
         internal void UpdateEquationNumbers()
         {
             if (Application.Documents.Count == 0) throw new InvalidOperationException("Open a Word document first.");
@@ -179,19 +329,80 @@ namespace LaTeXBlocks.Word
 
         internal void ShowEditEditor()
         {
-            if (!Blocks.TryGetSelectedBlock(out var shape, out var metadata))
+            WordInterop.InlineShape inlineShape = null;
+            WordInterop.Shape floatingShape = null;
+            LaTeXBlockMetadata metadata;
+            string source;
+            int textColor;
+            LaTeXBlockStyle style;
+            double? outerWidthPt;
+            double? outerHeightPt;
+            if (Blocks.TryGetSelectedBlock(out inlineShape, out metadata))
+            {
+                source = inlineShape.AlternativeText;
+                textColor = LaTeXBlockService.ResolveTextColor(inlineShape.Range);
+                style = metadata.HasExplicitStyle ? metadata.Style : null;
+                outerWidthPt = inlineShape.Width;
+                outerHeightPt = inlineShape.Height;
+            }
+            else if (Blocks.TryGetSelectedFloatingBlock(out floatingShape, out metadata))
+            {
+                if (metadata.Role != LaTeXBlockRole.Content || metadata.Mode != LaTeXBlockLayoutMode.Fixed)
+                    throw new InvalidOperationException(
+                        "Only fixed-width LaTeX Blocks can remain floating. Keep inline formulas and numbered equations \"In Line with Text\".");
+                source = floatingShape.AlternativeText;
+                textColor = LaTeXBlockService.ResolveTextColor(floatingShape.Anchor);
+                style = metadata.HasExplicitStyle ? metadata.Style : null;
+                outerWidthPt = floatingShape.Width;
+                outerHeightPt = floatingShape.Height;
+            }
+            else
+            {
                 throw new InvalidOperationException("Select a LaTeX Block first.");
-            var source = shape.AlternativeText;
-            var textColor = LaTeXBlockService.ResolveTextColor(shape.Range);
+            }
+
             using (var editor = new LaTeXBlockEditorForm(Blocks, source, metadata.WidthPt,
                 metadata.Mode, currentProfile ?? Renderers.DefaultAvailableProfile,
                 SetCurrentProfile, true, metadata.FontSizePt, null,
-                metadata.Role == LaTeXBlockRole.NumberedEquation, textColor))
+                metadata.Role == LaTeXBlockRole.NumberedEquation, textColor, style,
+                outerHeightPt, outerWidthPt, floatingShape != null))
             {
                 if (editor.ShowDialog(new LaTeXBlocksRibbon.WordWindow(Application)) == DialogResult.OK)
                 {
                     RunProgrammaticMutation(() =>
-                        Blocks.UpdateRendered(shape, editor.Source, editor.WidthPt, editor.Mode, editor.CurrentRender));
+                    {
+                        var acceptedStyle = editor.Mode == LaTeXBlockLayoutMode.Fixed &&
+                            metadata.Role == LaTeXBlockRole.Content
+                            ? editor.AcceptedStyle
+                            : null;
+                        if (inlineShape != null)
+                        {
+                            // In Line with Text is only a Word layout choice. A fixed
+                            // Content Block can still have an author-sized outer frame,
+                            // so editing TeX must preserve that frame just as it does
+                            // after the Block is made floating.
+                            var inlineRender = metadata.Mode == LaTeXBlockLayoutMode.Fixed &&
+                                metadata.Role == LaTeXBlockRole.Content
+                                ? Blocks.FrameFloatingRender(editor.CurrentRender,
+                                    inlineShape.Width, inlineShape.Height,
+                                    acceptedStyle)
+                                : editor.CurrentRender;
+                            Blocks.UpdateRendered(inlineShape, editor.Source, editor.WidthPt,
+                                editor.Mode, inlineRender, true, acceptedStyle);
+                        }
+                        else
+                        {
+                            // A floating Block owns an outer Word frame.  Editing its
+                            // TeX changes the inner layout, not the frame the user
+                            // placed and sized; rebuild that frame around the new SVG.
+                            var framedRender = Blocks.FrameFloatingRender(editor.CurrentRender,
+                                floatingShape.Width, floatingShape.Height,
+                                acceptedStyle);
+                            Blocks.UpdateFloatingRendered(floatingShape, editor.Source,
+                                editor.WidthPt, editor.Mode, framedRender, true,
+                                acceptedStyle);
+                        }
+                    });
                 }
             }
         }
@@ -211,7 +422,7 @@ namespace LaTeXBlocks.Word
         internal void ApplySelectedFixedBlockWidth(string text)
         {
             if (!LaTeXBlockWidthPolicy.TryParseWidth(text, out var requestedWidthPt))
-                throw new ArgumentException("Enter a typesetting width from 30 to 450 pt.",
+                throw new ArgumentException("Enter a typesetting width from 30 to 2000 pt.",
                     nameof(text));
             if (!TryGetSelectedFixedContentBlock(out var selectedShape, out var metadata))
                 throw new InvalidOperationException("Select one fixed-width LaTeX Block first.");
@@ -223,12 +434,39 @@ namespace LaTeXBlocks.Word
             });
         }
 
+        internal bool HasSelectedBlockFrame()
+        {
+            return CaptureBlockFrameSnapshot() != null;
+        }
+
+        internal void ReflowSelectedBlockFrame()
+        {
+            var request = CreateBlockFrameReflowRequest(CaptureBlockFrameSnapshot(), true, true);
+            if (request == null)
+                throw new InvalidOperationException(
+                    "Select one fixed-width LaTeX Block first.");
+            QueueBlockFrameReflow(request);
+        }
+
         private bool TryGetSelectedFixedContentBlock(out WordInterop.InlineShape shape,
             out LaTeXBlockMetadata metadata)
         {
             shape = null;
             metadata = null;
             if (!Blocks.TryGetSelectedBlock(out var candidate, out var candidateMetadata) ||
+                candidateMetadata.Mode != LaTeXBlockLayoutMode.Fixed ||
+                candidateMetadata.Role != LaTeXBlockRole.Content) return false;
+            shape = candidate;
+            metadata = candidateMetadata;
+            return true;
+        }
+
+        private bool TryGetSelectedFloatingFixedContentBlock(out WordInterop.Shape shape,
+            out LaTeXBlockMetadata metadata)
+        {
+            shape = null;
+            metadata = null;
+            if (!Blocks.TryGetSelectedFloatingBlock(out var candidate, out var candidateMetadata) ||
                 candidateMetadata.Mode != LaTeXBlockLayoutMode.Fixed ||
                 candidateMetadata.Role != LaTeXBlockRole.Content) return false;
             shape = candidate;
@@ -291,6 +529,7 @@ namespace LaTeXBlocks.Word
             finally
             {
                 refreshingNativeFontSize = false;
+                ribbon?.InvalidateWidthControl();
             }
         }
 
@@ -303,6 +542,13 @@ namespace LaTeXBlocks.Word
             try
             {
                 refreshingNativeFontSize = true;
+                // The process-scoped mouse-capture hook normally commits at mouse-up.
+                // Keep selection change as a no-polling fallback for locked-down
+                // desktops where Windows refuses the hook, and for a Block changed
+                // through a non-mouse Office command.  Geometry alone matters;
+                // translation and rotation deliberately do not request a render.
+                QueueBlockFrameReflow(
+                    CreateBlockFrameReflowRequest(previousBlockFrameSnapshot, false, false));
                 // Word exposes no general formatting-changed event. If native size or
                 // color was applied through a shortcut, palette, style, paste, or macro,
                 // validate the range when the user next leaves it. This is event driven,
@@ -396,6 +642,159 @@ namespace LaTeXBlocks.Word
             return snapshots;
         }
 
+        private BlockFrameSnapshot CaptureBlockFrameSnapshot()
+        {
+            try
+            {
+                // Fixed Content Blocks are one semantic object whether Word exposes
+                // them as an InlineShape (In Line with Text) or a floating Shape
+                // under any WrapFormat.  Do not let layout participation decide
+                // whether their native resize is treated as a frame request.
+                if (TryGetSelectedFixedContentBlock(out var inlineShape, out var inlineMetadata))
+                    return CaptureBlockFrameSnapshot(inlineShape, null, inlineMetadata,
+                        inlineShape.AlternativeText);
+                if (TryGetSelectedFloatingFixedContentBlock(out var floatingShape,
+                        out var floatingMetadata))
+                    return CaptureBlockFrameSnapshot(null, floatingShape, floatingMetadata,
+                        floatingShape.AlternativeText);
+            }
+            catch (COMException)
+            {
+                // The selected object can be deleted while Word is raising a native
+                // input or selection event.  There is simply no frame to preserve.
+            }
+            return null;
+        }
+
+        private BlockFrameSnapshot CaptureBlockFrameSnapshot(WordInterop.InlineShape inlineShape,
+            WordInterop.Shape floatingShape, LaTeXBlockMetadata metadata, string source)
+        {
+            if ((inlineShape == null && floatingShape == null) || metadata == null) return null;
+            var shape = (object)inlineShape ?? floatingShape;
+            var shapeKey = GetComIdentity(shape);
+            if (shapeKey == 0) return null;
+            var frameWidthPt = NormalizeFrameExtent(inlineShape != null
+                ? inlineShape.Width : floatingShape.Width);
+            var frameHeightPt = NormalizeFrameExtent(inlineShape != null
+                ? inlineShape.Height : floatingShape.Height);
+            return new BlockFrameSnapshot(inlineShape, floatingShape, shapeKey, metadata, source,
+                frameWidthPt, frameHeightPt, ResolveExpectedBlockLayoutWidth(shapeKey, metadata,
+                    frameWidthPt));
+        }
+
+        // A resize may finish while an earlier render is still in flight.  Treat the
+        // pending target as the current TeX measure and carry only the newest native
+        // width delta forward.  This makes two rapid drags compose instead of making
+        // the second one start again from stale document metadata.
+        private double ResolveExpectedBlockLayoutWidth(long shapeKey,
+            LaTeXBlockMetadata metadata, double observedFrameWidthPt)
+        {
+            if (metadata == null) return LaTeXBlockWidthPolicy.MinimumWidthPt;
+            if (shapeKey != 0 && pendingBlockFrameReflows.TryGetValue(shapeKey,
+                    out var pending) && SameBlockFrameState(pending.BaseMetadata, metadata))
+                return ClampBlockLayoutWidth(pending.TargetWidthPt + observedFrameWidthPt -
+                    pending.TargetFrameWidthPt);
+            return metadata.WidthPt;
+        }
+
+        private static double NormalizeFrameExtent(double extentPt)
+        {
+            // This is no longer an upper clamp.  Word owns the physical frame; the
+            // service only supplies a positive finite SVG viewport for it.
+            return LaTeXBlockService.ClampFloatingFrameExtent(extentPt);
+        }
+
+        private BlockFrameReflowRequest CreateBlockFrameReflowRequest(
+            BlockFrameSnapshot snapshot, bool force, bool restoreSelection)
+        {
+            if (snapshot == null) return null;
+            try
+            {
+                if (snapshot.IsFloating)
+                {
+                    if (!LaTeXBlockService.TryReadContract(snapshot.FloatingShape, out var metadata,
+                            out var source) ||
+                        !SameBlockFrameState(metadata, snapshot.Metadata) ||
+                        metadata.Mode != LaTeXBlockLayoutMode.Fixed ||
+                        metadata.Role != LaTeXBlockRole.Content ||
+                        !string.Equals(LaTeXBlockService.NormalizeSourceText(source),
+                            snapshot.Source, StringComparison.Ordinal))
+                        return null;
+                    return CreateBlockFrameReflowRequest(null, snapshot.FloatingShape,
+                        snapshot.ShapeKey, metadata, source, force, restoreSelection,
+                        snapshot.LayoutWidthPt, snapshot.FrameWidthPt, snapshot.FrameHeightPt,
+                        LaTeXBlockService.ResolveTextColor(snapshot.FloatingShape.Anchor));
+                }
+
+                if (!LaTeXBlockService.TryReadContract(snapshot.InlineShape, out var inlineMetadata,
+                        out var inlineSource) ||
+                    !SameBlockFrameState(inlineMetadata, snapshot.Metadata) ||
+                    inlineMetadata.Mode != LaTeXBlockLayoutMode.Fixed ||
+                    inlineMetadata.Role != LaTeXBlockRole.Content ||
+                    !string.Equals(LaTeXBlockService.NormalizeSourceText(inlineSource),
+                        snapshot.Source, StringComparison.Ordinal))
+                    return null;
+                return CreateBlockFrameReflowRequest(snapshot.InlineShape, null,
+                    snapshot.ShapeKey, inlineMetadata, inlineSource, force, restoreSelection,
+                    snapshot.LayoutWidthPt, snapshot.FrameWidthPt, snapshot.FrameHeightPt,
+                    LaTeXBlockService.ResolveTextColor(snapshot.InlineShape.Range));
+            }
+            catch (COMException) { return null; }
+        }
+
+        private BlockFrameReflowRequest CreateBlockFrameReflowRequest(
+            WordInterop.InlineShape inlineShape, WordInterop.Shape floatingShape,
+            long expectedShapeKey, LaTeXBlockMetadata metadata, string source, bool force,
+            bool restoreSelection, double previousLayoutWidthPt, double previousFrameWidthPt,
+            double previousFrameHeightPt, int textColor)
+        {
+            if ((inlineShape == null && floatingShape == null) ||
+                (inlineShape != null && floatingShape != null) || metadata == null)
+                return null;
+            var shapeKey = GetComIdentity((object)inlineShape ?? floatingShape);
+            if (shapeKey == 0 || shapeKey != expectedShapeKey) return null;
+            var targetFrameWidthPt = NormalizeFrameExtent(
+                inlineShape != null ? inlineShape.Width : floatingShape.Width);
+            var targetFrameHeightPt = NormalizeFrameExtent(
+                inlineShape != null ? inlineShape.Height : floatingShape.Height);
+            // Compare only with the geometry captured before this gesture.  Metadata
+            // describes the last committed SVG, and is deliberately not used here:
+            // while TeX renders, a move/rotation must not look like another resize.
+            var widthChanged = !FrameExtentsEqual(targetFrameWidthPt, previousFrameWidthPt);
+            if (!force && !LaTeXBlockService.HasNativeFrameGeometryChanged(
+                    previousFrameWidthPt, previousFrameHeightPt, targetFrameWidthPt,
+                    targetFrameHeightPt))
+                return null;
+
+            // Keep the measured SVG edge allowance additive rather than treating
+            // the host change as a scale factor. A height-only resize still gets a
+            // fresh SVG root at the current TeX measure; it clips or supplies space
+            // vertically according to the user's frame rather than scaling glyphs.
+            var targetWidthPt = widthChanged
+                ? LaTeXBlockService.ComposeNativeFrameLayoutWidth(previousLayoutWidthPt,
+                    previousFrameWidthPt, targetFrameWidthPt)
+                : previousLayoutWidthPt;
+            return new BlockFrameReflowRequest(inlineShape, floatingShape, shapeKey, metadata, source,
+                targetWidthPt, targetFrameWidthPt, targetFrameHeightPt, textColor,
+                restoreSelection);
+        }
+
+        private static bool FrameExtentsEqual(double left, double right)
+        {
+            return !LaTeXBlockService.HasNativeFrameGeometryChanged(left, 0, right, 0);
+        }
+
+        private static double ClampBlockLayoutWidth(double widthPt)
+        {
+            if (double.IsNaN(widthPt) || double.IsInfinity(widthPt))
+                return LaTeXBlockWidthPolicy.MinimumWidthPt;
+            // Native outer frames can be wider than the editor's historical default
+            // range.  Their TeX measure must remain large enough to describe that
+            // user-owned geometry; the block editor receives the same policy limit.
+            return Math.Max(LaTeXBlockWidthPolicy.MinimumWidthPt,
+                Math.Min(LaTeXBlockWidthPolicy.MaximumWidthPt, widthPt));
+        }
+
         private void QueueFormatRefresh(List<FormatRefreshRequest> requests)
         {
             if (shuttingDown || requests == null || requests.Count == 0) return;
@@ -404,7 +803,7 @@ namespace LaTeXBlocks.Word
 
         private void QueueFormatRefresh(FormatRefreshRequest request)
         {
-            if (shuttingDown || request == null) return;
+            if (shuttingDown || request == null || request.ShapeKey == 0) return;
             var profile = currentProfile ?? Renderers.DefaultAvailableProfile;
             var targetWidthPt = request.Metadata.WidthPt;
             var targetFontSizePt = request.Metadata.FontSizePt;
@@ -432,12 +831,256 @@ namespace LaTeXBlocks.Word
                 return;
             }
 
+            // Fixed Content owns a physical SVG viewport.  It must never take the
+            // ordinary UpdateRendered path, because that path would replace a
+            // user-resized frame with an unframed SVG while a color/width refresh is
+            // in flight.  Route it through the same framed commit as native resize.
+            if (IsFixedContentBlock(request.Metadata))
+            {
+                pendingFormatRefreshes.Remove(request.ShapeKey);
+                QueueFixedContentFormatRefresh(request, targetWidthPt, targetTextColor);
+                return;
+            }
+
             var sequence = Interlocked.Increment(ref formatRefreshSequence);
             var pending = new PendingFormatRefresh(request.ShapeKey, request.Shape,
                 request.Metadata, request.Source, profile, targetWidthPt,
                 targetFontSizePt, targetTextColor, sequence);
             pendingFormatRefreshes[request.ShapeKey] = pending;
             StartNextFormatRefresh(request.ShapeKey);
+        }
+
+        private void QueueFixedContentFormatRefresh(FormatRefreshRequest request,
+            double targetWidthPt, int targetTextColor)
+        {
+            if (request?.Shape == null) return;
+            try
+            {
+                if (!LaTeXBlockService.TryReadContract(request.Shape, out var metadata,
+                        out var source) || !IsFixedContentBlock(metadata) ||
+                    !SameBlockFrameState(metadata, request.Metadata))
+                    return;
+                var snapshot = CaptureBlockFrameSnapshot(request.Shape, null, metadata, source);
+                var frameRequest = CreateBlockFrameReflowRequest(snapshot, true, false);
+                if (frameRequest == null) return;
+                var requestedLayoutWidthPt = request.ChangesWidth
+                    ? ClampBlockLayoutWidth(targetWidthPt)
+                    : frameRequest.TargetWidthPt;
+                QueueBlockFrameReflow(frameRequest.WithFormat(requestedLayoutWidthPt,
+                    targetTextColor));
+            }
+            catch (COMException)
+            {
+                // A native format command can race an Undo/Delete.  No stale frame
+                // should be resurrected just to complete a cosmetic refresh.
+            }
+        }
+
+        private static bool IsFixedContentBlock(LaTeXBlockMetadata metadata)
+        {
+            return metadata != null && metadata.Mode == LaTeXBlockLayoutMode.Fixed &&
+                   metadata.Role == LaTeXBlockRole.Content;
+        }
+
+        private bool QueueBlockFrameReflow(BlockFrameReflowRequest request)
+        {
+            if (shuttingDown || request == null || !request.HasShape || request.ShapeKey == 0)
+                return false;
+            var source = LaTeXBlockService.NormalizeSourceText(request.Source);
+            if (string.IsNullOrWhiteSpace(source)) return false;
+            var profile = currentProfile ?? Renderers.DefaultAvailableProfile;
+            var key = request.ShapeKey;
+            // An already-rendering normal format refresh is allowed to finish its
+            // worker task, but no longer owns this COM object. Its UI completion
+            // observes the missing pending entry and cannot write an unframed SVG.
+            pendingFormatRefreshes.Remove(key);
+            var restoreSelection = request.RestoreSelection;
+            if (pendingBlockFrameReflows.TryGetValue(key, out var existing))
+                restoreSelection = restoreSelection || existing.RestoreSelection;
+            var pending = new PendingBlockFrameReflow(key, request.InlineShape,
+                request.FloatingShape, request.Metadata, source, profile, request.TargetWidthPt,
+                request.TargetFrameWidthPt, request.TargetFrameHeightPt, request.TextColor,
+                restoreSelection, Interlocked.Increment(ref blockFrameReflowSequence));
+            pendingBlockFrameReflows[key] = pending;
+            RememberExpectedBlockFrame(request);
+            StartNextBlockFrameReflow(key);
+            return true;
+        }
+
+        private void RememberExpectedBlockFrame(BlockFrameReflowRequest request)
+        {
+            // Advance the gesture baseline as soon as the request is accepted, not
+            // only after the renderer returns. A following resize therefore composes
+            // from the latest intended TeX width; a move/rotation sees identical
+            // pre/post dimensions and does nothing.
+            previousBlockFrameSnapshot = new BlockFrameSnapshot(request.InlineShape,
+                request.FloatingShape, request.ShapeKey, request.Metadata, request.Source,
+                request.TargetFrameWidthPt, request.TargetFrameHeightPt,
+                request.TargetWidthPt);
+        }
+
+        private void StartNextBlockFrameReflow(long key)
+        {
+            if (shuttingDown || blockFrameReflowsInFlight.Contains(key) ||
+                !pendingBlockFrameReflows.TryGetValue(key, out var pending)) return;
+            blockFrameReflowsInFlight.Add(key);
+            _ = ReflowBlockFrameAsync(Blocks, pending);
+        }
+
+        private async Task ReflowBlockFrameAsync(LaTeXBlockService service,
+            PendingBlockFrameReflow pending)
+        {
+            try
+            {
+                var style = pending.BaseMetadata.HasExplicitStyle
+                    ? pending.BaseMetadata.Style
+                    : null;
+                var textColor = style != null
+                    ? LaTeXBlockService.ToWordColor(style.TextColor)
+                    : pending.TextColor;
+                var rawRender = await service.RenderCommittedAsync(pending.Source,
+                    pending.TargetWidthPt, LaTeXBlockLayoutMode.Fixed, pending.Profile,
+                    pending.BaseMetadata.FontSizePt, false,
+                    textColor, style)
+                    .ConfigureAwait(false);
+                // The renderer worker returns the genuine TeX box. Add the exact
+                // user-owned SVG frame only after that work completes; no Office COM
+                // object is touched off the UI thread.
+                var framedRender = service.FrameFloatingRender(rawRender,
+                    pending.TargetFrameWidthPt, pending.TargetFrameHeightPt, style);
+                await InvokeOnWordUiAsync(() => CompleteBlockFrameReflow(service,
+                    pending, framedRender)).ConfigureAwait(false);
+            }
+            catch (TaskCanceledException)
+            {
+                await AbandonBlockFrameReflowAsync(pending, null).ConfigureAwait(false);
+            }
+            catch (ObjectDisposedException)
+            {
+                await AbandonBlockFrameReflowAsync(pending, null).ConfigureAwait(false);
+            }
+            catch (Exception exception)
+            {
+                await AbandonBlockFrameReflowAsync(pending, exception).ConfigureAwait(false);
+            }
+        }
+
+        private void CompleteBlockFrameReflow(LaTeXBlockService service,
+            PendingBlockFrameReflow pending, LaTeXBlockRender render)
+        {
+            blockFrameReflowsInFlight.Remove(pending.ShapeKey);
+            if (shuttingDown) return;
+            if (!IsCurrentBlockFrameReflow(pending))
+            {
+                StartNextBlockFrameReflow(pending.ShapeKey);
+                return;
+            }
+            try
+            {
+                LaTeXBlockMetadata currentMetadata;
+                string currentSource;
+                var hasCurrentContract = pending.IsFloating
+                    ? LaTeXBlockService.TryReadContract(pending.FloatingShape, out currentMetadata,
+                        out currentSource)
+                    : LaTeXBlockService.TryReadContract(pending.InlineShape, out currentMetadata,
+                        out currentSource);
+                if (!hasCurrentContract ||
+                    !SameBlockFrameState(currentMetadata, pending.BaseMetadata) ||
+                    !string.Equals(LaTeXBlockService.NormalizeSourceText(currentSource),
+                        pending.Source, StringComparison.Ordinal) ||
+                    !string.Equals(pending.Profile, currentProfile,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    pendingBlockFrameReflows.Remove(pending.ShapeKey);
+                    return;
+                }
+
+                // A second native drag can happen while TeX is rendering. Never
+                // replace that newer user-owned frame with an older result.
+                var currentFrameWidthPt = NormalizeFrameExtent(
+                    pending.IsFloating ? pending.FloatingShape.Width : pending.InlineShape.Width);
+                var currentFrameHeightPt = NormalizeFrameExtent(
+                    pending.IsFloating ? pending.FloatingShape.Height : pending.InlineShape.Height);
+                if (!FrameExtentsEqual(currentFrameWidthPt, pending.TargetFrameWidthPt) ||
+                    !FrameExtentsEqual(currentFrameHeightPt, pending.TargetFrameHeightPt))
+                {
+                    pendingBlockFrameReflows.Remove(pending.ShapeKey);
+                    return;
+                }
+
+                var restoreSelection = pending.RestoreSelection &&
+                    IsPendingBlockStillSelected(pending);
+                RunProgrammaticMutation(() =>
+                {
+                    if (pending.IsFloating)
+                    {
+                        var replacement = service.UpdateFloatingRendered(pending.FloatingShape,
+                            pending.Source, pending.TargetWidthPt, LaTeXBlockLayoutMode.Fixed,
+                            render, false);
+                        if (restoreSelection) replacement.Select();
+                    }
+                    else
+                    {
+                        var replacement = service.UpdateRendered(pending.InlineShape,
+                            pending.Source, pending.TargetWidthPt, LaTeXBlockLayoutMode.Fixed,
+                            render, false);
+                        if (restoreSelection) replacement.Range.Select();
+                    }
+                }, restoreSelection);
+                pendingBlockFrameReflows.Remove(pending.ShapeKey);
+                ribbon?.InvalidateWidthControl();
+            }
+            catch (Exception exception)
+            {
+                AbandonBlockFrameReflow(pending, exception);
+            }
+            finally
+            {
+                StartNextBlockFrameReflow(pending.ShapeKey);
+            }
+        }
+
+        private bool IsPendingBlockStillSelected(PendingBlockFrameReflow pending)
+        {
+            try
+            {
+                if (pending.IsFloating)
+                    return Blocks.TryGetSelectedFloatingBlock(out var selectedFloating, out _) &&
+                        GetComIdentity(selectedFloating) == pending.ShapeKey;
+                return Blocks.TryGetSelectedBlock(out var selectedInline, out _) &&
+                    GetComIdentity(selectedInline) == pending.ShapeKey;
+            }
+            catch (COMException) { return false; }
+        }
+
+        private Task AbandonBlockFrameReflowAsync(PendingBlockFrameReflow pending,
+            Exception exception)
+        {
+            if (shuttingDown) return Task.FromResult(false);
+            return InvokeOnWordUiAsync(() => AbandonBlockFrameReflow(pending, exception));
+        }
+
+        private void AbandonBlockFrameReflow(PendingBlockFrameReflow pending,
+            Exception exception)
+        {
+            blockFrameReflowsInFlight.Remove(pending.ShapeKey);
+            if (shuttingDown) return;
+            if (IsCurrentBlockFrameReflow(pending))
+            {
+                pendingBlockFrameReflows.Remove(pending.ShapeKey);
+                ribbon?.InvalidateWidthControl();
+                if (exception != null)
+                    MessageBox.Show(new LaTeXBlocksRibbon.WordWindow(Application),
+                        exception.GetBaseException().Message, "LaTeX Blocks",
+                        MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            StartNextBlockFrameReflow(pending.ShapeKey);
+        }
+
+        private bool IsCurrentBlockFrameReflow(PendingBlockFrameReflow pending)
+        {
+            return pendingBlockFrameReflows.TryGetValue(pending.ShapeKey,
+                       out var current) && current.Sequence == pending.Sequence;
         }
 
         private void StartNextFormatRefresh(long shapeKey)
@@ -495,6 +1138,28 @@ namespace LaTeXBlocks.Word
                 string.Equals(pending.Profile, currentProfile,
                     StringComparison.OrdinalIgnoreCase))
             {
+                if (IsFixedContentBlock(currentMetadata))
+                {
+                    // This path is reachable only for a format render that began
+                    // before the fixed-Content routing above (or during a host
+                    // event race). Discard that old result and always take the
+                    // normal frame-reflow route. In particular, it is not enough
+                    // to put a frame around the already-rendered SVG here: a styled
+                    // Block's TeX width, leading and foreground colour all depend
+                    // on its durable style metadata. Reflow is the one path that
+                    // derives all of those values from that metadata before it
+                    // composes the physical SVG frame.
+                    pendingFormatRefreshes.Remove(pending.ShapeKey);
+                    var fixedTextColor = LaTeXBlockService.ResolveTextColor(shape.Range);
+                    QueueFixedContentFormatRefresh(new FormatRefreshRequest(shape,
+                        currentSource, currentMetadata, pending.TargetWidthPt,
+                        currentMetadata.FontSizePt, fixedTextColor), pending.TargetWidthPt,
+                        fixedTextColor);
+                    ribbon?.InvalidateWidthControl();
+                    StartNextFormatRefresh(pending.ShapeKey);
+                    return;
+                }
+
                 // Font.Color remains Word's source of truth while an SVG render is in
                 // flight. Do not let an older bitmap-like result repaint a newer native
                 // color command; immediately queue one render for the color now on the
@@ -520,6 +1185,13 @@ namespace LaTeXBlocks.Word
             if (currentColorRefresh != null) QueueFormatRefresh(currentColorRefresh);
             ribbon?.InvalidateWidthControl();
             StartNextFormatRefresh(pending.ShapeKey);
+        }
+
+        private bool QueueObservedBlockFrameResize(BlockFrameSnapshot snapshot, long shapeKey)
+        {
+            if (snapshot == null || snapshot.ShapeKey != shapeKey) return false;
+            var request = CreateBlockFrameReflowRequest(snapshot, false, false);
+            return request != null && QueueBlockFrameReflow(request);
         }
 
         private Task AbandonFormatRefreshAsync(PendingFormatRefresh pending,
@@ -571,7 +1243,16 @@ namespace LaTeXBlocks.Word
             return left != null && right != null && left.Id == right.Id &&
                    left.Mode == right.Mode && left.Role == right.Role &&
                    Math.Abs(left.WidthPt - right.WidthPt) < 0.001 &&
-                   Math.Abs(left.FontSizePt - right.FontSizePt) < 0.001;
+                   Math.Abs(left.FontSizePt - right.FontSizePt) < 0.001 &&
+                   string.Equals(left.StyleData, right.StyleData,
+                       StringComparison.Ordinal);
+        }
+
+        private static bool SameBlockFrameState(LaTeXBlockMetadata left,
+            LaTeXBlockMetadata right)
+        {
+            return SameMetadataState(left, right) &&
+                   Math.Abs(left.DepthPt - right.DepthPt) < 0.001;
         }
 
         private static long GetComIdentity(object value)
@@ -627,11 +1308,13 @@ namespace LaTeXBlocks.Word
         private void RememberSelection(WordInterop.Selection selection)
         {
             previousSelectionFontSnapshots = CaptureSelectionFontSnapshots(selection);
+            previousBlockFrameSnapshot = CaptureBlockFrameSnapshot();
         }
 
         private void ClearPreviousSelectionSnapshot()
         {
             previousSelectionFontSnapshots = new List<SelectionFontSnapshot>();
+            previousBlockFrameSnapshot = null;
         }
 
         private sealed class SelectionFontSnapshot
@@ -646,6 +1329,77 @@ namespace LaTeXBlocks.Word
             internal WordInterop.InlineShape Shape { get; }
             internal double HostFontSizePt { get; }
             internal int HostTextColor { get; }
+        }
+
+        private sealed class BlockFrameSnapshot
+        {
+            internal BlockFrameSnapshot(WordInterop.InlineShape inlineShape,
+                WordInterop.Shape floatingShape, long shapeKey, LaTeXBlockMetadata metadata,
+                string source, double frameWidthPt, double frameHeightPt,
+                double layoutWidthPt)
+            {
+                if ((inlineShape == null && floatingShape == null) ||
+                    (inlineShape != null && floatingShape != null))
+                    throw new ArgumentException("A Block frame snapshot needs exactly one Word shape.");
+                InlineShape = inlineShape;
+                FloatingShape = floatingShape;
+                ShapeKey = shapeKey;
+                Metadata = metadata;
+                Source = LaTeXBlockService.NormalizeSourceText(source);
+                FrameWidthPt = frameWidthPt;
+                FrameHeightPt = frameHeightPt;
+                LayoutWidthPt = layoutWidthPt;
+            }
+
+            internal WordInterop.InlineShape InlineShape { get; }
+            internal WordInterop.Shape FloatingShape { get; }
+            internal bool IsFloating => FloatingShape != null;
+            internal long ShapeKey { get; }
+            internal LaTeXBlockMetadata Metadata { get; }
+            internal string Source { get; }
+            internal double FrameWidthPt { get; }
+            internal double FrameHeightPt { get; }
+            internal double LayoutWidthPt { get; }
+        }
+
+        private sealed class BlockFrameReflowRequest
+        {
+            internal BlockFrameReflowRequest(WordInterop.InlineShape inlineShape,
+                WordInterop.Shape floatingShape, long shapeKey, LaTeXBlockMetadata metadata,
+                string source, double targetWidthPt, double targetFrameWidthPt,
+                double targetFrameHeightPt, int textColor, bool restoreSelection)
+            {
+                InlineShape = inlineShape;
+                FloatingShape = floatingShape;
+                ShapeKey = shapeKey;
+                Metadata = metadata;
+                Source = LaTeXBlockService.NormalizeSourceText(source);
+                TargetWidthPt = targetWidthPt;
+                TargetFrameWidthPt = targetFrameWidthPt;
+                TargetFrameHeightPt = targetFrameHeightPt;
+                TextColor = LaTeXBlockService.NormalizeTextColor(textColor);
+                RestoreSelection = restoreSelection;
+            }
+
+            internal WordInterop.InlineShape InlineShape { get; }
+            internal WordInterop.Shape FloatingShape { get; }
+            internal bool IsFloating => FloatingShape != null;
+            internal bool HasShape => (InlineShape != null) != (FloatingShape != null);
+            internal long ShapeKey { get; }
+            internal LaTeXBlockMetadata Metadata { get; }
+            internal string Source { get; }
+            internal double TargetWidthPt { get; }
+            internal double TargetFrameWidthPt { get; }
+            internal double TargetFrameHeightPt { get; }
+            internal int TextColor { get; }
+            internal bool RestoreSelection { get; }
+
+            internal BlockFrameReflowRequest WithFormat(double targetWidthPt, int textColor)
+            {
+                return new BlockFrameReflowRequest(InlineShape, FloatingShape, ShapeKey,
+                    Metadata, Source, targetWidthPt, TargetFrameWidthPt, TargetFrameHeightPt,
+                    textColor, RestoreSelection);
+            }
         }
 
         private sealed class FormatRefreshRequest
@@ -717,12 +1471,52 @@ namespace LaTeXBlocks.Word
             internal long Sequence { get; }
         }
 
+        private sealed class PendingBlockFrameReflow
+        {
+            internal PendingBlockFrameReflow(long shapeKey, WordInterop.InlineShape inlineShape,
+                WordInterop.Shape floatingShape, LaTeXBlockMetadata baseMetadata,
+                string source, string profile, double targetWidthPt, double targetFrameWidthPt,
+                double targetFrameHeightPt, int textColor, bool restoreSelection, long sequence)
+            {
+                ShapeKey = shapeKey;
+                InlineShape = inlineShape;
+                FloatingShape = floatingShape;
+                BaseMetadata = baseMetadata;
+                Source = source;
+                Profile = profile;
+                TargetWidthPt = targetWidthPt;
+                TargetFrameWidthPt = targetFrameWidthPt;
+                TargetFrameHeightPt = targetFrameHeightPt;
+                TextColor = LaTeXBlockService.NormalizeTextColor(textColor);
+                RestoreSelection = restoreSelection;
+                Sequence = sequence;
+            }
+
+            internal long ShapeKey { get; }
+            internal WordInterop.InlineShape InlineShape { get; }
+            internal WordInterop.Shape FloatingShape { get; }
+            internal bool IsFloating => FloatingShape != null;
+            internal LaTeXBlockMetadata BaseMetadata { get; }
+            internal string Source { get; }
+            internal string Profile { get; }
+            internal double TargetWidthPt { get; }
+            internal double TargetFrameWidthPt { get; }
+            internal double TargetFrameHeightPt { get; }
+            internal int TextColor { get; }
+            internal bool RestoreSelection { get; }
+            internal long Sequence { get; }
+        }
+
         private void Application_WindowBeforeDoubleClick(WordInterop.Selection selection, ref bool cancel)
         {
             if (shuttingDown || !hostEventProcessingEnabled) return;
             try
             {
-                if (!Blocks.TryGetSelectedBlock(out var shape, out var metadata)) return;
+                if (!Blocks.TryGetSelectedBlock(out _, out _) &&
+                    (!Blocks.TryGetSelectedFloatingBlock(out _, out var floatingMetadata) ||
+                     floatingMetadata.Role != LaTeXBlockRole.Content ||
+                     floatingMetadata.Mode != LaTeXBlockLayoutMode.Fixed))
+                    return;
                 cancel = true;
                 ShowEditEditor();
             }
@@ -732,7 +1526,7 @@ namespace LaTeXBlocks.Word
             }
         }
 
-        private string LoadCurrentProfile(StemTeXBackend pool)
+        private string LoadCurrentProfile(IStemTeXBackend pool)
         {
             string saved = null;
             using (var key = Registry.CurrentUser.OpenSubKey(SettingsKey)) saved = key?.GetValue("Profile") as string;
@@ -786,6 +1580,8 @@ namespace LaTeXBlocks.Word
             currentProfile = profile;
             pendingFormatRefreshes.Clear();
             Interlocked.Increment(ref formatRefreshSequence);
+            pendingBlockFrameReflows.Clear();
+            Interlocked.Increment(ref blockFrameReflowSequence);
         }
 
         private static ProfileSetting ReadProfileSetting()

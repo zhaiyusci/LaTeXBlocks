@@ -12,9 +12,30 @@ namespace LaTeXBlocks.PowerPoint
 namespace LaTeXBlocks.Word
 #endif
 {
+    // Office hosts use this contract rather than directly owning the native
+    // renderer.  The in-process implementation remains useful to the standalone
+    // smoke suite, while the add-ins can use an out-of-process implementation so
+    // VSTO teardown never has to wait for a native create/render call to return.
+    internal interface IStemTeXBackend : IDisposable
+    {
+        string[] Profiles { get; }
+        string StemTeXHome { get; }
+        string Status { get; }
+        string DefaultAvailableProfile { get; }
+        void SwitchProfile(string profile);
+        void WarmUp(string profile);
+        Task<StemTeXSvgResult> RenderLatestAsync(string profile, string source, double widthPt, bool autoWidth,
+            double fontSizePt = 10);
+        void CancelLatestPreview();
+        Task<StemTeXSvgResult> RenderQueuedAsync(string profile, string source, double widthPt, bool autoWidth,
+            double fontSizePt = 10);
+        StemTeXSvgResult RenderSvg(string profile, string source, double widthPt, bool autoWidth,
+            double fontSizePt = 10);
+    }
+
     // Mirrors the StemTeX GUI lifecycle: one global profile, one renderer, and one
     // dedicated FIFO worker thread for create/render/destroy.
-    internal sealed class StemTeXBackend : IDisposable
+    internal sealed class StemTeXBackend : IStemTeXBackend
     {
         internal const string DefaultProfile = "xits_cjk";
         private readonly object gate = new object();
@@ -59,11 +80,11 @@ namespace LaTeXBlocks.Word
             worker.Start();
         }
 
-        internal string[] Profiles => (string[])profiles.Clone();
-        internal string StemTeXHome => stemTeXHome;
-        internal string Status { get { lock (gate) return status; } }
+        public string[] Profiles => (string[])profiles.Clone();
+        public string StemTeXHome => stemTeXHome;
+        public string Status { get { lock (gate) return status; } }
 
-        internal string DefaultAvailableProfile
+        public string DefaultAvailableProfile
         {
             get
             {
@@ -73,7 +94,7 @@ namespace LaTeXBlocks.Word
             }
         }
 
-        internal void SwitchProfile(string profile)
+        public void SwitchProfile(string profile)
         {
             var canonical = CanonicalProfile(profile);
             long requestedGeneration;
@@ -102,7 +123,7 @@ namespace LaTeXBlocks.Word
             RequestNativePreviewCancellation(previewToCancel);
         }
 
-        internal void WarmUp(string profile)
+        public void WarmUp(string profile)
         {
             SwitchProfile(profile);
             var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -120,7 +141,7 @@ namespace LaTeXBlocks.Word
             completion.Task.GetAwaiter().GetResult();
         }
 
-        internal Task<StemTeXSvgResult> RenderLatestAsync(string profile, string source, double widthPt, bool autoWidth,
+        public Task<StemTeXSvgResult> RenderLatestAsync(string profile, string source, double widthPt, bool autoWidth,
             double fontSizePt = 10)
         {
             var canonical = CanonicalProfile(profile);
@@ -154,7 +175,7 @@ namespace LaTeXBlocks.Word
         // that generation too; otherwise an already-running TeX render can keep the
         // shared worker occupied long after the form has gone away. Durable document
         // renders intentionally do not participate in this channel.
-        internal void CancelLatestPreview()
+        public void CancelLatestPreview()
         {
             StemTeXRenderer previewToCancel;
             lock (gate)
@@ -170,7 +191,7 @@ namespace LaTeXBlocks.Word
         // order and are canceled only by a profile replacement or host shutdown; a
         // later preview must never silently discard a width/font change already
         // committed by the user.
-        internal Task<StemTeXSvgResult> RenderQueuedAsync(string profile, string source,
+        public Task<StemTeXSvgResult> RenderQueuedAsync(string profile, string source,
             double widthPt, bool autoWidth, double fontSizePt = 10)
         {
             var canonical = CanonicalProfile(profile);
@@ -194,7 +215,7 @@ namespace LaTeXBlocks.Word
             return completion.Task;
         }
 
-        internal StemTeXSvgResult RenderSvg(string profile, string source, double widthPt, bool autoWidth,
+        public StemTeXSvgResult RenderSvg(string profile, string source, double widthPt, bool autoWidth,
             double fontSizePt = 10)
         {
             return RenderLatestAsync(profile, source, widthPt, autoWidth, fontSizePt).GetAwaiter().GetResult();

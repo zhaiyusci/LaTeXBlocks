@@ -10,6 +10,7 @@ namespace LaTeXBlocks.Word
     public sealed class LaTeXBlocksRibbon : Office.IRibbonExtensibility
     {
         internal const string WidthControlId = "LaTeXBlocks.WidthPt";
+        internal const string ReflowFrameControlId = "LaTeXBlocks.ReflowFrame";
         // EditText is Office's standard pencil/text-edit glyph and is available
         // in both Word and PowerPoint Ribbon hosts.
         internal const string EditBlockImageMso = "EditText";
@@ -31,8 +32,11 @@ namespace LaTeXBlocks.Word
                    "<button id=\"LaTeXBlocks.InsertFormula\" label=\"Insert Formula\" size=\"large\" imageMso=\"EquationInsertNew\" onAction=\"OnInsertFormula\"/>" +
                    "<button id=\"LaTeXBlocks.InsertBlock\" label=\"Insert Block\" size=\"large\" imageMso=\"TextBoxInsert\" onAction=\"OnInsertBlock\"/>" +
                    "<button id=\"LaTeXBlocks.InsertNumberedEquation\" label=\"Numbered Equation\" size=\"large\" imageMso=\"CaptionInsert\" onAction=\"OnInsertNumberedEquation\"/>" +
+                   "<button id=\"LaTeXBlocks.InsertEquationReference\" label=\"Equation Reference\" imageMso=\"InsertCrossReference\" onAction=\"OnInsertEquationReference\"/>" +
                    "<button id=\"LaTeXBlocks.Edit\" label=\"Edit Block\" size=\"large\" imageMso=\"" +
                    EditBlockImageMso + "\" onAction=\"OnEdit\"/>" +
+                   "<button id=\"" + ReflowFrameControlId +
+                   "\" label=\"Reflow Frame\" imageMso=\"RefreshAll\" getEnabled=\"GetReflowFrameEnabled\" onAction=\"OnReflowFrame\"/>" +
                    "<button id=\"LaTeXBlocks.UpdateEquationNumbers\" label=\"Update Numbers\" imageMso=\"FieldsUpdate\" onAction=\"OnUpdateEquationNumbers\"/>" +
                    "<editBox id=\"" + WidthControlId +
                    "\" label=\"Typesetting width (pt)\" sizeString=\"000.0\" getText=\"GetWidthText\" getEnabled=\"GetWidthEnabled\" onChange=\"OnWidthChanged\"/>" +
@@ -43,8 +47,15 @@ namespace LaTeXBlocks.Word
         public void OnInsertFormula(Office.IRibbonControl control) { Run(addIn.ShowInsertFormulaEditor); }
         public void OnInsertBlock(Office.IRibbonControl control) { Run(addIn.ShowInsertBlockEditor); }
         public void OnInsertNumberedEquation(Office.IRibbonControl control) { Run(addIn.ShowInsertNumberedEquationEditor); }
+        public void OnInsertEquationReference(Office.IRibbonControl control) { Run(addIn.ShowInsertEquationReference); }
         public void OnEdit(Office.IRibbonControl control) { Run(addIn.ShowEditEditor); }
+        public void OnReflowFrame(Office.IRibbonControl control) { Run(addIn.ReflowSelectedBlockFrame); }
         public void OnUpdateEquationNumbers(Office.IRibbonControl control) { Run(addIn.UpdateEquationNumbers); }
+        public bool GetReflowFrameEnabled(Office.IRibbonControl control)
+        {
+            try { return addIn.HasSelectedBlockFrame(); }
+            catch { return false; }
+        }
         public string GetWidthText(Office.IRibbonControl control)
         {
             try { return addIn.GetSelectedFixedBlockWidthText(); }
@@ -62,7 +73,11 @@ namespace LaTeXBlocks.Word
 
         internal void InvalidateWidthControl()
         {
-            try { ribbonUi?.InvalidateControl(WidthControlId); }
+            try
+            {
+                ribbonUi?.InvalidateControl(WidthControlId);
+                ribbonUi?.InvalidateControl(ReflowFrameControlId);
+            }
             catch (COMException) { }
         }
 

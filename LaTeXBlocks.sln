@@ -4,6 +4,8 @@ VisualStudioVersion = 18.0.0.0
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "LaTeXBlocks.Word.AddIn", "src\LaTeXBlocks.Word.AddIn\LaTeXBlocks.Word.AddIn.csproj", "{C7D9074C-D91D-45AF-BA64-9A67AF3B1E02}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "LaTeXBlocks.RenderHost", "src\LaTeXBlocks.RenderHost\LaTeXBlocks.RenderHost.csproj", "{E60B5C1A-7A1B-4C8E-9EA2-EA226D9CDAB6}"
+EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "LaTeXBlocks.WordSmoke", "tests\LaTeXBlocks.WordSmoke\LaTeXBlocks.WordSmoke.csproj", "{8C5F8B74-4F93-468F-9D81-B72B3F92452D}"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "LaTeXBlocks.PowerPoint.AddIn", "src\LaTeXBlocks.PowerPoint.AddIn\LaTeXBlocks.PowerPoint.AddIn.csproj", "{35C5B434-1CE3-481B-9F7E-157D9AB9EBD1}"
@@ -20,6 +22,10 @@ Global
 		{C7D9074C-D91D-45AF-BA64-9A67AF3B1E02}.Debug|Any CPU.Build.0 = Debug|AnyCPU
 		{C7D9074C-D91D-45AF-BA64-9A67AF3B1E02}.Release|Any CPU.ActiveCfg = Release|AnyCPU
 		{C7D9074C-D91D-45AF-BA64-9A67AF3B1E02}.Release|Any CPU.Build.0 = Release|AnyCPU
+		{E60B5C1A-7A1B-4C8E-9EA2-EA226D9CDAB6}.Debug|Any CPU.ActiveCfg = Debug|AnyCPU
+		{E60B5C1A-7A1B-4C8E-9EA2-EA226D9CDAB6}.Debug|Any CPU.Build.0 = Debug|AnyCPU
+		{E60B5C1A-7A1B-4C8E-9EA2-EA226D9CDAB6}.Release|Any CPU.ActiveCfg = Release|AnyCPU
+		{E60B5C1A-7A1B-4C8E-9EA2-EA226D9CDAB6}.Release|Any CPU.Build.0 = Release|AnyCPU
 		{8C5F8B74-4F93-468F-9D81-B72B3F92452D}.Debug|Any CPU.ActiveCfg = Debug|AnyCPU
 		{8C5F8B74-4F93-468F-9D81-B72B3F92452D}.Debug|Any CPU.Build.0 = Debug|AnyCPU
 		{8C5F8B74-4F93-468F-9D81-B72B3F92452D}.Release|Any CPU.ActiveCfg = Release|AnyCPU

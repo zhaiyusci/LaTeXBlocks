@@ -30,6 +30,7 @@ namespace LaTeXBlocks.WordSmoke
             var numberedDocumentPath = Path.Combine(artifactDirectory, "LaTeXBlocks-Numbered-Smoke.docx");
             var spacingDocumentPath = Path.Combine(artifactDirectory, "LaTeXBlocks-Inline-Spacing-Smoke.docx");
             var textColorDocumentPath = Path.Combine(artifactDirectory, "LaTeXBlocks-Text-Color-Smoke.docx");
+            var floatingBlockDocumentPath = Path.Combine(artifactDirectory, "LaTeXBlocks-Floating-Block-Smoke.docx");
             try
             {
                 Directory.CreateDirectory(artifactDirectory);
@@ -51,6 +52,7 @@ namespace LaTeXBlocks.WordSmoke
                 if (profile.IndexOf("cjk", StringComparison.OrdinalIgnoreCase) < 0)
                     foreach (var candidate in renderer.Profiles)
                         if (candidate.IndexOf("cjk", StringComparison.OrdinalIgnoreCase) >= 0) { cjkProfile = candidate; break; }
+                RunRenderHostClientSmoke(profile);
                 Console.WriteLine("StemTeX: warming the default profile...");
                 renderer.WarmUp(profile);
                 if (string.Equals(Environment.GetEnvironmentVariable("LATEXBLOCKS_SMOKE_SHUTDOWN_ONLY"), "1",
@@ -185,13 +187,90 @@ namespace LaTeXBlocks.WordSmoke
                 Assert(LaTeXBlockMetadata.TryParse(legacyTitle, out var legacyMetadata) &&
                     legacyMetadata.Role == LaTeXBlockRole.Content,
                     "Metadata written before the role field no longer defaults to ordinary content.");
+                var framedMetadata = new LaTeXBlockMetadata(Guid.NewGuid(), 180, 2.5,
+                    LaTeXBlockLayoutMode.Fixed, 14, LaTeXBlockRole.Content,
+                    182.75, 48.25);
+                Assert(LaTeXBlockMetadata.TryParse(framedMetadata.ToString(), out var reparsedFrameMetadata) &&
+                       Math.Abs(reparsedFrameMetadata.FrameWidthPt - 182.75) < 0.001 &&
+                       Math.Abs(reparsedFrameMetadata.FrameHeightPt - 48.25) < 0.001,
+                    "Floating frame geometry did not round-trip through Word metadata.");
+                var styledBlockStyle = new LaTeXBlockStyle(1.45, 8.5,
+                    LaTeXBlockVerticalAlignment.Middle,
+                    System.Drawing.Color.FromArgb(0x12, 0x34, 0x56), true,
+                    System.Drawing.Color.FromArgb(0xf0, 0xee, 0xd0), 1.25,
+                    System.Drawing.Color.FromArgb(0x65, 0x43, 0x21));
+                var styledMetadata = LaTeXBlockMetadata.Create(180, 2.5,
+                    LaTeXBlockLayoutMode.Fixed, 14, LaTeXBlockRole.Content,
+                    styledBlockStyle).WithFrameSize(182.75, 48.25);
+                Assert(LaTeXBlockMetadata.TryParse(styledMetadata.ToString(),
+                        out var reparsedStyledMetadata) &&
+                       reparsedStyledMetadata.HasExplicitStyle &&
+                       reparsedStyledMetadata.Style.Equals(styledBlockStyle),
+                    "A fixed Block style did not round-trip through Word Title metadata.");
+                var autoMetadataWithStyle = LaTeXBlockMetadata.Create(180, 2.5,
+                    LaTeXBlockLayoutMode.Auto, 14, LaTeXBlockRole.Content,
+                    styledBlockStyle);
+                Assert(!autoMetadataWithStyle.HasExplicitStyle,
+                    "An Auto formula retained Fixed-Block style metadata after a layout-mode change.");
+                var explicitDefaultStyle = LaTeXBlockStyle.Default;
+                var explicitDefaultSource = explicitDefaultStyle.WrapSource("\\[E=mc^2\\]",
+                    14, true);
+                Assert(explicitDefaultSource.IndexOf("\\renewcommand{\\baselinestretch}{1.2}",
+                           StringComparison.Ordinal) >= 0 &&
+                       explicitDefaultSource.IndexOf("\\noindent", StringComparison.Ordinal) < 0 &&
+                       explicitDefaultSource.IndexOf("\\strut", StringComparison.Ordinal) < 0 &&
+                       explicitDefaultSource.IndexOf("\\color{latexblocksforeground}",
+                           StringComparison.Ordinal) < 0,
+                    "A standalone Word display Block gained paragraph material outside its TeX display.");
+                var styledSource = styledBlockStyle.WrapSource("\\[E=mc^2\\]", 14);
+                Assert(styledSource.IndexOf("\\colorbox", StringComparison.Ordinal) < 0 &&
+                       styledSource.IndexOf("\\fbox", StringComparison.Ordinal) < 0 &&
+                       styledSource.IndexOf("\\color{latexblocksforeground}",
+                           StringComparison.Ordinal) < 0,
+                    "The Word display Block style moved paragraph decoration into TeX.");
+                var styledSvgBytes = LaTeXBlockSvgFrame.Decorate(svg.Bytes, styledBlockStyle,
+                    213.25, 89.75);
+                var styledSvgText = Encoding.UTF8.GetString(styledSvgBytes);
+                Assert(Math.Abs(LaTeXBlockService.ReadSvgWidthPt(styledSvgBytes) - 213.25) < 0.001 &&
+                       Math.Abs(LaTeXBlockService.ReadSvgHeightPt(styledSvgBytes) - 89.75) < 0.001 &&
+                       styledSvgText.IndexOf("data-latexblocks-frame='1'", StringComparison.Ordinal) >= 0 &&
+                       styledSvgText.IndexOf("data-latexblocks-border='1'", StringComparison.Ordinal) >= 0 &&
+                       styledSvgText.IndexOf("#F0EED0", StringComparison.Ordinal) >= 0 &&
+                       styledSvgText.IndexOf("#654321", StringComparison.Ordinal) >= 0 &&
+                       styledSvgText.IndexOf("fill='#123456'", StringComparison.OrdinalIgnoreCase) >= 0,
+                    "The shared styled SVG frame did not preserve Word's exact frame or paint all shell layers.");
+                var framedSvgBytes = LaTeXBlockService.FrameSvg(svg.Bytes, 213.25, 89.75);
+                Assert(Math.Abs(LaTeXBlockService.ReadSvgWidthPt(framedSvgBytes) - 213.25) < 0.001 &&
+                       Math.Abs(LaTeXBlockService.ReadSvgHeightPt(framedSvgBytes) - 89.75) < 0.001 &&
+                       Encoding.UTF8.GetString(framedSvgBytes).IndexOf("overflow='hidden'",
+                           StringComparison.Ordinal) >= 0,
+                    "A reframed SVG did not retain the requested exact clipping viewport.");
+                var oversizedFrameSvgBytes = LaTeXBlockService.FrameSvg(svg.Bytes, 2500.25, 61.5);
+                Assert(Math.Abs(LaTeXBlockService.ReadSvgWidthPt(oversizedFrameSvgBytes) -
+                           2500.25) < 0.001 &&
+                       Math.Abs(LaTeXBlockService.ReadSvgHeightPt(oversizedFrameSvgBytes) -
+                           61.5) < 0.001 &&
+                       Math.Abs(LaTeXBlockService.ClampFloatingFrameExtent(2500.25) -
+                           2500.25) < 0.001,
+                    "A Word-owned frame wider than the editor policy was silently clipped.");
+                Assert(!LaTeXBlockService.HasNativeFrameGeometryChanged(213.25, 89.75,
+                           213.25, 89.75) &&
+                       LaTeXBlockService.HasNativeFrameGeometryChanged(213.25, 89.75,
+                           213.31, 89.75),
+                    "Move/rotation geometry was not distinguished from a native frame resize.");
+                var firstRapidResizeWidth = LaTeXBlockService.ComposeNativeFrameLayoutWidth(180,
+                    182.75, 213.25);
+                var secondRapidResizeWidth = LaTeXBlockService.ComposeNativeFrameLayoutWidth(
+                    firstRapidResizeWidth, 213.25, 244.5);
+                Assert(Math.Abs(secondRapidResizeWidth - (180 + 244.5 - 182.75)) < 0.001,
+                    "Rapid native frame resizes did not compose from the pending TeX width.");
                 Assert(Math.Abs(LaTeXBlockWidthPolicy.ResolveDefaultFixedWidth() - 360) < 0.001 &&
                     Math.Abs(LaTeXBlockWidthPolicy.WidthStepPt - 0.5) < 0.001 &&
                     LaTeXBlockWidthPolicy.IsValidWidth(30) &&
-                    LaTeXBlockWidthPolicy.IsValidWidth(450) &&
+                    LaTeXBlockWidthPolicy.IsValidWidth(2000) &&
                     !LaTeXBlockWidthPolicy.IsValidWidth(29.9) &&
-                    !LaTeXBlockWidthPolicy.IsValidWidth(450.1),
-                    "The fixed-block width policy does not match StemTeX GUI's point range.");
+                    !LaTeXBlockWidthPolicy.IsValidWidth(2000.1),
+                    "The fixed-block width policy does not support native floating frames.");
                 Assert(LaTeXBlockWidthPolicy.TryParseWidth("360.5", out var parsedWidthPt) &&
                     Math.Abs(parsedWidthPt - 360.5) < 0.001 &&
                     !LaTeXBlockWidthPolicy.TryParseWidth("Natural", out _),
@@ -206,6 +285,15 @@ namespace LaTeXBlocks.WordSmoke
                        ribbonXml.IndexOf("imageMso=\"" + LaTeXBlocksRibbon.EditBlockImageMso + "\"",
                            StringComparison.Ordinal) >= 0,
                     "The Word Edit Block command does not expose its edit icon.");
+                Assert(ribbonXml.IndexOf("id=\"" + LaTeXBlocksRibbon.ReflowFrameControlId + "\"",
+                           StringComparison.Ordinal) >= 0 &&
+                       ribbonXml.IndexOf("onAction=\"OnReflowFrame\"", StringComparison.Ordinal) >= 0,
+                    "The Word Ribbon does not expose the floating-frame reflow command.");
+                Assert(ribbonXml.IndexOf("id=\"LaTeXBlocks.InsertEquationReference\"",
+                           StringComparison.Ordinal) >= 0 &&
+                       ribbonXml.IndexOf("onAction=\"OnInsertEquationReference\"",
+                           StringComparison.Ordinal) >= 0,
+                    "The Word Ribbon does not expose the equation-reference command.");
                 Assert(!LaTeXBlockService.ShouldRefreshForHostFontSizeChange(11, 11, 10),
                     "Selecting and leaving an unchanged formula would spuriously rerender it at the host character size.");
                 Assert(LaTeXBlockService.ShouldRefreshForHostFontSizeChange(11, 12, 11),
@@ -356,12 +444,16 @@ namespace LaTeXBlocks.WordSmoke
                         10000, "Changing the exact point width did not update the fixed block.");
                     var renderedPointWidth =
                         LaTeXBlockService.ReadSvgWidthPt(editor.CurrentRender.SvgBytes);
-                    var expectedPointSvgWidth = requestedFixedWidthPt * texPointToWordPoint + 2;
+                    // Opening the style editor upgrades a legacy Fixed Block into
+                    // an explicitly styled viewport. Its requested width is now
+                    // the exact Word/SVG outer frame; TeX receives only the inner
+                    // measure (after any SVG shell inset) and is never scaled.
+                    var expectedPointSvgWidth = requestedFixedWidthPt;
                     Console.WriteLine("Fixed width editor: requested=" +
                         requestedFixedWidthPt.ToString("0.###") + "pt, SVG=" +
                         renderedPointWidth.ToString("0.###") + "pt");
                     Assert(Math.Abs(renderedPointWidth - expectedPointSvgWidth) < 0.02,
-                        "The exact point width was not passed to StemTeX unchanged.");
+                        "The styled Block editor did not preserve the exact Word outer-frame width.");
                     editor.Close();
                 }
                 Console.WriteLine("Word: exact point-width editor passed.");
@@ -370,6 +462,7 @@ namespace LaTeXBlocks.WordSmoke
                 // geometry regression.
                 RunTextColorSmoke(word, service, profile, textColorDocumentPath);
                 RunInlineSpacingSmoke(word, service, profile, spacingDocumentPath);
+                RunFloatingBlockSmoke(word, service, profile, floatingBlockDocumentPath);
                 const string fractionSource = "$\\frac{1}{2}E=mc^2$";
                 var fractionStart = document.Content.End - 1;
                 document.Range(fractionStart, fractionStart).Text = "What?";
@@ -488,14 +581,46 @@ namespace LaTeXBlocks.WordSmoke
                 var stableId = firstMetadata.Id;
                 var end = document.Range(document.Content.End - 1, document.Content.End - 1);
                 end.Select();
-                var fixedBlock = service.InsertBlock("\\[x^2\\]", 180, LaTeXBlockLayoutMode.Fixed, alternateProfile);
+                const string fixedBlockSource = "\\[x^2\\]";
+                var fixedBlock = service.InsertBlock(fixedBlockSource, 180, LaTeXBlockLayoutMode.Fixed, alternateProfile);
                 Assert(LaTeXBlockMetadata.TryParse(fixedBlock.Title, out var fixedMetadata) &&
                     fixedMetadata.Mode == LaTeXBlockLayoutMode.Fixed, "Fixed-width block mode was not persisted.");
                 Assert(fixedBlock.Width > 150, "Fixed-width block lost its requested canvas width.");
+                Assert(fixedBlock.LockAspectRatio == Microsoft.Office.Core.MsoTriState.msoFalse,
+                    "A fixed Content Block did not expose independent native frame dimensions.");
                 Assert(document.Range(fixedBlock.Range.Start - 1, fixedBlock.Range.Start).Text != WordJoiner &&
                        document.Range(fixedBlock.Range.End, fixedBlock.Range.End + 1).Text != WordJoiner,
                     "A fixed-width block unexpectedly received inline U+2060 boundaries.");
                 Assert(document.InlineShapes.Count == 2, "The two insertion modes did not produce two InlineShapes.");
+
+                // An In Line with Text Block is still a Block frame, not an ordinary
+                // proportional picture. Simulate Word's native independent resize,
+                // then replace it with an exact framed SVG as the mouse-up path does.
+                const double requestedInlineFrameWidthPt = 226.25;
+                const double requestedInlineFrameHeightPt = 61.5;
+                fixedBlock.Width = (float)requestedInlineFrameWidthPt;
+                fixedBlock.Height = (float)requestedInlineFrameHeightPt;
+                var expectedInlineLayoutWidth = fixedMetadata.WidthPt +
+                    requestedInlineFrameWidthPt - fixedMetadata.FrameWidthPt;
+                expectedInlineLayoutWidth = Math.Max(LaTeXBlockWidthPolicy.MinimumWidthPt,
+                    Math.Min(LaTeXBlockWidthPolicy.MaximumWidthPt, expectedInlineLayoutWidth));
+                var inlineReflowRawRender = service.RenderPreview(fixedBlockSource,
+                    expectedInlineLayoutWidth, LaTeXBlockLayoutMode.Fixed, alternateProfile,
+                    fixedMetadata.FontSizePt);
+                var inlineReflowFrameRender = service.FrameFloatingRender(inlineReflowRawRender,
+                    requestedInlineFrameWidthPt, requestedInlineFrameHeightPt);
+                fixedBlock = service.UpdateRendered(fixedBlock, fixedBlockSource,
+                    expectedInlineLayoutWidth, LaTeXBlockLayoutMode.Fixed,
+                    inlineReflowFrameRender, false);
+                Assert(LaTeXBlockMetadata.TryParse(fixedBlock.Title,
+                        out var reflowedInlineMetadata) &&
+                       Math.Abs(fixedBlock.Width - requestedInlineFrameWidthPt) < 0.05 &&
+                       Math.Abs(fixedBlock.Height - requestedInlineFrameHeightPt) < 0.05 &&
+                       Math.Abs(reflowedInlineMetadata.WidthPt - expectedInlineLayoutWidth) < 0.01 &&
+                       Math.Abs(reflowedInlineMetadata.FrameWidthPt - requestedInlineFrameWidthPt) < 0.01 &&
+                       Math.Abs(reflowedInlineMetadata.FrameHeightPt - requestedInlineFrameHeightPt) < 0.01 &&
+                       fixedBlock.LockAspectRatio == Microsoft.Office.Core.MsoTriState.msoFalse,
+                    "An inline fixed Block resize did not persist an exact unscaled SVG frame.");
                 document.SaveAs2(documentPath, WordInterop.WdSaveFormat.wdFormatXMLDocument);
                 document.Close(WordInterop.WdSaveOptions.wdSaveChanges);
                 Release(document);
@@ -625,6 +750,12 @@ namespace LaTeXBlocks.WordSmoke
                 Assert(document.Tables.Count == 0 && document.InlineShapes.Count == 1 &&
                     document.Paragraphs.Count == 1 && document.Fields.Count == 1,
                     "The first numbered equation did not remain in one table-free Word paragraph.");
+                Assert(HasCaptionLabel(word, LaTeXBlockService.EquationCategoryIdentifier),
+                    "Word did not register the LaTeXBlockEq caption category for numbered equations.");
+                Assert(Regex.IsMatch(document.Fields[1].Code.Text ?? string.Empty,
+                    "^\\s*SEQ\\s+" + LaTeXBlockService.EquationSequenceIdentifier + "(?:\\s|$)",
+                    RegexOptions.IgnoreCase | RegexOptions.CultureInvariant),
+                    "A new numbered equation did not use the LaTeXBlockEq SEQ category.");
                 var firstParagraphText = document.Paragraphs[1].Range.Text ?? string.Empty;
                 Assert(firstParagraphText.StartsWith("Alpha\v\t", StringComparison.Ordinal) &&
                     firstParagraphText.IndexOf("\t(1)\v beta", StringComparison.Ordinal) >= 0,
@@ -744,6 +875,40 @@ namespace LaTeXBlocks.WordSmoke
                     "Equation bookmarks did not survive save and reopen.");
                 Assert(document.InlineShapes[2].AlternativeText == canonicalCommentedNumberedSource,
                     "Word lost the canonical multiline/commented TeX source on save and reopen.");
+
+                var referenceTargets = service.GetEquationReferenceTargets(document);
+                Assert(referenceTargets.Count == 3 &&
+                       referenceTargets[0].Id == updatedNumberedMetadata.Id &&
+                       referenceTargets[1].Id == secondNumberedMetadata.Id &&
+                       referenceTargets[2].Id == thirdNumberedMetadata.Id &&
+                       referenceTargets[1].BookmarkName == secondBookmarkName &&
+                       referenceTargets[1].Number == "2" &&
+                       referenceTargets[1].Source == canonicalCommentedNumberedSource,
+                    "The bookmark-backed equation-reference picker did not enumerate the three equations in document order.");
+                document.Range(document.Content.End - 1, document.Content.End - 1).Select();
+                var referenceField = service.InsertEquationReference(referenceTargets[1]);
+                Assert(LaTeXBlockService.IsEquationReferenceField(referenceField) &&
+                       (referenceField.Code.Text ?? string.Empty).IndexOf(secondBookmarkName,
+                           StringComparison.OrdinalIgnoreCase) >= 0 &&
+                       (referenceField.Code.Text ?? string.Empty).IndexOf("\\h",
+                           StringComparison.OrdinalIgnoreCase) >= 0 &&
+                       (document.Content.Text ?? string.Empty).EndsWith("(2)\r", StringComparison.Ordinal) &&
+                       word.Selection.Start == document.Content.End - 1,
+                    "The equation-reference command did not insert one native hyperlink REF field in parentheses.");
+
+                // The reference is a native document field, not a cached plugin
+                // string: it must persist together with its bookmark target.
+                document.Save();
+                document.Close(WordInterop.WdSaveOptions.wdSaveChanges);
+                Release(document);
+                document = word.Documents.Open(numberedDocumentPath, ReadOnly: false);
+                Assert(document.InlineShapes.Count == 3 && document.Fields.Count == 4,
+                    "The equation reference did not survive save and reopen.");
+                reopenedNumbered = document.InlineShapes[1];
+                reopenedParagraphFormat = document.Paragraphs[1].Range.ParagraphFormat;
+                referenceField = FindEquationReferenceField(document, secondBookmarkName);
+                Assert((document.Content.Text ?? string.Empty).EndsWith("(2)\r", StringComparison.Ordinal),
+                    "The persisted equation reference did not retain its target number.");
                 var reopenedPage = document.Paragraphs[1].Range.Sections[1].PageSetup;
                 var reopenedColumnWidth = (double)reopenedPage.PageWidth - reopenedPage.LeftMargin - reopenedPage.RightMargin;
                 var reopenedColumns = reopenedPage.TextColumns;
@@ -775,6 +940,8 @@ namespace LaTeXBlocks.WordSmoke
                     "The surviving equation bookmark did not follow its updated SEQ result.");
                 Assert(document.Bookmarks[thirdBookmarkName].Range.Text == "2",
                     "The third equation bookmark did not follow its updated SEQ result.");
+                Assert((document.Content.Text ?? string.Empty).EndsWith("(1)\r", StringComparison.Ordinal),
+                    "The equation REF field did not follow its target after renumbering.");
                 var adjacentEquation = document.InlineShapes[1];
                 LaTeXBlockService.NumberedEquationLineRange(adjacentEquation).Delete();
                 Assert(service.UpdateEquationNumbers(document) == 1 &&
@@ -785,11 +952,31 @@ namespace LaTeXBlocks.WordSmoke
                     (document.Paragraphs[1].Range.Text ?? string.Empty).IndexOf("\v\t", StringComparison.Ordinal) >= 0,
                     "Deleting an equation adjacent to another display removed their shared visual-line boundary.");
 
+                // Documents written before the public LaTeXBlockEq category used a
+                // private LaTeXEquation sequence. A regular Update Numbers command
+                // must move such fields into the one current category without
+                // changing their visible numbering result.
+                document.Close(WordInterop.WdSaveOptions.wdDoNotSaveChanges);
+                Release(document);
+                document = word.Documents.Add();
+                var legacyField = document.Fields.Add(document.Range(0, 0),
+                    WordInterop.WdFieldType.wdFieldSequence,
+                    "LaTeXEquation \\* ARABIC", false);
+                Assert(legacyField.Update(), "Word could not create the legacy equation SEQ field.");
+                Assert(service.UpdateEquationNumbers(document) == 1,
+                    "Update Numbers did not find the legacy equation sequence.");
+                Assert(Regex.IsMatch(legacyField.Code.Text ?? string.Empty,
+                    "^\\s*SEQ\\s+" + LaTeXBlockService.EquationSequenceIdentifier + "(?:\\s|$)",
+                    RegexOptions.IgnoreCase | RegexOptions.CultureInvariant) &&
+                    EquationNumberText(legacyField) == "1",
+                    "Update Numbers did not migrate a legacy equation into LaTeXBlockEq.");
+
+                RunStyledBlockSmoke(word, service, profile);
                 RunShutdownProbe(renderer, profile);
 
                 Console.WriteLine("LaTeX Blocks smoke test passed.");
                 Console.WriteLine("StemTeX: " + renderer.StemTeXHome);
-                Console.WriteLine("Verified: SVG insertion, metadata, update, Word-native equation numbering, and DOCX persistence.");
+                Console.WriteLine("Verified: SVG insertion, metadata, update, Word-native equation numbering and references, and DOCX persistence.");
                 return 0;
             }
             catch (Exception exception)
@@ -806,6 +993,151 @@ namespace LaTeXBlocks.WordSmoke
                     Release(word);
                 }
                 renderer?.Dispose();
+            }
+        }
+
+        private static void RunRenderHostClientSmoke(string profile)
+        {
+            Console.WriteLine("RenderHost: testing isolated SVG rendering...");
+            var preexistingHostProcesses = CaptureProcessIds("LaTeXBlocks.RenderHost.host");
+            var preexistingWorkerProcesses = CaptureProcessIds("stemtex-worker-host");
+            using (var remote = new RenderHostClientBackend())
+            {
+                Assert(remote.Profiles.Length > 0 &&
+                       Array.IndexOf(remote.Profiles, profile) >= 0,
+                    "The isolated RenderHost client did not discover the installed profile set.");
+                remote.SwitchProfile(profile);
+                var result = remote.RenderQueuedAsync(profile, "$E=mc^2$", 180, true, 11)
+                    .GetAwaiter().GetResult();
+                Assert(result != null && result.Bytes != null && result.Bytes.Length > 0 &&
+                       Encoding.UTF8.GetString(result.Bytes).IndexOf("<svg", StringComparison.OrdinalIgnoreCase) >= 0,
+                    "The isolated RenderHost did not return SVG output.");
+                Assert(result.DepthPt > 0,
+                    "The isolated RenderHost lost the TeX baseline-depth result.");
+                Assert(remote.Status.StartsWith("ready:", StringComparison.OrdinalIgnoreCase),
+                    "The isolated RenderHost did not report a ready renderer after a completed request.");
+            }
+            WaitFor(() => NoNewProcesses("LaTeXBlocks.RenderHost.host", preexistingHostProcesses) &&
+                          NoNewProcesses("stemtex-worker-host", preexistingWorkerProcesses), 5000,
+                "Disposing the RenderHost client left a renderer broker or XeTeX worker process behind.");
+            Console.WriteLine("RenderHost: isolated SVG rendering and parent-owned disposal passed.");
+        }
+
+        private static HashSet<int> CaptureProcessIds(string processName)
+        {
+            var result = new HashSet<int>();
+            foreach (var process in Process.GetProcessesByName(processName))
+            {
+                try { result.Add(process.Id); }
+                finally { process.Dispose(); }
+            }
+            return result;
+        }
+
+        private static bool NoNewProcesses(string processName, HashSet<int> preexisting)
+        {
+            foreach (var process in Process.GetProcessesByName(processName))
+            {
+                try
+                {
+                    if (!preexisting.Contains(process.Id)) return false;
+                }
+                finally { process.Dispose(); }
+            }
+            return true;
+        }
+
+        private static void RunStyledBlockSmoke(WordInterop.Application word,
+            LaTeXBlockService service, string profile)
+        {
+            WordInterop.Document document = null;
+            WordInterop.Document previousDocument = null;
+            var previousSelectionStart = 0;
+            var previousSelectionEnd = 0;
+            var previousFontSize = 10.0;
+            var previousFontPosition = 0.0;
+            var previousNoProofing = 0;
+            var previousColor = LaTeXBlockService.AutomaticTextColor;
+            try
+            {
+                previousDocument = word.ActiveDocument;
+                previousSelectionStart = word.Selection.Start;
+                previousSelectionEnd = word.Selection.End;
+                previousFontSize = (double)word.Selection.Font.Size;
+                previousFontPosition = (double)word.Selection.Font.Position;
+                previousNoProofing = word.Selection.NoProofing;
+                previousColor = (int)word.Selection.Font.Color;
+                document = word.Documents.Add();
+                document.Range(0, 0).Text = "Styled ";
+                document.Range(document.Content.End - 1, document.Content.End - 1).Select();
+                var style = new LaTeXBlockStyle(1.35, 6,
+                    LaTeXBlockVerticalAlignment.Bottom,
+                    System.Drawing.Color.FromArgb(0x00, 0x55, 0xaa), true,
+                    System.Drawing.Color.FromArgb(0xff, 0xfa, 0xe8), 1.5,
+                    System.Drawing.Color.FromArgb(0x33, 0x22, 0x11));
+                var render = service.RenderPreview("\\[E=mc^2\\]", 240,
+                    LaTeXBlockLayoutMode.Fixed, profile, 14, false,
+                    LaTeXBlockService.ToWordColor(style.TextColor), style);
+                Assert(Encoding.UTF8.GetString(render.SvgBytes).IndexOf(
+                        "data-latexblocks-border='1'", StringComparison.Ordinal) >= 0 &&
+                       render.ContentSvgBytes != render.SvgBytes,
+                    "The styled fixed Block preview did not retain raw TeX content and one SVG shell.");
+                var shape = service.InsertRendered("\\[E=mc^2\\]", 240,
+                    LaTeXBlockLayoutMode.Fixed, render, style);
+                Assert(LaTeXBlockService.TryReadContract(shape, out var metadata, out var source) &&
+                       source == "\\[E=mc^2\\]" && metadata.HasExplicitStyle &&
+                       metadata.Style.Equals(style),
+                    "Inserting a styled Word Block lost its TeX source or persistent style.");
+                const double resizedWidth = 278.25;
+                const double resizedHeight = 76.5;
+                var resizedRaw = service.RenderPreview(source, resizedWidth,
+                    LaTeXBlockLayoutMode.Fixed, profile, 14, false,
+                    LaTeXBlockService.ToWordColor(style.TextColor), style);
+                var resized = service.FrameFloatingRender(resizedRaw, resizedWidth,
+                    resizedHeight, style);
+                shape = service.UpdateRendered(shape, source, resizedWidth,
+                    LaTeXBlockLayoutMode.Fixed, resized, false, style);
+                var decoratedText = Encoding.UTF8.GetString(resized.SvgBytes);
+                Assert(LaTeXBlockService.TryReadContract(shape, out metadata, out source) &&
+                       metadata.Style.Equals(style) &&
+                       Math.Abs(shape.Width - resizedWidth) < 0.05 &&
+                       Math.Abs(shape.Height - resizedHeight) < 0.05 &&
+                       CountOccurrences(decoratedText, "data-latexblocks-frame='1'") == 1 &&
+                       CountOccurrences(decoratedText, "data-latexblocks-border='1'") == 1,
+                    "A Word fixed-Block resize did not repaint exactly one persistent SVG style shell.");
+                // The async native-resize completion deliberately does not pass a
+                // separate style argument: it must recover durable Title data from
+                // the current object and retain exactly one SVG shell.
+                shape = service.UpdateRendered(shape, source, resizedWidth,
+                    LaTeXBlockLayoutMode.Fixed, resized, false);
+                var recoveredText = Encoding.UTF8.GetString(resized.SvgBytes);
+                Assert(LaTeXBlockService.TryReadContract(shape, out metadata, out source) &&
+                       metadata.HasExplicitStyle && metadata.Style.Equals(style) &&
+                       CountOccurrences(recoveredText, "data-latexblocks-frame='1'") == 1 &&
+                       CountOccurrences(recoveredText, "data-latexblocks-border='1'") == 1,
+                    "A Word reflow completion without a transient style argument lost or doubled the persistent SVG shell.");
+                Console.WriteLine("Word: styled fixed Block persistence and exact frame reflow passed.");
+            }
+            finally
+            {
+                if (document != null)
+                {
+                    try { document.Close(WordInterop.WdSaveOptions.wdDoNotSaveChanges); }
+                    catch { }
+                    Release(document);
+                }
+                if (previousDocument != null)
+                {
+                    try
+                    {
+                        previousDocument.Range(previousSelectionStart, previousSelectionEnd).Select();
+                        word.Selection.Font.Size = (float)previousFontSize;
+                        word.Selection.Font.Position = (int)Math.Round(previousFontPosition);
+                        word.Selection.NoProofing = previousNoProofing;
+                        word.Selection.Font.Color = (WordInterop.WdColor)previousColor;
+                    }
+                    catch { }
+                }
             }
         }
 
@@ -927,6 +1259,299 @@ namespace LaTeXBlocks.WordSmoke
             }
         }
 
+        private static void RunFloatingBlockSmoke(WordInterop.Application word, LaTeXBlockService service,
+            string profile, string documentPath)
+        {
+            const string source = "\\[E=mc^2\\]";
+            const string updatedSource = "\\[x^2+y^2\\]";
+            WordInterop.Document document = null;
+            try
+            {
+                if (File.Exists(documentPath)) File.Delete(documentPath);
+                document = word.Documents.Add();
+                document.Range(0, 0).Text = "A floating block anchor.";
+                document.Content.Font.Name = "Times New Roman";
+                document.Content.Font.Size = 14;
+                document.Range(4, 4).Select();
+                var initialRender = service.RenderPreview(source, 180,
+                    LaTeXBlockLayoutMode.Fixed, profile, 14);
+                var inline = service.InsertRendered(source, 180,
+                    LaTeXBlockLayoutMode.Fixed, initialRender);
+                Assert(LaTeXBlockMetadata.TryParse(inline.Title, out var beforeMetadata),
+                    "The fixed block did not receive its metadata before becoming floating.");
+
+                // A fixed Block starts as an InlineShape, and Word still lets a
+                // user resize that picture. Reframe it before converting it to a
+                // floating Shape: Block reflow must be independent of its current
+                // text-layout participation. Fixed blocks deliberately have no
+                // U+2060 word-joiner scaffold.
+                inline.Width = 206.5f;
+                inline.Height = 61.75f;
+                var requestedInlineFrameWidthPt = (double)inline.Width;
+                var requestedInlineFrameHeightPt = (double)inline.Height;
+                var expectedInlineLayoutWidth = beforeMetadata.WidthPt +
+                    requestedInlineFrameWidthPt - beforeMetadata.FrameWidthPt;
+                expectedInlineLayoutWidth = Math.Max(LaTeXBlockWidthPolicy.MinimumWidthPt,
+                    Math.Min(LaTeXBlockWidthPolicy.MaximumWidthPt, expectedInlineLayoutWidth));
+                var inlineReflowRawRender = service.RenderPreview(source, expectedInlineLayoutWidth,
+                    LaTeXBlockLayoutMode.Fixed, profile, 14);
+                var inlineReflowFrameRender = service.FrameFloatingRender(inlineReflowRawRender,
+                    requestedInlineFrameWidthPt, requestedInlineFrameHeightPt);
+                inline = service.UpdateRendered(inline, source, expectedInlineLayoutWidth,
+                    LaTeXBlockLayoutMode.Fixed, inlineReflowFrameRender, false);
+                Assert(LaTeXBlockMetadata.TryParse(inline.Title, out var inlineReflowMetadata) &&
+                       Math.Abs(inline.Width - requestedInlineFrameWidthPt) < 0.05 &&
+                       Math.Abs(inline.Height - requestedInlineFrameHeightPt) < 0.05 &&
+                       Math.Abs(inlineReflowMetadata.WidthPt - expectedInlineLayoutWidth) < 0.01 &&
+                       Math.Abs(inlineReflowMetadata.FrameWidthPt - requestedInlineFrameWidthPt) < 0.01 &&
+                       Math.Abs(inlineReflowMetadata.FrameHeightPt - requestedInlineFrameHeightPt) < 0.01,
+                    "A manually resized inline fixed Block did not retain its exact reframed SVG extent.");
+                var precedingInlineCharacter = document.Range(inline.Range.Start - 1,
+                    inline.Range.Start).Text;
+                var followingInlineCharacter = document.Range(inline.Range.End,
+                    inline.Range.End + 1).Text;
+                Assert(precedingInlineCharacter != "\u2060" && followingInlineCharacter != "\u2060",
+                    "A fixed inline Block accidentally acquired auto-formula word-joiner boundaries.");
+
+                var floating = inline.ConvertToShape();
+                floating.RelativeHorizontalPosition = (WordInterop.WdRelativeHorizontalPosition)1;
+                floating.RelativeVerticalPosition = (WordInterop.WdRelativeVerticalPosition)1;
+                floating.WrapFormat.Type = (WordInterop.WdWrapType)3; // In Front of Text.
+                floating.Left = 101.25f;
+                floating.Top = 83.5f;
+                floating.WrapFormat.Side = (WordInterop.WdWrapSideType)0;
+                floating.WrapFormat.DistanceLeft = 2.5f;
+                floating.WrapFormat.DistanceRight = 3.5f;
+                floating.WrapFormat.DistanceTop = 4.5f;
+                floating.WrapFormat.DistanceBottom = 5.5f;
+                floating.WrapFormat.AllowOverlap = -1;
+                floating.Rotation = 7.5f;
+                var expectedRotation = floating.Rotation;
+                floating.Select();
+
+                Assert(word.Selection.ShapeRange.Count == 1 && word.Selection.InlineShapes.Count == 0 &&
+                       document.Shapes.Count == 1 && document.InlineShapes.Count == 0,
+                    "Changing Wrap Text did not produce Word's expected floating Shape selection.");
+                Assert(service.TryGetSelectedFloatingBlock(out var selected, out var floatingMetadata) &&
+                       floatingMetadata.Id == beforeMetadata.Id && selected.AlternativeText == source,
+                    "A selected floating LaTeX Block was not recognized by its metadata contract.");
+
+                var updateRender = service.RenderPreview(updatedSource, 180,
+                    LaTeXBlockLayoutMode.Fixed, profile, 14);
+                var preservedFrameRender = service.FrameFloatingRender(updateRender,
+                    selected.Width, selected.Height);
+                var updated = service.UpdateFloatingRendered(selected, updatedSource, 180,
+                    LaTeXBlockLayoutMode.Fixed, preservedFrameRender);
+                LaTeXBlockMetadata updatedMetadata;
+                string updatedText;
+                var hasUpdatedContract = LaTeXBlockService.TryReadContract(updated,
+                    out updatedMetadata, out updatedText);
+                Assert(document.Shapes.Count == 1 && document.InlineShapes.Count == 0 &&
+                       hasUpdatedContract &&
+                       updatedMetadata.Id == beforeMetadata.Id && updatedText == updatedSource,
+                    "Updating a floating block lost its Shape contract or changed it back to inline.");
+                Assert(service.TryGetSelectedFloatingBlock(out var reselected, out var reselectedMetadata) &&
+                       reselectedMetadata.Id == beforeMetadata.Id && reselected.AlternativeText == updatedSource,
+                    "Updating a floating block did not leave its replacement selected for another edit.");
+                Console.WriteLine("Floating block placement: wrap=" + (int)updated.WrapFormat.Type +
+                    ", rel=" + (int)updated.RelativeHorizontalPosition + "/" +
+                    (int)updated.RelativeVerticalPosition + ", left/top=" +
+                    updated.Left.ToString("0.##") + "/" + updated.Top.ToString("0.##") +
+                    ", distances=" + updated.WrapFormat.DistanceLeft.ToString("0.##") + "/" +
+                    updated.WrapFormat.DistanceRight.ToString("0.##") + "/" +
+                    updated.WrapFormat.DistanceTop.ToString("0.##") + "/" +
+                    updated.WrapFormat.DistanceBottom.ToString("0.##") + ", rotation=" +
+                    updated.Rotation.ToString("0.##"));
+                Assert((int)updated.WrapFormat.Type == 3 &&
+                       (int)updated.RelativeHorizontalPosition == 1 &&
+                       (int)updated.RelativeVerticalPosition == 1 &&
+                       Math.Abs(updated.Left - 101.25f) < 0.05 &&
+                       Math.Abs(updated.Top - 83.5f) < 0.05 &&
+                       Math.Abs(updated.WrapFormat.DistanceLeft - 2.5f) < 0.05 &&
+                       Math.Abs(updated.WrapFormat.DistanceRight - 3.5f) < 0.05 &&
+                       Math.Abs(updated.WrapFormat.DistanceTop - 4.5f) < 0.05 &&
+                       Math.Abs(updated.WrapFormat.DistanceBottom - 5.5f) < 0.05 &&
+                       Math.Abs(updated.Rotation - expectedRotation) < 0.05,
+                    "Updating a floating block changed its Word wrapping, position, margins, or rotation.");
+
+                // A Block is a host-independent object: it must follow the same
+                // SVG replacement path when it participates in Word text wrapping,
+                // not only when it is In Front of Text.  Switch the verified block
+                // to Square wrapping, then perform another floating replacement and
+                // retain the actual Word values (Word is allowed to normalize its
+                // position when the wrap mode changes).
+                updated.WrapFormat.Type = (WordInterop.WdWrapType)0; // Square.
+                updated.WrapFormat.Side = (WordInterop.WdWrapSideType)0; // Both sides.
+                updated.WrapFormat.DistanceLeft = 6.25f;
+                updated.WrapFormat.DistanceRight = 7.25f;
+                updated.WrapFormat.DistanceTop = 8.25f;
+                updated.WrapFormat.DistanceBottom = 9.25f;
+                updated.WrapFormat.AllowOverlap = 0;
+                var expectedSquareSide = (int)updated.WrapFormat.Side;
+                var expectedSquareLeft = updated.Left;
+                var expectedSquareTop = updated.Top;
+                var expectedSquareDistanceLeft = updated.WrapFormat.DistanceLeft;
+                var expectedSquareDistanceRight = updated.WrapFormat.DistanceRight;
+                var expectedSquareDistanceTop = updated.WrapFormat.DistanceTop;
+                var expectedSquareDistanceBottom = updated.WrapFormat.DistanceBottom;
+                var expectedSquareAllowOverlap = updated.WrapFormat.AllowOverlap;
+                var squareFrameRender = service.FrameFloatingRender(updateRender,
+                    updated.Width, updated.Height);
+                updated = service.UpdateFloatingRendered(updated, updatedSource, 180,
+                    LaTeXBlockLayoutMode.Fixed, squareFrameRender, false);
+                Assert((int)updated.WrapFormat.Type == 0 &&
+                       (int)updated.WrapFormat.Side == expectedSquareSide &&
+                       (int)updated.RelativeHorizontalPosition == 1 &&
+                       (int)updated.RelativeVerticalPosition == 1 &&
+                       Math.Abs(updated.Left - expectedSquareLeft) < 0.05 &&
+                       Math.Abs(updated.Top - expectedSquareTop) < 0.05 &&
+                       Math.Abs(updated.WrapFormat.DistanceLeft - expectedSquareDistanceLeft) < 0.05 &&
+                       Math.Abs(updated.WrapFormat.DistanceRight - expectedSquareDistanceRight) < 0.05 &&
+                       Math.Abs(updated.WrapFormat.DistanceTop - expectedSquareDistanceTop) < 0.05 &&
+                       Math.Abs(updated.WrapFormat.DistanceBottom - expectedSquareDistanceBottom) < 0.05 &&
+                       updated.WrapFormat.AllowOverlap == expectedSquareAllowOverlap &&
+                       Math.Abs(updated.Rotation - expectedRotation) < 0.05,
+                    "Updating a Square-wrapped floating block changed its Word wrap layout.");
+                Assert(LaTeXBlockService.TryReadContract(updated, out updatedMetadata,
+                    out updatedText) && updatedText == updatedSource,
+                    "A Square-wrapped floating block lost its LaTeX Block contract.");
+
+                // A fixed Content Block has the same outer-frame semantics under
+                // every floating Word wrap mode.  Its relationship to surrounding
+                // text is not a criterion for re-rendering: update each native
+                // floating variant through the same Shape -> InlineShape -> Shape
+                // replacement path and retain the post-Word values exactly.
+                foreach (var wrapType in new[]
+                {
+                    (WordInterop.WdWrapType)0, // Square
+                    (WordInterop.WdWrapType)1, // Tight
+                    (WordInterop.WdWrapType)2, // Through
+                    (WordInterop.WdWrapType)4, // Top and Bottom
+                    (WordInterop.WdWrapType)5, // Behind Text
+                    (WordInterop.WdWrapType)3  // In Front of Text
+                })
+                {
+                    updated.WrapFormat.Type = wrapType;
+                    updated.WrapFormat.Side = (WordInterop.WdWrapSideType)0;
+                    updated.WrapFormat.DistanceLeft = 3.25f;
+                    updated.WrapFormat.DistanceRight = 4.25f;
+                    updated.WrapFormat.DistanceTop = 5.25f;
+                    updated.WrapFormat.DistanceBottom = 6.25f;
+                    var expectedWrapType = (int)updated.WrapFormat.Type;
+                    var expectedWrapSide = (int)updated.WrapFormat.Side;
+                    var expectedWrapLeft = updated.Left;
+                    var expectedWrapTop = updated.Top;
+                    var expectedWrapDistanceLeft = updated.WrapFormat.DistanceLeft;
+                    var expectedWrapDistanceRight = updated.WrapFormat.DistanceRight;
+                    var expectedWrapDistanceTop = updated.WrapFormat.DistanceTop;
+                    var expectedWrapDistanceBottom = updated.WrapFormat.DistanceBottom;
+                    var wrapFrameRender = service.FrameFloatingRender(updateRender,
+                        updated.Width, updated.Height);
+                    updated = service.UpdateFloatingRendered(updated, updatedSource, 180,
+                        LaTeXBlockLayoutMode.Fixed, wrapFrameRender, false);
+                    Assert((int)updated.WrapFormat.Type == expectedWrapType &&
+                           (int)updated.WrapFormat.Side == expectedWrapSide &&
+                           Math.Abs(updated.Left - expectedWrapLeft) < 0.05 &&
+                           Math.Abs(updated.Top - expectedWrapTop) < 0.05 &&
+                           Math.Abs(updated.WrapFormat.DistanceLeft - expectedWrapDistanceLeft) < 0.05 &&
+                           Math.Abs(updated.WrapFormat.DistanceRight - expectedWrapDistanceRight) < 0.05 &&
+                           Math.Abs(updated.WrapFormat.DistanceTop - expectedWrapDistanceTop) < 0.05 &&
+                           Math.Abs(updated.WrapFormat.DistanceBottom - expectedWrapDistanceBottom) < 0.05 &&
+                           Math.Abs(updated.Rotation - expectedRotation) < 0.05,
+                        "Updating a floating fixed Block changed its layout under wrap mode " +
+                        expectedWrapType + ".");
+                    Assert(LaTeXBlockService.TryReadContract(updated, out updatedMetadata,
+                        out updatedText) && updatedText == updatedSource,
+                        "A floating fixed Block lost its contract under wrap mode " + expectedWrapType + ".");
+                }
+
+                // Persist the next assertion under Square wrapping, whose ordinary
+                // rectangular text-flow behavior makes a good representative DOCX
+                // round-trip case after all floating variants above.
+                updated.WrapFormat.Type = (WordInterop.WdWrapType)0;
+                updated.WrapFormat.Side = (WordInterop.WdWrapSideType)0;
+                updated.WrapFormat.DistanceLeft = expectedSquareDistanceLeft;
+                updated.WrapFormat.DistanceRight = expectedSquareDistanceRight;
+                updated.WrapFormat.DistanceTop = expectedSquareDistanceTop;
+                updated.WrapFormat.DistanceBottom = expectedSquareDistanceBottom;
+                expectedSquareSide = (int)updated.WrapFormat.Side;
+                expectedSquareLeft = updated.Left;
+                expectedSquareTop = updated.Top;
+                expectedSquareDistanceLeft = updated.WrapFormat.DistanceLeft;
+                expectedSquareDistanceRight = updated.WrapFormat.DistanceRight;
+                expectedSquareDistanceTop = updated.WrapFormat.DistanceTop;
+                expectedSquareDistanceBottom = updated.WrapFormat.DistanceBottom;
+                expectedSquareAllowOverlap = updated.WrapFormat.AllowOverlap;
+
+                // Simulate Word's native image resize, then replace it with an SVG
+                // whose own physical root is the user-selected outer frame.  The
+                // final Shape must retain that frame without a persisted xfrm scale.
+                const double requestedFrameWidthPt = 246.25;
+                const double requestedFrameHeightPt = 72.5;
+                var expectedLayoutWidth = updatedMetadata.WidthPt + requestedFrameWidthPt -
+                    updatedMetadata.FrameWidthPt;
+                expectedLayoutWidth = Math.Max(LaTeXBlockWidthPolicy.MinimumWidthPt,
+                    Math.Min(LaTeXBlockWidthPolicy.MaximumWidthPt, expectedLayoutWidth));
+                var reflowRawRender = service.RenderPreview(updatedSource, expectedLayoutWidth,
+                    LaTeXBlockLayoutMode.Fixed, profile, 14);
+                var reflowFrameRender = service.FrameFloatingRender(reflowRawRender,
+                    requestedFrameWidthPt, requestedFrameHeightPt);
+                var reflowed = service.UpdateFloatingRendered(updated, updatedSource,
+                    expectedLayoutWidth, LaTeXBlockLayoutMode.Fixed, reflowFrameRender, false);
+                Assert(LaTeXBlockService.TryReadContract(reflowed, out var reflowedMetadata,
+                        out var reflowedSource) && reflowedSource == updatedSource &&
+                       Math.Abs(reflowed.Width - requestedFrameWidthPt) < 0.05 &&
+                       Math.Abs(reflowed.Height - requestedFrameHeightPt) < 0.05 &&
+                       Math.Abs(reflowedMetadata.WidthPt - expectedLayoutWidth) < 0.01 &&
+                       Math.Abs(reflowedMetadata.FrameWidthPt - requestedFrameWidthPt) < 0.01 &&
+                       Math.Abs(reflowedMetadata.FrameHeightPt - requestedFrameHeightPt) < 0.01,
+                    "A floating block resize did not persist an exact unscaled SVG frame.");
+                updated = reflowed;
+                updatedMetadata = reflowedMetadata;
+
+                var plainRange = document.Range(document.Content.End - 1, document.Content.End - 1);
+                var plainInline = plainRange.InlineShapes.AddPicture(initialRender.SvgPath,
+                    LinkToFile: false, SaveWithDocument: true, Range: plainRange);
+                var plainFloating = plainInline.ConvertToShape();
+                plainFloating.Select();
+                Assert(!service.TryGetSelectedFloatingBlock(out _, out _),
+                    "An ordinary floating SVG picture was mistaken for a LaTeX Block.");
+                plainFloating.Delete();
+
+                document.SaveAs2(documentPath, WordInterop.WdSaveFormat.wdFormatXMLDocument);
+                document.Close(WordInterop.WdSaveOptions.wdSaveChanges);
+                Release(document);
+                document = word.Documents.Open(documentPath, ReadOnly: false);
+                var reopened = document.Shapes[1];
+                Assert(document.Shapes.Count == 1 && document.InlineShapes.Count == 0 &&
+                       LaTeXBlockService.TryReadContract(reopened, out var reopenedMetadata, out var reopenedText) &&
+                       reopenedMetadata.Id == beforeMetadata.Id && reopenedText == updatedSource &&
+                       Math.Abs(reopenedMetadata.FrameWidthPt - requestedFrameWidthPt) < 0.01 &&
+                       Math.Abs(reopenedMetadata.FrameHeightPt - requestedFrameHeightPt) < 0.01 &&
+                       Math.Abs(reopened.Width - requestedFrameWidthPt) < 0.05 &&
+                       Math.Abs(reopened.Height - requestedFrameHeightPt) < 0.05 &&
+                       (int)reopened.WrapFormat.Type == 0 &&
+                       (int)reopened.WrapFormat.Side == expectedSquareSide &&
+                       Math.Abs(reopened.Left - expectedSquareLeft) < 0.05 &&
+                       Math.Abs(reopened.Top - expectedSquareTop) < 0.05 &&
+                       Math.Abs(reopened.WrapFormat.DistanceLeft - expectedSquareDistanceLeft) < 0.05 &&
+                       Math.Abs(reopened.WrapFormat.DistanceRight - expectedSquareDistanceRight) < 0.05 &&
+                       Math.Abs(reopened.WrapFormat.DistanceTop - expectedSquareDistanceTop) < 0.05 &&
+                       Math.Abs(reopened.WrapFormat.DistanceBottom - expectedSquareDistanceBottom) < 0.05 &&
+                       reopened.WrapFormat.AllowOverlap == expectedSquareAllowOverlap,
+                    "A floating block did not persist its editable contract and position after DOCX reopen.");
+                Console.WriteLine("Word: floating fixed block update and persistence passed.");
+            }
+            finally
+            {
+                if (document != null)
+                {
+                    document.Close(WordInterop.WdSaveOptions.wdDoNotSaveChanges);
+                    Release(document);
+                }
+            }
+        }
+
         private static void RunInlineSpacingSmoke(WordInterop.Application word, LaTeXBlockService service,
             string profile, string documentPath)
         {
@@ -940,10 +1565,6 @@ namespace LaTeXBlocks.WordSmoke
                 document.Range(0, 0).Text = "a b\rA xx B\rC,D";
                 document.Content.Font.Name = "Times New Roman";
                 document.Content.Font.Size = 16;
-                document.Repaginate();
-                var ordinarySpaceWidth = MeasureHorizontalAdvance(document.Range(1, 2));
-                Assert(ordinarySpaceWidth > 3 && ordinarySpaceWidth < 5,
-                    "The isolated Word document did not produce an ordinary 16 pt space.");
 
                 // Replace "xx" in "A xx B" so both surrounding U+0020 characters can
                 // remain ordinary Word spaces outside the U+2060 boundaries.
@@ -959,14 +1580,6 @@ namespace LaTeXBlocks.WordSmoke
                        Math.Abs((double)leftSpace.Font.Spacing) < 0.001 &&
                        Math.Abs((double)rightSpace.Font.Spacing) < 0.001,
                     "U+2060 boundaries changed the adjacent ordinary spaces.");
-                var leftInlineWidth = MeasureHorizontalAdvance(leftSpace);
-                var rightInlineWidth = MeasureHorizontalAdvance(rightSpace);
-                Console.WriteLine("Inline U+2060 spacing: ordinary=" + ordinarySpaceWidth.ToString("0.###") +
-                    ", actual=" + leftInlineWidth.ToString("0.###") + "/" +
-                    rightInlineWidth.ToString("0.###"));
-                Assert(Math.Abs(leftInlineWidth - ordinarySpaceWidth) < 0.16 &&
-                       Math.Abs(rightInlineWidth - ordinarySpaceWidth) < 0.16,
-                    "A Word Joiner boundary did not restore the Times New Roman word spaces.");
                 var svgWidth = LaTeXBlockService.ReadSvgWidthPt(render.SvgBytes);
                 Assert(Math.Abs((double)shape.Width - svgWidth) < 0.35,
                     "The Word Joiner boundaries changed the SVG image's physical width.");
@@ -1220,19 +1833,6 @@ namespace LaTeXBlocks.WordSmoke
                 ", pic transform " + transformWidthEmu + "x" + transformHeightEmu + ").");
         }
 
-        private static double MeasureHorizontalAdvance(WordInterop.Range range)
-        {
-            var start = range.Duplicate;
-            start.Collapse(WordInterop.WdCollapseDirection.wdCollapseStart);
-            var end = range.Duplicate;
-            end.Collapse(WordInterop.WdCollapseDirection.wdCollapseEnd);
-            var startX = Convert.ToDouble(start.get_Information(
-                WordInterop.WdInformation.wdHorizontalPositionRelativeToPage));
-            var endX = Convert.ToDouble(end.get_Information(
-                WordInterop.WdInformation.wdHorizontalPositionRelativeToPage));
-            return endX - startX;
-        }
-
         private static void Assert(bool condition, string message)
         {
             if (!condition) throw new InvalidOperationException(message);
@@ -1322,6 +1922,38 @@ namespace LaTeXBlocks.WordSmoke
             Assert((field.Code.Text ?? string.Empty).IndexOf("\\* ARABIC", StringComparison.OrdinalIgnoreCase) >= 0,
                 "The equation SEQ field does not request Arabic numbering.");
             return (field.Result.Text ?? string.Empty).Trim();
+        }
+
+        private static WordInterop.Field FindEquationReferenceField(WordInterop.Document document,
+            string bookmarkName)
+        {
+            for (var index = 1; index <= document.Fields.Count; index++)
+            {
+                var field = document.Fields[index];
+                if (LaTeXBlockService.IsEquationReferenceField(field) &&
+                    (field.Code.Text ?? string.Empty).IndexOf(bookmarkName,
+                        StringComparison.OrdinalIgnoreCase) >= 0)
+                    return field;
+            }
+            throw new InvalidOperationException("The expected equation REF field was not found.");
+        }
+
+        private static bool HasCaptionLabel(WordInterop.Application application, string name)
+        {
+            var labels = application.CaptionLabels;
+            for (var index = 1; index <= labels.Count; index++)
+            {
+                object item = index;
+                WordInterop.CaptionLabel label = null;
+                try
+                {
+                    label = labels.get_Item(ref item);
+                    if (string.Equals(label.Name, name, StringComparison.OrdinalIgnoreCase))
+                        return true;
+                }
+                finally { Release(label); }
+            }
+            return false;
         }
 
         private static void AssertEquationTabStops(WordInterop.Paragraph paragraph)

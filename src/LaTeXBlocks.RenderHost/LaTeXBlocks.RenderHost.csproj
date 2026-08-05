@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="18.0" DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <Import Project="$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props" Condition="Exists('$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props')" />
+  <PropertyGroup>
+    <Configuration Condition=" '$(Configuration)' == '' ">Debug</Configuration>
+    <Platform Condition=" '$(Platform)' == '' ">AnyCPU</Platform>
+    <ProjectGuid>{E60B5C1A-7A1B-4C8E-9EA2-EA226D9CDAB6}</ProjectGuid>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>LaTeXBlocks.RenderHost</RootNamespace>
+    <AssemblyName>LaTeXBlocks.RenderHost</AssemblyName>
+    <TargetFrameworkVersion>v4.8</TargetFrameworkVersion>
+    <!-- This broker is launched as a PE image, but must remain a ClickOnce file
+         rather than an add-in assembly dependency. The non-.exe target name
+         prevents VSTO's manifest generator from promoting it to
+         dependentAssembly; CreateProcess still executes the PE directly. -->
+    <TargetExt>.host</TargetExt>
+    <!-- StemTeXRenderer loads the bundled native DLL directly. The current
+         bundled SDK is x64, so this broker must match it rather than relying on
+         an AnyCPU process choice made by Windows. A future x86 runtime needs a
+         separately packaged x86 broker, selected by the add-in launcher. -->
+    <PlatformTarget>x64</PlatformTarget>
+    <LangVersion>7.3</LangVersion>
+    <FileAlignment>512</FileAlignment>
+    <AutoGenerateBindingRedirects>true</AutoGenerateBindingRedirects>
+    <Deterministic>true</Deterministic>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug|AnyCPU' ">
+    <DebugSymbols>true</DebugSymbols>
+    <DebugType>full</DebugType>
+    <Optimize>false</Optimize>
+    <OutputPath>bin\Debug\</OutputPath>
+    <DefineConstants>DEBUG;TRACE;RENDER_HOST;POWERPOINT</DefineConstants>
+    <WarningLevel>4</WarningLevel>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Release|AnyCPU' ">
+    <DebugType>pdbonly</DebugType>
+    <Optimize>true</Optimize>
+    <OutputPath>bin\Release\</OutputPath>
+    <DefineConstants>TRACE;RENDER_HOST;POWERPOINT</DefineConstants>
+    <WarningLevel>4</WarningLevel>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="System" />
+    <Reference Include="System.Core" />
+    <Reference Include="System.Security" />
+    <Reference Include="System.Runtime.Serialization" />
+    <Reference Include="System.Xml" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="PipeProtocol.cs" />
+    <Compile Include="Program.cs" />
+    <Compile Include="RenderHostEngine.cs" />
+    <!-- Compile the renderer implementation into this standalone process.  The
+         source files themselves remain owned by the add-in project; POWERPOINT
+         merely selects their Office-free conditional namespace. -->
+    <Compile Include="..\LaTeXBlocks.Word.AddIn\StemTeXRenderer.cs">
+      <Link>StemTeXRenderer.cs</Link>
+    </Compile>
+    <Compile Include="..\LaTeXBlocks.Word.AddIn\StemTeXBackend.cs">
+      <Link>StemTeXBackend.cs</Link>
+    </Compile>
+    <Compile Include="Properties\AssemblyInfo.cs" />
+    <None Include="README.md" />
+  </ItemGroup>
+  <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
+</Project>

@@ -36,7 +36,7 @@ parts of that one shape:
 | Display | Embedded, self-contained SVG |
 | Authoritative source | Shape Alternative Text |
 | Identification and renderer metadata | Shape title plus a dedicated LaTeX Blocks shape tag |
-| Block style | A separate, versioned PowerPoint shape tag |
+| Block style | A versioned PowerPoint style tag plus an explicit-style marker |
 | Placement and size | Native PowerPoint host-frame geometry; the SVG content remains 1:1 inside that frame |
 
 Selecting a recognized block and invoking **Edit LaTeX Block** reopens its source. A successful render replaces the SVG
@@ -86,6 +86,10 @@ the style values in a versioned PowerPoint-only tag. At render time, StemTeX app
 finished SVG. This avoids treating a TeX `\\fbox` as the outer PowerPoint frame, whose paint can otherwise lie outside
 dvisvgm's SVG viewport.
 
+The separate `LATEXBLOCKS_TEX_STYLE_APPLIED=1` marker distinguishes an editor-confirmed default style from a default
+style tag written by older releases. The former literally uses the editor's 1.20× leading and an SVG shell; the latter
+remains a compatible bare SVG until the user edits it. Non-default legacy style tags already opt into the styled route.
+
 New auto-height blocks fit their content, so vertical placement has no spare height to distribute. Once a block has a
 fixed native frame height, the SVG viewport supplies the extra room and places the unchanged TeX content at the
 selected Top, Middle, or Bottom position. When the content is taller than that explicit frame, the same alignment
@@ -93,8 +97,10 @@ chooses the preserved edge (or the center) and the SVG viewport clips the rest; 
 grows the frame. The line-spacing control applies to ordinary paragraph leading. It deliberately does not redefine
 the row spacing of math environments such as `align` or `gather`; those have their own TeX layout controls.
 
-These settings belong exclusively to PowerPoint blocks. Word's object model and inline-baseline contract do not use
-this style tag or this UI.
+The PowerPoint tag is host-specific, but the declared style model is shared with Word's fixed Content Block editor.
+Word persists its compact equivalent in Title metadata because InlineShape and floating Shape do not share a
+PowerPoint-like Tags collection. Word inline formulas and numbered equations deliberately do not use this UI or
+style shell.
 
 ## Shared infrastructure
 

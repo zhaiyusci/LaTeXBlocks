@@ -435,6 +435,23 @@ namespace LaTeXBlocks.Word
                    source + "\n\\endgroup";
         }
 
+        // A display starting at the beginning of a Block already provides its own
+        // vertical TeX layout. The Block-style wrapper must not prepend a paragraph
+        // strut in that case, because it would become a visible empty line above the
+        // display. This is deliberately narrower than the auto-width rejection in
+        // AddMeasurementMarkers: an ordinary paragraph that later contains a display
+        // still benefits from a first-line strut.
+        internal static bool StartsWithFullDisplayOrPageWidthEnvironment(string source)
+        {
+            var uncommented = RemoveTeXCommentsForDetection(source);
+            var trimmed = (uncommented ?? string.Empty).TrimStart();
+            if (trimmed.StartsWith("\\[", StringComparison.Ordinal) ||
+                trimmed.StartsWith("$$", StringComparison.Ordinal)) return true;
+            return Regex.IsMatch(trimmed,
+                "^\\\\begin\\s*\\{\\s*(?:displaymath|equation\\*?|align\\*?|gather\\*?|multline\\*?|flalign\\*?|minipage)\\s*\\}",
+                RegexOptions.CultureInvariant);
+        }
+
         internal static string RemoveTeXCommentsForDetection(string source)
         {
             if (string.IsNullOrEmpty(source)) return source ?? string.Empty;

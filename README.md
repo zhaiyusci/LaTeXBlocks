@@ -17,8 +17,8 @@ Git submodule of this repository; see [StemTeX integration](docs/STEMTEX_INTEGRA
 | Edit source on the visual object | Yes | Yes |
 | Source storage | SVG `AlternativeText` | Shape `AlternativeText` |
 | Host font-size integration | Selection-aware inline refresh | Snapshot text size at insertion; explicit block-size control thereafter |
-| Text-color integration | Native Word Font Color drives SVG text for inline and display blocks | Per-block text-color control |
-| Block styling | Not exposed | Line spacing, padding, vertical placement, text/fill/border color, and border width |
+| Text-color integration | Native Word Font Color for inline and numbered formulas; persistent per-Block text color for fixed Blocks | Persistent per-block text-color control |
+| Block styling | Fixed Blocks: line spacing, padding, vertical placement, text/fill/border color, and border width | Line spacing, padding, vertical placement, text/fill/border color, and border width |
 
 Word auto-width content formulas are the only objects surrounded by U+2060 WORD JOINER characters. This keeps a
 user-authored ordinary space out of Word's special inline-image spacing path without putting padding or negative
@@ -36,10 +36,26 @@ The **LaTeX Blocks** Ribbon tab provides **Insert Inline Formula**, **Insert LaT
 Equation**, and **Edit LaTeX Block**. Select a recognized block to edit its authoritative source. The selected
 profile is a preference of the Word host, not of an individual block.
 
-**Font Color** in Word's Home tab is also the formula-color control. A new inline, fixed-width, or numbered formula
-inherits the typing color at its insertion point. To recolor an existing formula, select it, apply Font Color, then
-move the selection away; LaTeX Blocks queues one asynchronous SVG refresh from that native color. It does not poll
-the document, change the LaTeX source, or store a second color value in Alternative Text.
+A fixed-width **LaTeX Block** owns an outer frame independently of TeX's layout width. That remains true whether Word
+keeps it **In Line with Text** or gives it any floating Layout Option, including **Square**, **In Front of Text**, and
+**Behind Text**. After a native resize, LaTeX Blocks rerenders and reframes the SVG instead of preserving Word's
+image-scale transform. The commit begins when Word releases the resize gesture; **Reflow Frame** is also available for
+an immediate explicit rerender. Moving or rotating a Block does not rerender it. A floating replacement preserves its
+position and wrapping, and editing source preserves the outer frame in either representation. Auto-width inline
+formulas and numbered equations remain separate, because their Word layout scaffolds are intrinsically inline.
+
+The Word **LaTeX Block** editor has the same block-style controls as the PowerPoint editor: **TeX font size**,
+**Line spacing**, uniform **Padding**, **Top / Middle / Bottom** vertical placement, text color, background fill,
+and border color/width. These controls apply only to fixed Content Blocks. TeX owns leading and glyph color; the SVG
+root owns padding, fill, border, clipping, and vertical placement. The style is saved with the Block, survives an
+InlineShape-to-Shape conversion, and is reapplied after every native frame resize. A new Block initially uses the
+insertion point's text color and size; subsequent fixed-Block appearance is edited in the Block editor.
+An editor-confirmed default is literal—its displayed 1.20× leading is applied in TeX—while blocks written before the
+style editor retain their compatible bare-SVG rendering until they are edited.
+
+**Font Color** in Word's Home tab remains the formula-color control for inline and numbered formulas. To recolor one,
+select it, apply Font Color, then move the selection away; LaTeX Blocks queues one asynchronous SVG refresh. It does
+not poll the document or change the LaTeX source.
 
 Numbered equations use Word fields. After moving, copying, or deleting complete numbered-equation lines, run
 **Update Numbers** (or Word's own field-update command). Deleting only the SVG is not a semantic equation deletion:
@@ -63,7 +79,8 @@ PowerPoint's Fill or Line properties, and it does not ask TeX to draw a full-siz
 source remains unchanged in Alternative Text and the block's declarative style is stored separately on the shape.
 Vertical placement becomes visible when the block has a fixed frame height; an auto-height block naturally fits its
 content. Line spacing affects ordinary paragraph leading; TeX environments such as `align` and `gather` retain their
-own math-row spacing.
+own math-row spacing. As in Word, accepting the editor's default style records a real 1.20× TeX leading and an SVG
+viewport; pre-style default blocks keep their compatible rendering until edited.
 
 PowerPoint and Word save their profile choices independently.
 

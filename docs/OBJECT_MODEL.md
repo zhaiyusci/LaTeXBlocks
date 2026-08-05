@@ -7,25 +7,26 @@ free-standing block model; none of the Word inline-formula rules below apply the
 ## Purpose
 
 An ordinary LaTeX block behaves like one semantic document object, not like an image plus hidden text plus a control
-wrapper. The source, visual output, and editing identity occupy three native properties of one Word `InlineShape`.
-A numbered display equation adds a same-paragraph Word line-and-number scaffold around that same content object; it
-does not add a container or a second copy of the TeX source.
+wrapper. The source, visual output, and editing identity occupy native properties of one Word drawing object. It is
+normally an `InlineShape`; a user may make a fixed-width content block floating, in which case Word losslessly changes
+it into a `Shape`. A numbered display equation adds a same-paragraph Word line-and-number scaffold around its inline
+content object; it does not add a container or a second copy of the TeX source.
 
 ## Representation
 
 | Concern | Word representation | Rule |
 | --- | --- | --- |
 | Display | Embedded SVG image bytes | Portable output; Word does not need StemTeX to display an existing block. |
-| Authoritative source | `InlineShape.AlternativeText` | TeX source only, with Word-stable LF line endings. No AsciiMath, normalized terms, prefixes, or duplicate metadata. |
-| Identification | `InlineShape.Title` | Versioned, compact metadata only. |
-| Placement | Word `InlineShape` range | Word remains responsible for layout, anchoring, and document persistence. An auto-width content formula alone has one U+2060 WORD JOINER immediately before and after its image; a numbered equation uses same-paragraph manual breaks and tab stops. |
-| Equation number | Word `SEQ LaTeXEquation` field | Native searchable text, updated explicitly in document order. |
+| Authoritative source | `InlineShape.AlternativeText` or floating `Shape.AlternativeText` | TeX source only, with Word-stable LF line endings. No AsciiMath, normalized terms, prefixes, or duplicate metadata. |
+| Identification | `InlineShape.Title` or floating `Shape.Title` | Versioned, compact metadata only. |
+| Placement | Word `InlineShape` range; optionally a floating `Shape` for fixed content | Word remains responsible for layout, anchoring, and document persistence. An auto-width content formula alone has one U+2060 WORD JOINER immediately before and after its image; a numbered equation uses same-paragraph manual breaks and tab stops. |
+| Equation number | Word `SEQ LaTeXBlockEq` field | Native searchable text, updated explicitly in document order. The matching Word Caption Label declares the category, while the stable bookmark remains the individual target. |
 | Equation reference target | Word bookmark over the `SEQ` result | Name is derived from the stable SVG ID. |
 
 Version 1 metadata is:
 
 ```text
-LaTeXBlocks/1;id=<guid>;width=<points>;depth=<points>;mode=<auto|fixed>;size=<points>;role=<content|numbered-equation>
+LaTeXBlocks/1;id=<guid>;width=<points>;depth=<points>;mode=<auto|fixed>;size=<points>;role=<content|numbered-equation>[;framewidth=<points>;frameheight=<points>;style=<compact-style>]
 ```
 
 Word rewrites CRLF in Alternative Text to LF when a DOCX is saved. LaTeX Blocks therefore canonicalizes CRLF and bare
@@ -34,16 +35,50 @@ stable across save/reopen without changing TeX comment boundaries.
 
 The stable ID survives edits. Width is the StemTeX typesetting constraint, not a DPI value and not a raster-image
 scale. For a one-line inline source, depth is measured from an invisible dvisvgm marker at the TeX baseline to the
-SVG viewport bottom. Metadata written before `role` existed parses as ordinary `content`.
+SVG viewport bottom. `framewidth` and `frameheight`, when present, are the authored physical SVG root for a floating
+fixed block; they are deliberately distinct from the TeX measure. `style`, when present, is a delimiter-safe compact
+serialization of the shared Block style (leading, padding, vertical placement, text/fill/border colors, and border
+width). It appears only for a fixed ordinary Content Block; it never replaces TeX source in Alternative Text.
+Metadata written before `role`, frame fields, or `style` continues to parse as ordinary `content` with the historical
+unstyled rendering route.
 
 For a fixed-width block, the saved `width` remains an absolute TeX layout width in points. The primary Word controls
-therefore use exact points as well: 30–450 pt, a 0.5 pt step, one decimal place, and a 360 pt default, matching the
-StemTeX GUI. It is not a live binding to future page or section size changes.
+therefore use exact points as well: 30–2000 pt, a 0.5 pt step, one decimal place, and a 360 pt default. The wider
+range lets a reflowed floating Word frame retain its user-selected geometry. It is not a live binding to future page
+or section size changes.
 
 Word resolves its actual container (usable table-cell width, text-frame width after internal margins, or the active
 section column's own width) for placement and available geometry, but a new fixed block begins at the independent
 360 pt typesetting width. Its metadata stores that absolute point value, so moving the object later does not silently
 reflow it.
+
+A fixed-width content block has the same frame contract whether Word represents it as an `InlineShape` (**In Line with
+Text**) or as a floating `Shape` under any Layout Option. `width` is the TeX typesetting measure, while
+`framewidth`/`frameheight` are the user-owned outer SVG frame. A size change creates a fresh TeX render; the root SVG
+is then reframed to the exact outer dimensions by expanding its viewport (transparent space) or reducing it (clip),
+never by scaling TeX glyph coordinates. For a styled Block, the fresh root also paints padding, fill, four in-viewport
+border strips, and the chosen Top/Middle/Bottom placement; the border therefore always remains at the current frame
+edge after a resize. A changed frame width derives a new TeX measure from the prior SVG root; a height-only change
+rerenders at the existing measure.
+
+Word's COM model has no `AfterShapeSizeChange` equivalent. The add-in therefore observes Word's documented,
+process-scoped native mouse-capture completion event, posts one UI-thread turn after mouse-up, and then reads the final
+Block geometry. The event callback never accesses Word COM and it is not a geometry poll, document watcher, window
+subclass, or global mouse hook. `WindowSelectionChange` remains a fallback for a non-mouse resize or an environment
+where the operating system refuses the monitor. **Reflow Frame** performs the same asynchronous operation explicitly
+for the currently selected fixed Block. The comparison is between the frame at the start and end of one gesture,
+not against stale persisted metadata, so translation and rotation do not request a render and rapid consecutive
+resizes compose correctly. The native drag may be
+temporarily shown as a Word picture transform, but the persisted replacement has no such scale transform. For a
+floating replacement the add-in temporarily returns the shape to the inline representation, then restores its relative
+reference frame, left/top position, wrapping type/side/distances, overlap setting, layout-in-cell, anchor lock, and
+rotation. Editing source or TeX measure keeps the same outer frame in either representation. This option applies only
+to fixed-width ordinary content. Auto-width formulas remain inline for their U+2060 word-spacing scaffold, and
+numbered equations remain inline for their tab/`SEQ`/bookmark layout.
+
+The Word frame is independent of the fixed Block's 30–2000 pt TeX measure policy. A valid positive native frame is
+stored and emitted at its exact physical SVG extent, including an extent above 2000 pt; at those extremes the TeX
+measure remains bounded, so the resulting frame may intentionally contain extra space or clip content.
 
 Profile names are discovered from the active StemTeX installation. A directory is offered only when it contains
 `preamble.tex`. Profile is Word-host state, not object state: changing it affects every subsequent Word preview,
@@ -112,9 +147,11 @@ The large temporary StemTeX canvas is solely a measurement surface. Its width is
 
 ### Fixed-width LaTeX block
 
-Fixed mode preserves the caller's typesetting width and supports display math, multiple lines, and paragraph-like LaTeX content. It deliberately keeps that page-width canvas. Such content does not have one meaningful surrounding-text baseline, so multiline/display blocks remain at Word position zero.
+Fixed mode preserves the caller's typesetting width and supports display math, multiple lines, and paragraph-like LaTeX content. It deliberately keeps that page-width canvas. Such content does not have one meaningful surrounding-text baseline, so multiline/display blocks remain at Word position zero. Its editor exposes TeX font size, line spacing, uniform padding, vertical placement, text color, fill, and border controls. Leading and text color are scoped in TeX; all outer decoration is one SVG shell, not a Word Shape Fill/Line and not a TeX `\fbox`.
 
-Objects created before the mode field existed parse as `fixed`, preserving their former behavior. Editing can explicitly convert between modes.
+Objects created before the mode field existed parse as `fixed`, preserving their former behavior. An inline fixed
+Content Block can be explicitly converted between modes. A floating Block remains fixed while it owns a physical
+Word frame; convert it back to **In Line with Text** before changing it to an auto-width formula.
 
 ### Word-native numbered equation
 
@@ -150,15 +187,28 @@ environment would retain the requested page width and is deliberately not embedd
 The right-aligned tab segment contains literal parentheses around a native field:
 
 ```text
-( { SEQ LaTeXEquation \\* ARABIC } )
+( { SEQ LaTeXBlockEq \\* ARABIC } )
 ```
 
 The field result alone is bookmarked as `LTXEQ_<32-hex-digit block ID>`. Editing replaces only the SVG and preserves
 the block ID, line scaffold, field, and bookmark. The renderer's physical natural width is checked before insertion
 or replacement; formulas that would collide with the right-aligned number are rejected before Word is mutated.
 
-The **Update Numbers** command updates only `SEQ LaTeXEquation` fields in the main document story. It is an explicit
-operation, not a timer or document-wide background watcher. Moving, copying, or removing complete equation-line
+`LaTeXBlockEq` is also registered as a Word Caption Label when the add-in starts, so Word recognizes the field
+identifier as one explicit equation category. That registration is Word application state, not DOCX data, and is only
+a UI convenience. Word's native Cross-reference dialog does not treat this tab-scaffold's bare `SEQ` fields as its
+own caption objects, so it cannot serve as the equation picker. This is not a restriction on reference precision:
+Word `REF` fields can target the individual `LTXEQ_...` bookmark even when several visual equation lines share one
+paragraph. The add-in's **Equation Reference** picker enumerates those verified bookmarks and inserts native
+`REF LTXEQ_<id> \\h` fields, surrounded by ordinary parentheses, rather than relying on the built-in dialog.
+
+The **Update Numbers** command updates `SEQ LaTeXBlockEq` fields and then LaTeX Blocks' matching `REF` fields in the
+main document story. It also migrates the former private `SEQ LaTeXEquation` identifier into this public category,
+so an upgraded document retains one numbering sequence. Word Caption Labels are application state rather than DOCX
+data; the stable document-level reference target remains the bookmark around the field result. The command is an
+explicit operation, not a timer or document-wide background watcher. The picker and update pass deliberately apply
+only to the main document story; headers, footnotes, comments, and text boxes are outside this first
+cross-reference scope. Moving, copying, or removing complete equation-line
 scaffolds can leave cached field results stale until that command or Word's own field-update command runs. Deleting
 only the selected SVG is not a semantic equation deletion: it leaves the two tabs, `SEQ` field, and bookmark behind.
 The current prototype does not yet expose a dedicated **Delete Equation** command.

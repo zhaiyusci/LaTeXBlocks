@@ -35,11 +35,29 @@ PowerPoint's text system is not a full rich-text layout surface for arbitrary em
 PowerPoint add-in therefore creates only free-standing LaTeX Blocks. It inherits surrounding text size at insertion
 but does not claim a text-run baseline or mutate neighboring text. See [POWERPOINT_SCOPE.md](POWERPOINT_SCOPE.md).
 
+## Word Blocks reflow their SVG frame, not their picture transform
+
+PowerPoint exposes `AfterShapeSizeChange`; Word's COM model does not. A fixed Word Block nevertheless has the same
+underlying contract whether it is an `InlineShape` or a floating `Shape`: its TeX measure and exact outer SVG frame are
+separate, and reflow rebuilds the root viewport without stretching TeX coordinates. The add-in uses a documented
+`EVENT_SYSTEM_CAPTUREEND` WinEvent scoped to the current WINWORD process. Its native callback only posts a one-shot
+task to the VSTO UI thread; the UI code reads the final geometry after mouse-up and queues the renderer. It is neither
+a geometry poll, document watcher, global low-level mouse hook, nor Office-window subclass. `WindowSelectionChange`
+is retained as a fallback for non-mouse changes or unavailable operating-system monitoring. **Reflow Frame** remains
+the explicit path. Moving and rotating do not rerender. This restores the PowerPoint semantic boundary—end of a resize
+gesture—without persisting a distorted SVG image transform.
+
 ## Word equation numbers use tabs and fields, not a table
 
 A numbered display equation stays on a manual-break visual line in the current paragraph. A center tab aligns the
-formula; a right tab aligns a native `SEQ LaTeXEquation` field. This retains Word search and cross-reference semantics
+formula; a right tab aligns a native `SEQ LaTeXBlockEq` field. The add-in registers the matching `LaTeXBlockEq`
+Caption Label so Word recognizes the category, but Word's native Cross-reference dialog does not treat bare `SEQ`
+fields in this tab scaffold as caption objects. Stable bookmarks on the field results therefore remain the
+document-portable per-equation target layer, and the add-in inserts native `REF` fields through its own equation
+picker. This retains Word search and cross-reference semantics
 without adding a table or a paragraph solely for the equation.
+The current picker and **Update Numbers** operation deliberately cover the main document story only; headers,
+footnotes, comments, and text boxes are outside this first cross-reference scope.
 
 ## Formula-as-an-OpenType-glyph remains an experiment
 

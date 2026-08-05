@@ -9,7 +9,10 @@ namespace LaTeXBlocks.Word
         // renderer constraint: the native API still receives the exact fractional
         // point value selected here.
         internal const double MinimumWidthPt = 30.0;
-        internal const double MaximumWidthPt = 450.0;
+        // Floating Block frames can be resized directly in Word. Keep the editor
+        // range large enough for a reflowed native frame instead of silently
+        // clamping the TeX measure below the user's chosen outer width.
+        internal const double MaximumWidthPt = 2000.0;
         internal const double DefaultWidthPt = 360.0;
         internal const double WidthStepPt = 0.5;
 

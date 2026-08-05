@@ -604,7 +604,7 @@ namespace LaTeXBlocks.PowerPoint
             try
             {
                 var render = await service.RenderPreviewAsync(source, width, profile, fontSize,
-                    style, previewFrameHeightPt, previewFrameWidthPt);
+                    style, previewFrameHeightPt, previewFrameWidthPt, true);
                 phase = "Preview update";
                 if (IsDisposed) return;
                 if (version == editVersion)

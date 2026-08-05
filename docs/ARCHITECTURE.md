@@ -10,11 +10,11 @@ constraint.
 Office Ribbon / editor
         │
         ▼
-Host-specific service ──────► StemTeXBackend ──────► StemTeX native runtime
-        │                           │                         │
-        ▼                           │                         ▼
-Word InlineShape or                │                    SVG + TeX metrics
-PowerPoint SVG shape ◄─────────────┘
+Host-specific service ──────► RenderHost client ────── named pipe ──────► LaTeXBlocks.RenderHost.host (x64)
+        │                           │                                      │
+        ▼                           │                                      ▼
+Word SVG object or                 │                              StemTeX native runtime
+PowerPoint SVG shape ◄─────────────┴──────────────────────────── SVG + TeX metrics
         │
         ▼
 Office document or presentation
@@ -23,16 +23,22 @@ Office document or presentation
 The add-ins embed the rendered SVG bytes directly. Existing documents therefore retain their visual content even
 when StemTeX is unavailable; StemTeX is needed only to insert or rerender a block.
 
+`LaTeXBlocks.RenderHost.host` is a per-Office-host, x64 child process. The VSTO add-in contains only the
+host-specific UI/document code and a named-pipe client; it does not load the native renderer or wait for native TeX
+work during Office teardown. The client creates a unique current-user pipe name, launches the render host, and
+places it in a kill-on-close Windows Job Object. Releasing the add-in closes that job handle, which terminates the
+render host and any processes it owns without making Word or PowerPoint wait for a render, warm-up, or cleanup.
+
 ## Host responsibilities
 
 | Concern | Word | PowerPoint |
 | --- | --- | --- |
-| Visual object | `InlineShape` SVG | Positioned SVG shape |
+| Visual object | SVG `InlineShape`, or a floating SVG `Shape` for a fixed Content Block | Positioned SVG shape |
 | Text integration | Inline formulas, fixed blocks, and numbered equation lines | Free-standing blocks only |
-| Source | `InlineShape.AlternativeText` | Shape Alternative Text |
+| Source | SVG Alternative Text (`InlineShape` or `Shape`) | Shape Alternative Text |
 | Identity | Compact metadata in `Title` | Metadata in `Title` plus a dedicated shape tag |
-| Block decoration | None beyond TeX source | A PowerPoint-only style tag: TeX renders typography; the SVG layer renders the outer shell |
-| Layout | Baseline, paragraph, tabs, and document line layout | Position plus one native host frame; every native size change queues TeX reflow |
+| Block decoration | Fixed Content Block style in compact Title metadata: TeX renders typography; the SVG layer renders the outer shell | Versioned shape style tag plus an explicit-style marker: TeX renders typography; the SVG layer renders the outer shell |
+| Layout | Baseline, paragraph, tabs, document line layout, and the fixed Content Block frame contract below | Position plus one native host frame; every native size change queues TeX reflow |
 
 The shared rendering and metadata code does not imply shared host layout code. Word-specific baseline, U+2060,
 paragraph, and tab-stop behavior must never leak into PowerPoint.
@@ -50,17 +56,34 @@ the overflow rather than stretching the artwork or growing the frame.
 `VisualScale` is deliberately absent from the model. The persisted native shape geometry is the host frame, while
 the rendering metadata records the TeX layout width and design size that produced its content.
 
+### Word fixed-Content frame contract
+
+For Word, **fixed Content Block** is the semantic category `role=Content` plus `mode=Fixed`; it is not a synonym
+for a floating object. The same external-frame contract applies when Word exposes that Block as an `InlineShape`
+(**In Line with Text**) and when the user changes it into a floating `Shape` with any normal floating wrap mode:
+**Square**, **Tight**, **Through**, **Top and Bottom**, **Behind Text**, or **In Front of Text**.
+
+A native width or height change is treated as an instruction to re-typeset and then rebuild the exact physical SVG
+viewport after the resize gesture ends. Moving, rotating, or merely changing the wrapping mode does not re-typeset.
+The viewport preserves TeX's physical coordinate scale: enlarging it adds space and shrinking it clips; neither
+operation persistently stretches mathematical glyphs. Auto-width inline formulas and numbered equations are
+different layout roles and do not acquire this independent frame behavior.
+
 ## Rendering lifecycle
 
-Each Office host owns one `StemTeXBackend`, one current profile, and one dedicated FIFO background worker. Native
-renderer creation, rendering, disposal, and profile changes occur off the Office UI thread.
+Each Office host owns one `RenderHostClientBackend`, one current profile preference, and one disposable external
+`LaTeXBlocks.RenderHost.host` process. The RenderHost—not Word or PowerPoint—owns the native StemTeX lifetime and
+its worker queue. Office COM mutations remain on the appropriate host UI path.
 
-- **Preview work** is latest-only. The editor debounces source changes, skips superseded queued work, and discards a
-  result if its UI request ID is stale.
-- **Document mutations** are durable. A completed insert, edit, explicit typesetting-width change, font-size refresh,
-  or host-frame update is queued so that a later preview cannot silently cancel it.
-- **Office shutdown** invalidates managed work and returns without joining a native-renderer thread on the Office UI
-  thread. A background reaper handles only worker processes owned by that host.
+- **Startup warm-up** is nonblocking. The add-in queues a profile switch over the pipe and can immediately return to
+  the Office UI; a later render waits in the RenderHost queue if warm-up is still underway.
+- **Preview work** is latest-only. The editor debounces source changes; a newer preview or explicit cancellation is
+  sent over an independent pipe connection and supersedes the older preview. Stale results are discarded by request
+  ID.
+- **Document mutations** use durable queued render requests. An insert, edit, explicit typesetting-width change,
+  font-size refresh, or host-frame update is not silently cancelled by a later preview.
+- **Office shutdown** closes the RenderHost Job Object and returns without joining, reaping, or unloading native
+  renderer work inside the Office process.
 
 This mirrors the responsiveness model of StemTeX GUI while keeping all Word/PowerPoint COM mutations on the
 appropriate host UI path.
@@ -72,13 +95,15 @@ The visual SVG and its source are one semantic object, not an image plus a dupli
 - The SVG is portable display output.
 - Alternative Text is the authoritative TeX source, normalized to LF line endings.
 - Title metadata stores only identity and rendering/layout facts needed to edit the object.
-- For Word blocks, the drawing run's native `Font.Color` is the authoritative text color. The renderer scopes that
-  value into the SVG TeX input; it is deliberately not copied into metadata or Alternative Text. Selection-aware
-  refresh detects a changed color for inline, fixed-width, and numbered display blocks without background polling.
-- PowerPoint-only style values live in a separate versioned shape tag. Before a styled preview or committed render,
-  the PowerPoint service constructs a scoped TeX wrapper only for leading and text color, then composes padding,
-  background, border, and vertical placement into the SVG root. It never rewrites Alternative Text or relies on
-  PowerPoint fill/line formatting for a block's visible decoration.
+- For Word inline and numbered formulas, the drawing run's native `Font.Color` remains the authoritative text color.
+  Fixed Content Blocks instead persist a declarative block style in their Title metadata; their editor is the
+  authoritative color/leading/padding UI. Neither route copies visual settings into Alternative Text.
+- Both hosts share one style model. Before a styled fixed-block preview or committed render, the service constructs a
+  scoped TeX wrapper only for leading and text color, then composes padding, background, border, and vertical
+  placement into the SVG root. It never rewrites Alternative Text or relies on Office Fill/Line formatting for a
+  block's visible decoration. An explicit style is meaningful even at its apparent defaults: 1.20× leading is authored
+  in TeX. Legacy shapes with no Word `style=` payload or no PowerPoint explicit-style marker remain on the compatible
+  bare route until edited.
 - A successful edit creates and annotates a replacement SVG before removing the old visual object.
 
 The detailed Word representation is normative in [OBJECT_MODEL.md](OBJECT_MODEL.md). PowerPoint's deliberately

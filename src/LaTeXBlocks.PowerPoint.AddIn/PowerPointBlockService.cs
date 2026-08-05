@@ -16,12 +16,17 @@ namespace LaTeXBlocks.PowerPoint
         internal const string KindValue = "LATEX_BLOCK";
         internal const string SvgWidthTag = "LATEXBLOCKS_SVG_WIDTH_PT";
         internal const string SvgHeightTag = "LATEXBLOCKS_SVG_HEIGHT_PT";
+        // Older releases wrote a serialized default style tag for every Block,
+        // even though a default-valued editor state still used the bare legacy
+        // SVG route. This separate marker records the newer, literal meaning:
+        // an editor-accepted default is real 1.20× TeX leading plus an SVG shell.
+        internal const string StyleAppliedTag = "LATEXBLOCKS_TEX_STYLE_APPLIED";
         private readonly PowerPointInterop.Application application;
-        private readonly StemTeXBackend renderers;
+        private readonly IStemTeXBackend renderers;
         private readonly string cacheDirectory;
         private const int CacheRetentionDays = 7;
 
-        internal PowerPointBlockService(PowerPointInterop.Application application, StemTeXBackend renderers)
+        internal PowerPointBlockService(PowerPointInterop.Application application, IStemTeXBackend renderers)
         {
             this.application = application ?? throw new ArgumentNullException(nameof(application));
             this.renderers = renderers ?? throw new ArgumentNullException(nameof(renderers));
@@ -61,7 +66,15 @@ namespace LaTeXBlocks.PowerPoint
             double? outerHeightPt, double? outerWidthPt)
         {
             return await RenderAsync(source, widthPt, profile, fontSizePt, style,
-                outerHeightPt, outerWidthPt, false);
+                outerHeightPt, outerWidthPt, false, false);
+        }
+
+        internal async Task<LaTeXBlockRender> RenderPreviewAsync(string source, double widthPt,
+            string profile, double fontSizePt, LaTeXBlockStyle style,
+            double? outerHeightPt, double? outerWidthPt, bool styleWasExplicit)
+        {
+            return await RenderAsync(source, widthPt, profile, fontSizePt, style,
+                outerHeightPt, outerWidthPt, false, styleWasExplicit);
         }
 
         internal async Task<LaTeXBlockRender> RenderCommittedAsync(string source, double widthPt,
@@ -84,12 +97,21 @@ namespace LaTeXBlocks.PowerPoint
             double? outerHeightPt, double? outerWidthPt)
         {
             return await RenderAsync(source, widthPt, profile, fontSizePt, style,
-                outerHeightPt, outerWidthPt, true);
+                outerHeightPt, outerWidthPt, true, false);
+        }
+
+        internal async Task<LaTeXBlockRender> RenderCommittedAsync(string source, double widthPt,
+            string profile, double fontSizePt, LaTeXBlockStyle style,
+            double? outerHeightPt, double? outerWidthPt, bool styleWasExplicit)
+        {
+            return await RenderAsync(source, widthPt, profile, fontSizePt, style,
+                outerHeightPt, outerWidthPt, true, styleWasExplicit);
         }
 
         private async Task<LaTeXBlockRender> RenderAsync(string source, double widthPt,
             string profile, double fontSizePt, LaTeXBlockStyle style,
-            double? outerHeightPt, double? outerWidthPt, bool committed)
+            double? outerHeightPt, double? outerWidthPt, bool committed,
+            bool styleWasExplicit)
         {
             source = NormalizeSourceText(source);
             if (string.IsNullOrWhiteSpace(source))
@@ -108,15 +130,16 @@ namespace LaTeXBlocks.PowerPoint
             // colour). The final SVG owns the outer shell. In particular, do not
             // ask TeX \fbox / \colorbox to paint a full PowerPoint frame: TeX's
             // preview coordinates can lie outside dvisvgm's root viewport.
-            var contentWidthPt = style.IsDefault
-                ? widthPt
-                : Math.Max(0.1, widthPt - 2 * style.OuterInsetPt);
-            var renderSource = style.IsDefault
+            var styleIsApplied = styleWasExplicit || !style.IsDefault;
+            var contentWidthPt = styleIsApplied
+                ? Math.Max(0.1, widthPt - 2 * style.OuterInsetPt)
+                : widthPt;
+            var renderSource = !styleIsApplied
                 // Styled requests reset PreviewBorder globally at TeX shipout. The
                 // next unstyled request must restore the legacy profile border.
                 ? "\\global\\PreviewBorder=1pt\n" + source
-                : style.WrapSource(source, fontSizePt);
-            var rendererWidthPt = style.IsDefault ? widthPt :
+                : style.WrapSource(source, fontSizePt, true);
+            var rendererWidthPt = !styleIsApplied ? widthPt :
                 LaTeXBlockStyle.ToTeXLengthPt(contentWidthPt);
 
             // A PowerPoint block is always a real block of the requested width. Font
@@ -127,33 +150,39 @@ namespace LaTeXBlocks.PowerPoint
                     false, fontSizePt)
                 : await renderers.RenderLatestAsync(profile, renderSource, rendererWidthPt,
                     false, fontSizePt);
-            var finalSvg = style.IsDefault
+            var finalSvg = !styleIsApplied
                 ? result.Bytes
-                : DecorateSvg(result.Bytes, style, outerWidthPt ?? widthPt,
-                    outerHeightPt);
-            return new LaTeXBlockRender(WriteSvg(finalSvg), finalSvg, result.DepthPt, fontSizePt);
+                : LaTeXBlockSvgFrame.Decorate(result.Bytes, style,
+                    outerWidthPt ?? widthPt, outerHeightPt);
+            return new LaTeXBlockRender(WriteSvg(finalSvg), finalSvg, result.DepthPt,
+                fontSizePt, styleIsApplied);
         }
 
         internal PowerPointInterop.Shape InsertRendered(string source, double widthPt,
             LaTeXBlockRender render)
         {
-            return InsertRendered(source, widthPt, render, LaTeXBlockStyle.Default);
+            return InsertRendered(source, widthPt, render, LaTeXBlockStyle.Default, false);
         }
 
         internal PowerPointInterop.Shape InsertRendered(string source, double widthPt,
-            LaTeXBlockRender render, LaTeXBlockStyle style)
+            LaTeXBlockRender render, LaTeXBlockStyle style, bool styleWasExplicit = false)
         {
             if (render == null) throw new ArgumentNullException(nameof(render));
             style = style ?? LaTeXBlockStyle.Default;
+            var styleIsApplied = styleWasExplicit || !style.IsDefault ||
+                render.StyleWasApplied;
+            if (styleIsApplied && !render.StyleWasApplied)
+                throw new InvalidOperationException(
+                    "The styled LaTeX Block render does not match the requested style state.");
             var slide = GetActiveSlide();
             // A decorated block already owns its complete shell in its SVG. In
             // particular, background and border must end at the SVG frame edge,
             // rather than being followed by a PowerPoint-created transparent
             // extension.
-            var framedSvg = style.IsDefault
-                ? FrameSvg(render.SvgBytes, ReadSvgWidthPt(render.SvgBytes),
-                    ReadSvgHeightPt(render.SvgBytes), style.VerticalAlignment)
-                : render.SvgBytes;
+            var framedSvg = styleIsApplied
+                ? render.SvgBytes
+                : FrameSvg(render.SvgBytes, ReadSvgWidthPt(render.SvgBytes),
+                    ReadSvgHeightPt(render.SvgBytes), style.VerticalAlignment);
             var size = ReadSvgSize(framedSvg);
             var framedPath = WriteSvg(framedSvg);
             ResolveInsertionPoint(slide, size.WidthPt, size.HeightPt, out var left, out var top);
@@ -170,8 +199,8 @@ namespace LaTeXBlocks.PowerPoint
                 // inherit PowerPoint's picture-aspect lock, which would make a
                 // nominally horizontal resize mutate height as well.
                 shape.LockAspectRatio = Office.MsoTriState.msoFalse;
-                ApplyContract(shape, source, metadata, style, TemporaryShapeName(metadata.Id),
-                    size.WidthPt, size.HeightPt);
+                ApplyContract(shape, source, metadata, style, styleIsApplied,
+                    TemporaryShapeName(metadata.Id), size.WidthPt, size.HeightPt);
                 shape.Name = StableShapeName(metadata.Id);
                 shape.Select(Office.MsoTriState.msoTrue);
                 DeleteCachedSvg(framedPath);
@@ -189,13 +218,19 @@ namespace LaTeXBlocks.PowerPoint
         internal PowerPointInterop.Shape UpdateRendered(PowerPointInterop.Shape oldShape,
             string source, double widthPt, LaTeXBlockRender render,
             bool selectReplacement = true, double? frameHeightPt = null,
-            double? frameWidthPt = null, LaTeXBlockStyle style = null)
+            double? frameWidthPt = null, LaTeXBlockStyle style = null,
+            bool styleWasExplicit = false)
         {
             if (oldShape == null) throw new ArgumentNullException(nameof(oldShape));
             if (render == null) throw new ArgumentNullException(nameof(render));
             if (!TryReadContract(oldShape, out var previous, out _))
                 throw new InvalidOperationException("The selected shape is not a LaTeX Block.");
             style = style ?? ReadStyle(oldShape);
+            var styleIsApplied = styleWasExplicit || !style.IsDefault ||
+                HasExplicitStyleMarker(oldShape) || render.StyleWasApplied;
+            if (styleIsApplied && !render.StyleWasApplied)
+                throw new InvalidOperationException(
+                    "The styled LaTeX Block render does not match the requested style state.");
 
             var slide = GetOwningSlide(oldShape);
             // A block has one native PowerPoint frame and one genuine StemTeX
@@ -210,10 +245,10 @@ namespace LaTeXBlocks.PowerPoint
             // extent disagree with the authored SVG frame. The requested frame is
             // authoritative: if its viewport is smaller than the TeX result, SVG
             // clips the overflow instead of silently enlarging the PowerPoint box.
-            var framedSvg = style.IsDefault
-                ? FrameSvg(render.SvgBytes, requestedFrameWidthPt,
-                    requestedFrameHeightPt, style.VerticalAlignment)
-                : render.SvgBytes;
+            var framedSvg = styleIsApplied
+                ? render.SvgBytes
+                : FrameSvg(render.SvgBytes, requestedFrameWidthPt,
+                    requestedFrameHeightPt, style.VerticalAlignment);
             var sourceSize = ReadSvgSize(framedSvg);
             var framedPath = WriteSvg(framedSvg);
             var newWidth = (float)sourceSize.WidthPt;
@@ -234,7 +269,7 @@ namespace LaTeXBlocks.PowerPoint
                     Office.MsoTriState.msoTrue, left, top, newWidth, newHeight);
                 replacement.LockAspectRatio = Office.MsoTriState.msoFalse;
                 replacement.Rotation = rotation;
-                ApplyContract(replacement, source, metadata, style,
+                ApplyContract(replacement, source, metadata, style, styleIsApplied,
                     TemporaryShapeName(metadata.Id), sourceSize.WidthPt, sourceSize.HeightPt);
 
                 // While the old shape still exists, place the newly inserted topmost
@@ -331,6 +366,26 @@ namespace LaTeXBlocks.PowerPoint
             catch (COMException)
             {
                 return LaTeXBlockStyle.Default;
+            }
+        }
+
+        internal static bool IsStyleApplied(PowerPointInterop.Shape shape)
+        {
+            var style = ReadStyle(shape);
+            return !style.IsDefault || HasExplicitStyleMarker(shape);
+        }
+
+        private static bool HasExplicitStyleMarker(PowerPointInterop.Shape shape)
+        {
+            if (shape == null) return false;
+            try
+            {
+                return string.Equals(shape.Tags[StyleAppliedTag], "1",
+                    StringComparison.Ordinal);
+            }
+            catch (COMException)
+            {
+                return false;
             }
         }
 
@@ -891,8 +946,8 @@ namespace LaTeXBlocks.PowerPoint
         }
 
         private static void ApplyContract(PowerPointInterop.Shape shape, string source,
-            LaTeXBlockMetadata metadata, LaTeXBlockStyle style, string name,
-            double svgWidthPt, double svgHeightPt)
+            LaTeXBlockMetadata metadata, LaTeXBlockStyle style, bool styleIsApplied,
+            string name, double svgWidthPt, double svgHeightPt)
         {
             // The picture geometry is the persisted host frame. All native handles
             // feed the same frame-update path; committed SVGs are framed to exactly
@@ -903,6 +958,8 @@ namespace LaTeXBlocks.PowerPoint
             shape.Tags.Add(KindTag, KindValue);
             shape.Tags.Add(LaTeXBlockStyle.TagName,
                 (style ?? LaTeXBlockStyle.Default).ToString());
+            if (styleIsApplied)
+                shape.Tags.Add(StyleAppliedTag, "1");
             shape.Tags.Add(SvgWidthTag,
                 svgWidthPt.ToString("R", CultureInfo.InvariantCulture));
             shape.Tags.Add(SvgHeightTag,
@@ -1085,17 +1142,19 @@ namespace LaTeXBlocks.PowerPoint
     internal sealed class LaTeXBlockRender
     {
         internal LaTeXBlockRender(string svgPath, byte[] svgBytes, double depthPt,
-            double fontSizePt)
+            double fontSizePt, bool styleWasApplied = false)
         {
             SvgPath = svgPath;
             SvgBytes = svgBytes ?? throw new ArgumentNullException(nameof(svgBytes));
             DepthPt = depthPt;
             FontSizePt = fontSizePt;
+            StyleWasApplied = styleWasApplied;
         }
 
         internal string SvgPath { get; }
         internal byte[] SvgBytes { get; }
         internal double DepthPt { get; }
         internal double FontSizePt { get; }
+        internal bool StyleWasApplied { get; }
     }
 }
