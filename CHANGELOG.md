@@ -5,6 +5,18 @@ Word-and-PowerPoint package line.
 
 ## [Unreleased]
 
+## [0.2.77] — 2026-08-07
+
+### Word
+
+- Removed a redundant host-font and baseline write that was immediately discarded when Word normalized a newly
+  imported SVG. A 10-formula local profile reduced Word replacement time from 3975 ms to 3566 ms (about 10%).
+
+### Packaging
+
+- Release builds now preserve older installers in `dist/release` and refuse to overwrite an existing installer or
+  checksum for the requested version.
+
 ## [0.2.76] — 2026-08-07
 
 ### Word

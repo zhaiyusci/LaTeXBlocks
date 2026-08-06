@@ -1,6 +1,6 @@
 param(
     [ValidatePattern('^\d+\.\d+\.\d+$')]
-    [string]$Version = '0.2.76',
+    [string]$Version = '0.2.77',
     [string]$StemTeXSourceDir
 )
 
@@ -12,6 +12,8 @@ $publishDir = Join-Path $root 'src\LaTeXBlocks.Word.AddIn\bin\Release\app.publis
 $powerPointPublishDir = Join-Path $root 'src\LaTeXBlocks.PowerPoint.AddIn\bin\Release\app.publish'
 $stagingDir = Join-Path $root 'dist\staging'
 $outputDir = Join-Path $root 'dist\release'
+$installer = Join-Path $outputDir "LaTeXBlocks-Setup-$Version.exe"
+$checksumPath = $installer + '.sha256'
 $certificatePath = Join-Path $stagingDir 'publisher.cer'
 $msbuild = 'C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\MSBuild.exe'
 $iscc = 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe'
@@ -46,7 +48,7 @@ if ($stemTeXVersion -lt [Version]'0.12.0') {
 }
 
 $rootPath = [IO.Path]::GetFullPath($root).TrimEnd('\') + '\'
-foreach ($path in @($stagingDir, $outputDir, $publishDir, $powerPointPublishDir)) {
+foreach ($path in @($stagingDir, $publishDir, $powerPointPublishDir)) {
     $resolved = [IO.Path]::GetFullPath($path)
     if (-not $resolved.StartsWith($rootPath, [StringComparison]::OrdinalIgnoreCase)) {
         throw "Refusing to clean a path outside the repository: $resolved"
@@ -54,6 +56,10 @@ foreach ($path in @($stagingDir, $outputDir, $publishDir, $powerPointPublishDir)
     if (Test-Path -LiteralPath $resolved) { Remove-Item -LiteralPath $resolved -Recurse -Force }
 }
 New-Item -ItemType Directory -Path $stagingDir, $outputDir -Force | Out-Null
+if ((Test-Path -LiteralPath $installer) -or
+    (Test-Path -LiteralPath $checksumPath)) {
+    throw "Refusing to overwrite an existing release artifact for version $Version."
+}
 
 $certificate = Get-ChildItem Cert:\CurrentUser\My |
     Where-Object { $_.Subject -eq 'CN=LaTeX Blocks Development' -and $_.HasPrivateKey -and $_.NotAfter -gt (Get-Date) } |
@@ -99,7 +105,6 @@ $iss = Join-Path $root 'installer\LaTeXBlocks.iss'
     "/DOutputDir=$outputDir" $iss
 if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed with exit code $LASTEXITCODE." }
 
-$installer = Join-Path $outputDir "LaTeXBlocks-Setup-$Version.exe"
 if (-not (Test-Path -LiteralPath $installer)) { throw "Installer was not produced: $installer" }
 
 $signTool = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin' -Filter signtool.exe -Recurse -ErrorAction SilentlyContinue |
@@ -112,7 +117,6 @@ if ($signTool) {
 }
 
 $hash = Get-FileHash -LiteralPath $installer -Algorithm SHA256
-$checksumPath = $installer + '.sha256'
 [IO.File]::WriteAllText(
     $checksumPath,
     $hash.Hash + '  ' + [IO.Path]::GetFileName($installer) + [Environment]::NewLine,

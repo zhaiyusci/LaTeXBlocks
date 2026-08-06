@@ -443,7 +443,7 @@ namespace LaTeXBlocks.Word
             metadata = metadata.WithFrameSize(svgSize.WidthPt, svgSize.HeightPt);
             var shape = target.InlineShapes.AddPicture(insertionPath, LinkToFile: false, SaveWithDocument: true, Range: target);
             markDocumentMutated?.Invoke();
-            ApplyContract(shape, source, metadata, render.TextColor);
+            ApplyContractMetadata(shape, source, metadata);
             shape = NormalizeWordInlineDrawing(shape, svgSize);
             EnsureInlineWordJoinerBoundaries(shape, metadata);
             ApplyHostRunFormat(shape, metadata, render.TextColor);
@@ -643,7 +643,7 @@ namespace LaTeXBlocks.Word
                 oldShape.Delete();
                 target = document.Range(replacementStart, replacementStart);
                 replacement = target.InlineShapes.AddPicture(insertionPath, LinkToFile: false, SaveWithDocument: true, Range: target);
-                ApplyContract(replacement, source, metadata, render.TextColor);
+                ApplyContractMetadata(replacement, source, metadata);
                 replacement = NormalizeWordInlineDrawing(replacement, svgSize);
                 hostRunFormat.Apply(replacement.Range);
                 ApplyHostRunFormat(replacement, metadata, render.TextColor);
@@ -1689,15 +1689,14 @@ namespace LaTeXBlocks.Word
             internal double MaximumFormulaWidthPt { get; }
         }
 
-        private static void ApplyContract(WordInterop.InlineShape shape, string source,
-            LaTeXBlockMetadata metadata, int textColor)
+        private static void ApplyContractMetadata(WordInterop.InlineShape shape,
+            string source, LaTeXBlockMetadata metadata)
         {
             shape.AlternativeText = NormalizeSourceText(source);
             shape.Title = metadata.ToString();
             shape.LockAspectRatio = HasIndependentFrameResize(metadata)
                 ? Office.MsoTriState.msoFalse
                 : Office.MsoTriState.msoTrue;
-            ApplyHostRunFormat(shape, metadata, textColor);
         }
 
         private static void ApplyHostRunFormat(WordInterop.InlineShape shape,
