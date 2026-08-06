@@ -421,8 +421,17 @@ namespace LaTeXBlocks.Word
                 // '%' is also safe when the source already ends in a TeX comment, while
                 // avoiding \unskip means explicit trailing \kern/\hspace/control-space
                 // nodes remain part of the user's requested box.
+                //
+                // Every natural-width result is one baseline-bearing TeX box, whether
+                // its math style is inline or displaystyle. Give that box LaTeX's
+                // standard minimum line metrics with a zero-width \strut. Taller
+                // material still expands the hbox naturally, and horizontal metrics
+                // remain entirely source-owned. The generic preview border must be
+                // zero: otherwise the standard line box would acquire an unrelated
+                // extra point above and below it.
                 var boxedSource = source.TrimEnd('\r', '\n');
-                return "\\begingroup\n\\setbox255=\\hbox{%\n" + boxedSource + "%\n}%\n" +
+                return "\\begingroup\n\\setbox255=\\hbox{%\n\\strut%\n" + boxedSource + "%\n}%\n" +
+                       "\\global\\PreviewBorder=0pt%\n" +
                        "\\leavevmode\\special{dvisvgm:raw <g id='latexblocks-start' data-x='{?x}' data-y='{?y}'/>}" +
                        "\\special{dvisvgm:bbox new latexblocksink}" +
                        "\\box255" +
@@ -437,10 +446,10 @@ namespace LaTeXBlocks.Word
 
         // A display starting at the beginning of a Block already provides its own
         // vertical TeX layout. The Block-style wrapper must not prepend a paragraph
-        // strut in that case, because it would become a visible empty line above the
+        // in that case, because it would become a visible empty line above the
         // display. This is deliberately narrower than the auto-width rejection in
         // AddMeasurementMarkers: an ordinary paragraph that later contains a display
-        // still benefits from a first-line strut.
+        // still uses the ordinary paragraph wrapper.
         internal static bool StartsWithFullDisplayOrPageWidthEnvironment(string source)
         {
             var uncommented = RemoveTeXCommentsForDetection(source);

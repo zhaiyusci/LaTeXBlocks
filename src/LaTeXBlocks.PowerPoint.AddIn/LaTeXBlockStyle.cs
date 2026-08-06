@@ -85,8 +85,8 @@ namespace LaTeXBlocks.Word
         internal static bool TryParse(string serialized, out LaTeXBlockStyle style)
         {
             style = null;
-            if (string.IsNullOrWhiteSpace(serialized) ||
-                !serialized.StartsWith(Prefix, StringComparison.Ordinal)) return false;
+            if (string.IsNullOrWhiteSpace(serialized)) return false;
+            if (!serialized.StartsWith(Prefix, StringComparison.Ordinal)) return false;
 
             var lineSpacing = DefaultLineSpacing;
             var paddingPt = 0.0;
@@ -151,8 +151,8 @@ namespace LaTeXBlocks.Word
                 }
             }
 
-            style = new LaTeXBlockStyle(lineSpacing, paddingPt, verticalAlignment,
-                textColor, hasBackgroundFill, backgroundColor, borderThicknessPt,
+            style = new LaTeXBlockStyle(lineSpacing, paddingPt, verticalAlignment, textColor,
+                hasBackgroundFill, backgroundColor, borderThicknessPt,
                 borderColor);
             return true;
         }
@@ -183,8 +183,8 @@ namespace LaTeXBlocks.Word
             style = null;
             if (string.IsNullOrWhiteSpace(value)) return false;
             var parts = value.Split(',');
-            if (parts.Length != 8 || !string.Equals(parts[0], "1", StringComparison.Ordinal))
-                return false;
+            if (parts.Length != 8 ||
+                !string.Equals(parts[0], "1", StringComparison.Ordinal)) return false;
             if (!double.TryParse(parts[1], NumberStyles.Float, CultureInfo.InvariantCulture,
                     out var lineSpacing) ||
                 !double.TryParse(parts[2], NumberStyles.Float, CultureInfo.InvariantCulture,
@@ -208,8 +208,8 @@ namespace LaTeXBlocks.Word
             if (hasBackgroundFill && !TryParseHexColor(parts[5], out backgroundColor))
                 return false;
 
-            style = new LaTeXBlockStyle(lineSpacing, paddingPt, verticalAlignment,
-                textColor, hasBackgroundFill, backgroundColor, borderThicknessPt,
+            style = new LaTeXBlockStyle(lineSpacing, paddingPt, verticalAlignment, textColor,
+                hasBackgroundFill, backgroundColor, borderThicknessPt,
                 borderColor);
             return true;
         }
@@ -250,10 +250,10 @@ namespace LaTeXBlocks.Word
             tex.AppendLine("\\setlength{\\baselineskip}{" + FormatDecimal(
                 fontSizePt * LineSpacing) + "pt}%");
             // A styled Fixed Block is a genuine TeX layout box. Office supplies
-            // its outer dimensions; the host has already subtracted padding and
-            // border before passing these content dimensions. Keep paragraph and
-            // alignment semantics here, leaving SVG composition to paint only the
-            // shell around the resulting box.
+            // its outer dimensions; the host has already subtracted padding before
+            // passing these content dimensions. Keep paragraph and vertical
+            // placement semantics here, leaving SVG composition to paint only the
+            // shell and its inside border around the resulting box.
             var hasFixedWidth = contentWidthPt.HasValue && contentWidthPt.Value > 0;
             var hasFixedHeight = contentHeightPt.HasValue && contentHeightPt.Value > 0;
             if (hasFixedWidth)
@@ -269,9 +269,6 @@ namespace LaTeXBlocks.Word
             tex.AppendLine("\\hangindent=0pt\\hangafter=1\\parshape=0%");
             tex.AppendLine("\\everypar{}%");
             tex.AppendLine("\\setbox0=\\vbox{%");
-            // The SVG frame must align a typographic line box, not a visible glyph
-            // outline. A tight preview of just "x" otherwise starts at the x-height,
-            // whereas a text box's Top edge is above it by the font's ascender space.
             // A standalone display already owns a vertical TeX list. Do not insert
             // *anything* which opens a paragraph before or after it: \noindent,
             // \color and \par can all change a tight preview's display geometry.
@@ -286,13 +283,14 @@ namespace LaTeXBlocks.Word
             }
             else
             {
-                // Rebuild the strut after assigning the final concrete baseline
-                // distance. \selectfont has made a strut for its prior baseline,
-                // which can otherwise disagree with the user-selected leading.
-                tex.AppendLine("\\setbox\\strutbox=\\hbox{\\vrule height .7\\baselineskip depth .3\\baselineskip width 0pt}");
-                // The first and final real text lines retain a normal LaTeX strut.
-                // Thus their SVG viewport has a stable ascent/depth even for x-height
-                // lowercase text, while tall mathematics still grows it naturally.
+                // TeX derives a paragraph line's height/depth from the glyphs on
+                // that line. A lone lowercase run would therefore expose only its
+                // x-height at the top of a fixed Block. Define the Block's stable
+                // typographic line box from the selected baseline distance and put
+                // it on the first and final text lines. Tall content can still grow
+                // beyond it naturally. This remains entirely inside TeX; the SVG
+                // shell does not infer or add any vertical offset.
+                tex.AppendLine("\\setbox\\strutbox=\\hbox{\\vrule height .7\\baselineskip depth .3\\baselineskip width 0pt}%");
                 tex.AppendLine("\\noindent\\strut%");
                 tex.AppendLine("\\color{latexblocksforeground}%");
                 // A wrapper newline must not become a trailing TeX space. Preserve

@@ -29,6 +29,28 @@ Word persists character position only in whole points. The add-in maps TeX depth
 baseline position and stores the fractional residual in the SVG viewBox. This is vertical TeX-box geometry, not a
 horizontal word-spacing workaround.
 
+## Single-baseline content follows LaTeX's standard strut convention
+
+A TeX paragraph line has no content-independent font rectangle: its height and depth are the maxima of the nodes
+actually present on that line. Consequently, a lowercase-only first line can otherwise expose only its x-height, and
+a final line without a descender can otherwise have zero depth. LaTeX Blocks places a zero-width strut in every
+natural-width, single-baseline `hbox`, regardless of whether its mathematics uses inline style or `\displaystyle`.
+Ordinary styled Block text applies the same convention to its outer text lines before `preview` measures the completed
+TeX box. The strut contributes no horizontal advance or visible ink; it only establishes a stable minimum height and
+depth. Taller glyphs, CJK text, and mathematics still enlarge the line naturally because TeX retains the maximum
+dimensions. These standard line boxes use `\PreviewBorder=0pt`; a generic preview margin must not add unrelated
+vertical space.
+
+LaTeX Blocks deliberately follows the LaTeX kernel's standard `\strutbox` convention: the minimum height is
+`0.7 × \baselineskip` above the baseline and the minimum depth is `0.3 × \baselineskip` below it. These ratios are a
+typographic line-box policy, **not** measured ascent/descent values for Arial, SimHei, the selected CJK font, or the
+math font. They are retained because they give the two Office hosts stable, profile-independent outer line geometry
+and match normal LaTeX semantics. A future font-metric-based policy would require an explicit profile contract for
+mixed Latin, CJK, and math fonts; it must not be inferred silently from whichever glyphs happen to occur in a Block.
+True page-width or multi-line vertical display structures do not have one line baseline and remain outside this
+single-baseline policy. Natural-width numbered displays are reduced to a baseline-bearing `\displaystyle` hbox and
+therefore do use the same minimum strut.
+
 ## PowerPoint has blocks, not inline math
 
 PowerPoint's text system is not a full rich-text layout surface for arbitrary embedded OLE/SVG inline objects. The

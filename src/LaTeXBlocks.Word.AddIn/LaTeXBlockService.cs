@@ -6,6 +6,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
+using System.Xml;
 using Office = Microsoft.Office.Core;
 using WordInterop = Microsoft.Office.Interop.Word;
 
@@ -258,11 +259,15 @@ namespace LaTeXBlocks.Word
             {
                 textColor = NormalizeTextColor(textColor);
                 // Styled block requests set PreviewBorder globally at TeX shipout.
-                // Restore the legacy border before every unstyled Auto, numbered,
-                // or pre-style Fixed render so one Block cannot leak viewport state
-                // into the next request in the warm StemTeX worker.
-                renderSource = "\\global\\PreviewBorder=1pt\n" + ApplyTextColor(renderSource, textColor,
-                    mode == LaTeXBlockLayoutMode.Auto);
+                // A natural-width hbox now owns a standard zero-width TeX strut, so
+                // Auto content and natural-width displaystyle math use no unrelated
+                // preview border. Legacy unstyled Fixed renders retain the historical
+                // 1pt border. Set either value on every request so one Block cannot
+                // leak viewport state into the next request in the warm worker.
+                renderSource = "\\global\\PreviewBorder=" +
+                    (mode == LaTeXBlockLayoutMode.Auto ? "0pt\n" : "1pt\n") +
+                    ApplyTextColor(renderSource, textColor,
+                        mode == LaTeXBlockLayoutMode.Auto);
             }
             var result = committed
                 ? await renderers.RenderQueuedAsync(profile, renderSource, rendererWidthPt,
@@ -296,19 +301,11 @@ namespace LaTeXBlocks.Word
         internal WordInterop.InlineShape InsertRendered(string source, double widthPt,
             LaTeXBlockLayoutMode mode, LaTeXBlockRender render, LaTeXBlockStyle style)
         {
-            return InsertRenderedCore(source, widthPt, mode, render, style, null);
-        }
-
-        internal WordInterop.InlineShape InsertRenderedAtHostPosition(string source,
-            double widthPt, LaTeXBlockLayoutMode mode, LaTeXBlockRender render,
-            int hostPosition)
-        {
-            return InsertRenderedCore(source, widthPt, mode, render, null, hostPosition);
+            return InsertRenderedCore(source, widthPt, mode, render, style);
         }
 
         private WordInterop.InlineShape InsertRenderedCore(string source, double widthPt,
-            LaTeXBlockLayoutMode mode, LaTeXBlockRender render, LaTeXBlockStyle style,
-            int? hostPositionOverride)
+            LaTeXBlockLayoutMode mode, LaTeXBlockRender render, LaTeXBlockStyle style)
         {
             EnsureDocument();
             if (render == null) throw new ArgumentNullException(nameof(render));
@@ -327,7 +324,6 @@ namespace LaTeXBlocks.Word
                 application.UndoRecord.StartCustomRecord("Insert LaTeX Block");
                 undoStarted = true;
                 return InsertRenderedAt(target, source, mode, render, metadata, true,
-                    hostPositionOverride,
                     () => documentMutated = true);
             }
             catch (Exception exception)
@@ -431,11 +427,9 @@ namespace LaTeXBlocks.Word
         private WordInterop.InlineShape InsertRenderedAt(WordInterop.Range requestedTarget, string source,
             LaTeXBlockLayoutMode mode, LaTeXBlockRender render, LaTeXBlockMetadata metadata,
             bool select,
-            int? hostPositionOverride = null,
             Action markDocumentMutated = null)
         {
             var target = requestedTarget.Duplicate;
-            var hostPosition = hostPositionOverride ?? ResolveRangePosition(target, 0);
             var replacesText = target.Start != target.End;
             target.Text = string.Empty;
             if (replacesText) markDocumentMutated?.Invoke();
@@ -449,10 +443,10 @@ namespace LaTeXBlocks.Word
             metadata = metadata.WithFrameSize(svgSize.WidthPt, svgSize.HeightPt);
             var shape = target.InlineShapes.AddPicture(insertionPath, LinkToFile: false, SaveWithDocument: true, Range: target);
             markDocumentMutated?.Invoke();
-            ApplyContract(shape, source, metadata, render.TextColor, hostPosition);
+            ApplyContract(shape, source, metadata, render.TextColor);
             shape = NormalizeWordInlineDrawing(shape, svgSize);
             EnsureInlineWordJoinerBoundaries(shape, metadata);
-            ApplyHostRunFormat(shape, metadata, render.TextColor, hostPosition);
+            ApplyHostRunFormat(shape, metadata, render.TextColor);
             if (select) MoveCaretAfterInlineFormula(shape, metadata);
             return shape;
         }
@@ -465,15 +459,22 @@ namespace LaTeXBlocks.Word
                                    metadata.Role == LaTeXBlockRole.NumberedEquation;
             var style = metadata != null && metadata.HasExplicitStyle ? metadata.Style : null;
             var textColor = style != null ? ToWordColor(style.TextColor) : ResolveTextColor(oldShape.Range);
+            var preserveFixedFrame = metadata != null &&
+                metadata.Mode == LaTeXBlockLayoutMode.Fixed &&
+                metadata.Role == LaTeXBlockRole.Content &&
+                mode == LaTeXBlockLayoutMode.Fixed;
             var render = RenderPreview(source, widthPt, mode, profile, size, displayMathStyle,
-                textColor, style);
+                textColor, style,
+                preserveFixedFrame && style != null ? oldShape.Height : (double?)null,
+                preserveFixedFrame && style != null ? oldShape.Width : (double?)null);
             // UpdateBlock is also used by callers outside the editor. Preserve a
             // Fixed Content Block's exact Word-owned outer viewport there too;
             // otherwise replacing the SVG would silently restore its natural
             // content size and discard a user resize.
-            if (metadata != null && metadata.Mode == LaTeXBlockLayoutMode.Fixed &&
-                metadata.Role == LaTeXBlockRole.Content && mode == LaTeXBlockLayoutMode.Fixed)
-                render = FrameFloatingRender(render, oldShape.Width, oldShape.Height, style);
+            // Styled Blocks already gave that exact frame to TeX, which owns the
+            // vertical alignment. Only legacy unstyled Blocks need an SVG-only frame.
+            if (preserveFixedFrame && style == null)
+                render = FrameFloatingRender(render, oldShape.Width, oldShape.Height);
             return UpdateRendered(oldShape, source, widthPt, mode, render, selectReplacement,
                 style);
         }
@@ -584,24 +585,35 @@ namespace LaTeXBlocks.Word
             var svgSize = ReadSvgPhysicalSize(render.SvgBytes);
             var styleData = mode == LaTeXBlockLayoutMode.Fixed &&
                 previous.Role == LaTeXBlockRole.Content
-                ? (style != null ? style.ToMetadataValue() : previous.StyleData)
+                ? (style != null
+                    ? style.ToMetadataValue()
+                    : previous.HasExplicitStyle
+                        ? previous.Style.ToMetadataValue()
+                        : null)
                 : null;
             var metadata = new LaTeXBlockMetadata(previous.Id, widthPt, render.DepthPt, mode,
                 render.FontSizePt, previous.Role, svgSize.WidthPt, svgSize.HeightPt, styleData);
             var previousUsesInlineWordJoinerBoundaries = UsesInlineWordJoinerBoundaries(previous);
-            // Baseline placement is derived layout, not state owned by the old
-            // drawing run. In particular, a damaged/missing w:position must be
-            // repaired by Update instead of being interpreted as an intentional
-            // raised host baseline. Resolve the surrounding text baseline before
-            // replacing the shape, then apply the new TeX depth below it.
-            var hostPosition = ResolveSurroundingTextPosition(oldShape);
+            var nativeTextColor = NativeTextColorDescriptor.Automatic;
+            var preserveNativeTextColor = !previous.HasExplicitStyle &&
+                NativeTextColorDescriptor.TryCapture(oldShape.Range,
+                    out nativeTextColor);
+            // Baseline placement is derived layout, not state owned by either the
+            // old drawing run or neighboring text. Word supplies the current line
+            // baseline; the new TeX depth is the only required offset.
             target.Collapse(WordInterop.WdCollapseDirection.wdCollapseStart);
             WordInterop.InlineShape replacement = null;
+            WordInlineRunFormatSnapshot hostRunFormat = null;
             var document = oldShape.Range.Document;
             var undoStarted = false;
             var documentMutated = false;
             try
             {
+                // Replacing an InlineShape creates a new Word drawing character.
+                // Preserve the old character's ordinary text-run formatting, then
+                // deliberately overwrite only the properties owned by the freshly
+                // rendered formula (size, colour and derived baseline) below.
+                hostRunFormat = WordInlineRunFormatSnapshot.Capture(oldShape.Range);
                 application.UndoRecord.StartCustomRecord("Update LaTeX Block");
                 undoStarted = true;
 
@@ -630,7 +642,7 @@ namespace LaTeXBlocks.Word
                 var insertionPath = PrepareInsertionSvg(render, mode);
                 replacement = target.InlineShapes.AddPicture(insertionPath, LinkToFile: false, SaveWithDocument: true, Range: target);
                 documentMutated = true;
-                ApplyContract(replacement, source, metadata, render.TextColor, hostPosition);
+                ApplyContract(replacement, source, metadata, render.TextColor);
                 replacement = NormalizeWordInlineDrawing(replacement, svgSize);
 
                 // A fixed block has no owned boundary characters. If it becomes an
@@ -644,7 +656,14 @@ namespace LaTeXBlocks.Word
                     if (!IsWordJoiner(AdjacentCharacter(oldShape.Range, false)))
                         EnsureInlineWordJoiner(replacement, false);
                 }
-                ApplyHostRunFormat(replacement, metadata, render.TextColor, hostPosition);
+                hostRunFormat.Apply(replacement.Range);
+                ApplyHostRunFormat(replacement, metadata, render.TextColor);
+                // ApplyContract and NormalizeWordInlineDrawing rebuild the drawing run,
+                // and ApplyHostRunFormat deliberately writes the resolved render RGB.
+                // Restore Word's richer native value last so a theme colour remains a
+                // live theme slot+tint rather than being silently downgraded to RGB.
+                if (preserveNativeTextColor)
+                    nativeTextColor.ApplyTo(replacement.Range);
                 oldShape.Delete();
                 if (selectReplacement)
                 {
@@ -674,6 +693,7 @@ namespace LaTeXBlocks.Word
             }
             finally
             {
+                hostRunFormat?.Dispose();
                 if (undoStarted)
                     try { application.UndoRecord.EndCustomRecord(); } catch { }
             }
@@ -742,21 +762,20 @@ namespace LaTeXBlocks.Word
         }
 
         /// <summary>
-        /// Rebuilds a fixed Block at its exact Word frame. Styled blocks start from
-        /// the original TeX layout box, so its TeX-owned alignment and the SVG
-        /// padding/fill/border shell move together instead of becoming two frames.
+        /// Gives a legacy unstyled fixed Block its exact Word-owned transparent
+        /// viewport. Styled Blocks receive the frame before TeX layout and never
+        /// pass through this SVG-only fallback.
         /// </summary>
         internal LaTeXBlockRender FrameFloatingRender(LaTeXBlockRender render,
-            double frameWidthPt, double frameHeightPt, LaTeXBlockStyle style = null)
+            double frameWidthPt, double frameHeightPt)
         {
             if (render == null) throw new ArgumentNullException(nameof(render));
-            style = style ?? render.Style;
-            var framedBytes = style != null
-                ? LaTeXBlockSvgFrame.Decorate(render.ContentSvgBytes, style,
-                    frameWidthPt, frameHeightPt)
-                : FrameSvg(render.SvgBytes, frameWidthPt, frameHeightPt);
+            if (render.Style != null)
+                throw new InvalidOperationException(
+                    "Styled Blocks must be rendered against their exact outer frame before SVG composition.");
+            var framedBytes = FrameSvg(render.SvgBytes, frameWidthPt, frameHeightPt);
             return new LaTeXBlockRender(WriteSvg(framedBytes), framedBytes, render.DepthPt,
-                render.FontSizePt, render.TextColor, render.ContentSvgBytes, style);
+                render.FontSizePt, render.TextColor, render.ContentSvgBytes, null);
         }
 
         internal bool TryGetSelectedBlock(out WordInterop.InlineShape shape, out LaTeXBlockMetadata metadata)
@@ -775,6 +794,90 @@ namespace LaTeXBlocks.Word
                 }
             }
             return false;
+        }
+
+        /// <summary>
+        /// Returns an auto-width formula only while Word is exposing its ordinary
+        /// exact InlineShape selection. For ordinary inline content the two U+2060
+        /// placement boundaries are not part of the user's selection: including them
+        /// changes copy, navigation and picture-handle semantics even though they have
+        /// no visible width. Numbered auto-width formulas use the same exact selection
+        /// contract without those boundaries.
+        /// </summary>
+        internal bool TryGetExactlySelectedInlineFormula(out WordInterop.InlineShape shape)
+        {
+            shape = null;
+            if (application.Documents.Count == 0 || application.Selection == null)
+                return false;
+            var selection = application.Selection;
+            if (selection.Type != WordInterop.WdSelectionType.wdSelectionInlineShape ||
+                selection.InlineShapes.Count != 1)
+                return false;
+            var candidate = selection.InlineShapes[1];
+            if (!TryReadContract(candidate, out var metadata, out _) ||
+                metadata.Mode != LaTeXBlockLayoutMode.Auto ||
+                selection.Start != candidate.Range.Start ||
+                selection.End != candidate.Range.End)
+                return false;
+            shape = candidate;
+            return true;
+        }
+
+        /// <summary>
+        /// Word's built-in Font Color control is enabled for an exact InlineShape but
+        /// performs no run-format mutation.  After the accessibility layer reports an
+        /// actual colour commit, execute the same control against a temporary collapsed
+        /// caret to obtain Word's current picker value, restore the exact picture
+        /// selection, and apply that value to the formula's drawing run.
+        /// </summary>
+        internal bool TryApplyCurrentFontColorToSelectedInlineFormula(
+            out WordInterop.InlineShape shape, out int previousColor, out int appliedColor,
+            out NativeTextColorDescriptor descriptor)
+        {
+            shape = null;
+            previousColor = AutomaticTextColor;
+            appliedColor = AutomaticTextColor;
+            descriptor = NativeTextColorDescriptor.Automatic;
+            if (!TryGetExactlySelectedInlineFormula(out var candidate)) return false;
+
+            shape = candidate;
+            previousColor = ResolveTextColor(candidate.Range);
+            var caret = candidate.Range.Duplicate;
+            caret.Collapse(WordInterop.WdCollapseDirection.wdCollapseEnd);
+            var captured = false;
+            try
+            {
+                caret.Select();
+                application.CommandBars.ExecuteMso("FontColorPicker");
+                captured = NativeTextColorDescriptor.TryCaptureCollapsedSelection(
+                    application.Selection, out descriptor);
+            }
+            finally
+            {
+                // The probe is never a user-visible semantic selection.  Restore the
+                // picture even when Office rejects ExecuteMso or returns an unknown
+                // colour representation.
+                try { candidate.Range.Select(); }
+                catch (COMException) { }
+            }
+            if (!captured) return false;
+
+            descriptor.ApplyTo(candidate.Range);
+            appliedColor = ResolveTextColor(candidate.Range);
+            candidate.Range.Select();
+            return true;
+        }
+
+        private static WordInterop.Range TryGetInlineFormulaNativeTextRange(
+            WordInterop.InlineShape shape)
+        {
+            if (shape == null || !TryReadContract(shape, out var metadata, out _) ||
+                !UsesInlineWordJoinerBoundaries(metadata))
+                return null;
+            var leadingJoiner = AdjacentCharacter(shape.Range, true);
+            var trailingJoiner = AdjacentCharacter(shape.Range, false);
+            if (!IsWordJoiner(leadingJoiner) || !IsWordJoiner(trailingJoiner)) return null;
+            return shape.Range.Document.Range(leadingJoiner.Start, trailingJoiner.End);
         }
 
         internal bool TryGetSelectedFloatingBlock(out WordInterop.Shape shape, out LaTeXBlockMetadata metadata)
@@ -1261,9 +1364,8 @@ namespace LaTeXBlocks.Word
             // PowerPoint. Enlarging adds room on the right; shrinking clips there.
             var frameViewBoxX = viewBoxX;
             var frameViewBoxHeight = viewBoxHeight * frameHeightPt / naturalHeightPt;
-            // Word has no block vertical-alignment UI.  Match the default
-            // PowerPoint block policy: the TeX viewport begins at the top edge,
-            // so reducing a frame height preserves the first rendered line.
+            // The shared block contract is top-left: reducing a frame height
+            // preserves the first rendered line.
             var frameViewBoxY = viewBoxY;
             var number = CultureInfo.InvariantCulture;
             var newViewBox = frameViewBoxX.ToString("0.######", number) + " " +
@@ -1600,30 +1702,38 @@ namespace LaTeXBlocks.Word
         }
 
         private static void ApplyContract(WordInterop.InlineShape shape, string source,
-            LaTeXBlockMetadata metadata, int textColor, int hostPosition)
+            LaTeXBlockMetadata metadata, int textColor)
         {
             shape.AlternativeText = NormalizeSourceText(source);
             shape.Title = metadata.ToString();
             shape.LockAspectRatio = HasIndependentFrameResize(metadata)
                 ? Office.MsoTriState.msoFalse
                 : Office.MsoTriState.msoTrue;
-            ApplyHostRunFormat(shape, metadata, textColor, hostPosition);
+            ApplyHostRunFormat(shape, metadata, textColor);
         }
 
         private static void ApplyHostRunFormat(WordInterop.InlineShape shape,
-            LaTeXBlockMetadata metadata, int textColor, int hostPosition)
+            LaTeXBlockMetadata metadata, int textColor)
         {
+            // Script placement belongs to the TeX source. Word's Subscript and
+            // Superscript flags are a second size/baseline transform, so they must
+            // never survive onto either a newly inserted or a replacement formula.
+            shape.Range.Font.Subscript = 0;
+            shape.Range.Font.Superscript = 0;
             // The image's physical dimensions already come from the SVG. This run size is
             // Word's semantic host size, used by the Font Size UI and by format-change
             // detection. InsertXML drops the drawing run's w:sz along with w:position, so
             // both values must be restored on the final normalized InlineShape.
             if (metadata.Mode == LaTeXBlockLayoutMode.Auto)
+            {
                 shape.Range.Font.Size = (float)metadata.FontSizePt;
-            // The native Word Font Color is the authoritative user-facing colour.
-            // Its RGB value is also used when generating the SVG, while Alternative
-            // Text remains exactly the author-written TeX source.
+                shape.Range.Font.SizeBi = (float)metadata.FontSizePt;
+            }
+            // This is the colour actually used by the completed render: native Word
+            // Font Color for Auto/legacy objects, or durable style colour for a styled
+            // Fixed Block. Alternative Text remains exactly the author-written source.
             shape.Range.Font.Color = (WordInterop.WdColor)NormalizeTextColor(textColor);
-            ApplyBaselinePosition(shape, metadata, hostPosition);
+            ApplyBaselinePosition(shape, metadata);
             // InsertXML used by NormalizeWordInlineDrawing rebuilds the DrawingML
             // object and may restore Word's default aspect lock. Fixed Content Blocks
             // intentionally own a two-dimensional frame, so restore that setting
@@ -1634,10 +1744,282 @@ namespace LaTeXBlocks.Word
                 shape.LockAspectRatio = Office.MsoTriState.msoFalse;
         }
 
+        /// <summary>
+        /// Captures direct Word character formatting that is independent of formula
+        /// rendering. Font.Duplicate keeps the host font-family, emphasis, underline,
+        /// spacing/scaling, hidden state, and related values without copying the
+        /// drawing itself. Range-level proofing, highlight, and language values are
+        /// captured separately. Size and colour are restored here only as a base
+        /// state and are then overwritten from the merged formula request; vertical
+        /// placement is always cleared and recomputed by ApplyHostRunFormat.
+        /// </summary>
+        private sealed class WordInlineRunFormatSnapshot : IDisposable
+        {
+            private WordInterop.Font font;
+            private readonly int noProofing;
+            private readonly WordInterop.WdColorIndex highlightColorIndex;
+            private readonly WordInterop.WdLanguageID languageId;
+            private readonly WordInterop.WdLanguageID languageIdFarEast;
+            private readonly WordInterop.WdLanguageID languageIdOther;
+
+            private WordInlineRunFormatSnapshot(WordInterop.Font font, int noProofing,
+                WordInterop.WdColorIndex highlightColorIndex,
+                WordInterop.WdLanguageID languageId,
+                WordInterop.WdLanguageID languageIdFarEast,
+                WordInterop.WdLanguageID languageIdOther)
+            {
+                this.font = font;
+                this.noProofing = noProofing;
+                this.highlightColorIndex = highlightColorIndex;
+                this.languageId = languageId;
+                this.languageIdFarEast = languageIdFarEast;
+                this.languageIdOther = languageIdOther;
+            }
+
+            internal static WordInlineRunFormatSnapshot Capture(WordInterop.Range range)
+            {
+                if (range == null) throw new ArgumentNullException(nameof(range));
+                WordInterop.Font sourceFont = null;
+                WordInterop.Font duplicate = null;
+                try
+                {
+                    sourceFont = range.Font;
+                    duplicate = sourceFont.Duplicate;
+                    return new WordInlineRunFormatSnapshot(duplicate, range.NoProofing,
+                        range.HighlightColorIndex, range.LanguageID,
+                        range.LanguageIDFarEast, range.LanguageIDOther);
+                }
+                catch
+                {
+                    if (duplicate != null) Marshal.FinalReleaseComObject(duplicate);
+                    throw;
+                }
+                finally
+                {
+                    if (sourceFont != null) Marshal.ReleaseComObject(sourceFont);
+                }
+            }
+
+            internal void Apply(WordInterop.Range range)
+            {
+                if (range == null) throw new ArgumentNullException(nameof(range));
+                if (font == null) throw new ObjectDisposedException(nameof(WordInlineRunFormatSnapshot));
+                range.Font = font;
+                range.NoProofing = noProofing;
+                range.HighlightColorIndex = highlightColorIndex;
+                range.LanguageID = languageId;
+                range.LanguageIDFarEast = languageIdFarEast;
+                range.LanguageIDOther = languageIdOther;
+            }
+
+            public void Dispose()
+            {
+                if (font == null) return;
+                Marshal.FinalReleaseComObject(font);
+                font = null;
+            }
+        }
+
         private static bool HasIndependentFrameResize(LaTeXBlockMetadata metadata)
         {
             return metadata != null && metadata.Mode == LaTeXBlockLayoutMode.Fixed &&
                    metadata.Role == LaTeXBlockRole.Content;
+        }
+
+        internal enum NativeTextColorKind
+        {
+            Automatic,
+            Direct,
+            Theme
+        }
+
+        /// <summary>
+        /// Word's native font colour is not always an RGB value. Theme colours retain
+        /// a theme slot and tint/shade, while Automatic is a distinct sentinel. Keep
+        /// that semantic value long enough to restore it after Word replaces the SVG;
+        /// the separately resolved BGR integer remains the paint input for StemTeX.
+        /// </summary>
+        internal readonly struct NativeTextColorDescriptor : IEquatable<NativeTextColorDescriptor>
+        {
+            private NativeTextColorDescriptor(NativeTextColorKind kind, int directWordColor,
+                WordInterop.WdThemeColorIndex themeColor, float tintAndShade)
+            {
+                Kind = kind;
+                DirectWordColor = directWordColor;
+                ThemeColor = themeColor;
+                TintAndShade = tintAndShade;
+            }
+
+            internal NativeTextColorKind Kind { get; }
+            internal int DirectWordColor { get; }
+            internal WordInterop.WdThemeColorIndex ThemeColor { get; }
+            internal float TintAndShade { get; }
+
+            internal static NativeTextColorDescriptor Automatic =>
+                new NativeTextColorDescriptor(NativeTextColorKind.Automatic,
+                    AutomaticTextColor, WordInterop.WdThemeColorIndex.wdNotThemeColor, 0);
+
+            internal static NativeTextColorDescriptor Direct(int wordColor)
+            {
+                if (wordColor < 0 || wordColor > 0x00ffffff)
+                    throw new ArgumentOutOfRangeException(nameof(wordColor));
+                return new NativeTextColorDescriptor(NativeTextColorKind.Direct, wordColor,
+                    WordInterop.WdThemeColorIndex.wdNotThemeColor, 0);
+            }
+
+            internal static NativeTextColorDescriptor Theme(
+                WordInterop.WdThemeColorIndex themeColor, float tintAndShade)
+            {
+                if (themeColor == WordInterop.WdThemeColorIndex.wdNotThemeColor)
+                    throw new ArgumentOutOfRangeException(nameof(themeColor));
+                if (float.IsNaN(tintAndShade) || float.IsInfinity(tintAndShade) ||
+                    tintAndShade < -1f || tintAndShade > 1f)
+                    throw new ArgumentOutOfRangeException(nameof(tintAndShade));
+                return new NativeTextColorDescriptor(NativeTextColorKind.Theme, 0,
+                    themeColor, tintAndShade);
+            }
+
+            internal static bool TryCaptureCollapsedSelection(WordInterop.Selection selection,
+                out NativeTextColorDescriptor descriptor)
+            {
+                descriptor = Automatic;
+                if (selection == null || selection.Start != selection.End) return false;
+                WordInterop.Font font = null;
+                try
+                {
+                    // A collapsed Range.Font describes the character on the right in
+                    // several boundary cases. Selection.Font is Word's actual typing
+                    // format, which is exactly what ExecuteMso updates for the probe.
+                    font = selection.Font;
+                    return TryCapture(font, out descriptor);
+                }
+                catch (COMException)
+                {
+                    return false;
+                }
+                finally
+                {
+                    if (font != null) Marshal.ReleaseComObject(font);
+                }
+            }
+
+            internal static bool TryCapture(WordInterop.Range range,
+                out NativeTextColorDescriptor descriptor)
+            {
+                descriptor = Automatic;
+                if (range == null) return false;
+                WordInterop.Font font = null;
+                try
+                {
+                    font = range.Font;
+                    return TryCapture(font, out descriptor);
+                }
+                catch (COMException)
+                {
+                    return false;
+                }
+                finally
+                {
+                    if (font != null) Marshal.ReleaseComObject(font);
+                }
+            }
+
+            private static bool TryCapture(WordInterop.Font font,
+                out NativeTextColorDescriptor descriptor)
+            {
+                descriptor = Automatic;
+                if (font == null) return false;
+                var raw = (int)font.Color;
+                if (raw == UndefinedTextColor) return false;
+                if (raw == AutomaticTextColor)
+                {
+                    descriptor = Automatic;
+                    return true;
+                }
+                if (raw >= 0 && raw <= 0x00ffffff)
+                {
+                    descriptor = Direct(raw);
+                    return true;
+                }
+
+                WordInterop.ColorFormat colorFormat = null;
+                try
+                {
+                    colorFormat = font.TextColor;
+                    if (colorFormat.Type != Office.MsoColorType.msoColorTypeScheme ||
+                        colorFormat.ObjectThemeColor ==
+                            WordInterop.WdThemeColorIndex.wdNotThemeColor)
+                        return false;
+                    var tint = colorFormat.TintAndShade;
+                    if (float.IsNaN(tint) || float.IsInfinity(tint) ||
+                        tint < -1f || tint > 1f)
+                        return false;
+                    descriptor = Theme(colorFormat.ObjectThemeColor, tint);
+                    return true;
+                }
+                catch (COMException)
+                {
+                    return false;
+                }
+                finally
+                {
+                    if (colorFormat != null) Marshal.ReleaseComObject(colorFormat);
+                }
+            }
+
+            internal void ApplyTo(WordInterop.Range range)
+            {
+                if (range == null) throw new ArgumentNullException(nameof(range));
+                WordInterop.Font font = null;
+                WordInterop.ColorFormat colorFormat = null;
+                try
+                {
+                    font = range.Font;
+                    if (Kind == NativeTextColorKind.Automatic)
+                    {
+                        font.Color = (WordInterop.WdColor)AutomaticTextColor;
+                    }
+                    else if (Kind == NativeTextColorKind.Direct)
+                    {
+                        font.Color = (WordInterop.WdColor)DirectWordColor;
+                    }
+                    else
+                    {
+                        colorFormat = font.TextColor;
+                        colorFormat.ObjectThemeColor = ThemeColor;
+                        colorFormat.TintAndShade = TintAndShade;
+                    }
+                }
+                finally
+                {
+                    if (colorFormat != null) Marshal.ReleaseComObject(colorFormat);
+                    if (font != null) Marshal.ReleaseComObject(font);
+                }
+            }
+
+            public bool Equals(NativeTextColorDescriptor other)
+            {
+                return Kind == other.Kind && DirectWordColor == other.DirectWordColor &&
+                       ThemeColor == other.ThemeColor &&
+                       Math.Abs(TintAndShade - other.TintAndShade) < 0.000001f;
+            }
+
+            public override bool Equals(object value)
+            {
+                return value is NativeTextColorDescriptor other && Equals(other);
+            }
+
+            public override int GetHashCode()
+            {
+                unchecked
+                {
+                    var hash = (int)Kind;
+                    hash = (hash * 397) ^ DirectWordColor;
+                    hash = (hash * 397) ^ (int)ThemeColor;
+                    hash = (hash * 397) ^ TintAndShade.GetHashCode();
+                    return hash;
+                }
+            }
         }
 
         internal static int ResolveTextColor(WordInterop.Range target,
@@ -1645,7 +2027,10 @@ namespace LaTeXBlocks.Word
         {
             fallback = NormalizeTextColor(fallback);
             if (target == null) return fallback;
-            if (TryReadTextColor(target.Font, out var color)) return color;
+            if (TryReadTextColor(target.Font, out var color, out var isThemeColor))
+                return color;
+            if (isThemeColor && TryResolveTextColorFromWordOpenXml(target, out color))
+                return color;
 
             // Word returns wdUndefined for a mixed selection. The formula replaces
             // at its start, so use the insertion character's colour just as we do
@@ -1654,7 +2039,11 @@ namespace LaTeXBlocks.Word
             {
                 var insertion = target.Duplicate;
                 insertion.Collapse(WordInterop.WdCollapseDirection.wdCollapseStart);
-                if (TryReadTextColor(insertion.Font, out color)) return color;
+                if (TryReadTextColor(insertion.Font, out color, out isThemeColor))
+                    return color;
+                if (isThemeColor &&
+                    TryResolveTextColorFromWordOpenXml(insertion, out color))
+                    return color;
             }
             return fallback;
         }
@@ -1667,7 +2056,11 @@ namespace LaTeXBlocks.Word
             // For a collapsed run boundary Selection.Font is Word's actual typing
             // formatting. Selection.Range.Font may instead describe the character
             // on the right of the caret.
-            if (TryReadTextColor(selection.Font, out var color)) return color;
+            if (TryReadTextColor(selection.Font, out var color, out var isThemeColor))
+                return color;
+            if (isThemeColor &&
+                TryResolveTextColorFromWordOpenXml(selection.Range, out color))
+                return color;
             return ResolveTextColor(selection.Range, fallback);
         }
 
@@ -1714,79 +2107,129 @@ namespace LaTeXBlocks.Word
                    source + "%\n\\endgroup";
         }
 
-        private static bool TryReadTextColor(WordInterop.Font font, out int color)
+        private static bool TryReadTextColor(WordInterop.Font font, out int color,
+            out bool isThemeColor)
         {
             color = AutomaticTextColor;
+            isThemeColor = false;
             if (font == null) return false;
             var raw = (int)font.Color;
             if (raw == UndefinedTextColor) return false;
-            color = NormalizeTextColor(raw);
-            return true;
-        }
-
-        private static void ApplyBaselinePosition(WordInterop.InlineShape shape, LaTeXBlockMetadata metadata,
-            int hostPosition)
-        {
-            // Word aligns the bottom of an InlineShape to the text baseline. Move the image
-            // character down by the TeX box depth. This is always the TeX/Western baseline:
-            // CJK glyph extents inside the SVG do not define a second alignment reference.
-            // Word persists this API value as whole points. Keep any deliberate baseline
-            // position of the surrounding run, then apply the TeX depth relative to it.
-            shape.Range.Font.Position = hostPosition -
-                (int)Math.Round(metadata.DepthPt, MidpointRounding.AwayFromZero);
-        }
-
-        internal static int ResolveSurroundingTextPosition(WordInterop.InlineShape shape)
-        {
-            if (shape == null) throw new ArgumentNullException(nameof(shape));
-            var anchor = shape.Range;
-
-            // Prefer preceding prose because it is the typing context in which an
-            // inline formula was inserted. Skip our U+2060 boundaries and drawing
-            // characters; neither owns a text baseline. Falling back to following
-            // prose also repairs a formula at the start of a paragraph.
-            if (TryResolveAdjacentTextPosition(anchor, true, out var position))
-                return position;
-            if (TryResolveAdjacentTextPosition(anchor, false, out position))
-                return position;
-            return 0;
-        }
-
-        private static bool TryResolveAdjacentTextPosition(WordInterop.Range anchor,
-            bool before, out int position)
-        {
-            position = 0;
-            const int maximumScan = 64;
-            for (var distance = 1; distance <= maximumScan; distance++)
+            if (raw == AutomaticTextColor)
             {
-                var start = before ? anchor.Start - distance : anchor.End + distance - 1;
-                if (start < 0) return false;
-                var probe = anchor.Duplicate;
-                try
-                {
-                    probe.SetRange(start, start + 1);
-                }
-                catch (COMException)
-                {
-                    return false;
-                }
-
-                var text = probe.Text;
-                if (string.IsNullOrEmpty(text)) continue;
-                var character = text[0];
-                if (character == '\u2060' || character == '\u0001') continue;
-                if (character == '\r' || character == '\a') return false;
-                position = ResolveRangePosition(probe, 0);
+                color = AutomaticTextColor;
                 return true;
+            }
+            if (raw >= 0 && raw <= 0x00ffffff)
+            {
+                color = raw;
+                return true;
+            }
+            // Word exposes theme colours as a negative encoded WdColor through
+            // Font.Color and TextColor.RGB.  That value is not RGB and must not be
+            // collapsed to Automatic.  Word's Flat OPC serialisation of the complete
+            // formula scaffold carries the currently resolved RGB in w:color/@w:val.
+            try
+            {
+                isThemeColor = font.TextColor.Type == Office.MsoColorType.msoColorTypeScheme;
+            }
+            catch (COMException)
+            {
+                isThemeColor = false;
             }
             return false;
         }
 
-        internal static int ResolveRangePosition(WordInterop.Range range, int fallback)
+        private static bool TryResolveTextColorFromWordOpenXml(WordInterop.Range target,
+            out int color)
         {
-            if (range == null) return fallback;
-            var value = (double)range.Font.Position;
-            return value >= -1584 && value <= 1584 ? (int)Math.Round(value) : fallback;
+            color = AutomaticTextColor;
+            if (target == null) return false;
+            try
+            {
+                var serializationRange = target;
+                if (target.InlineShapes.Count == 1)
+                {
+                    var formulaRange = TryGetInlineFormulaNativeTextRange(
+                        target.InlineShapes[1]);
+                    if (formulaRange != null) serializationRange = formulaRange;
+                }
+                return TryParseResolvedTextColorFromWordOpenXml(
+                    serializationRange.WordOpenXML, out color);
+            }
+            catch (COMException)
+            {
+                return false;
+            }
+        }
+
+        internal static bool TryParseResolvedTextColorFromWordOpenXml(string wordOpenXml,
+            out int color)
+        {
+            color = AutomaticTextColor;
+            if (string.IsNullOrWhiteSpace(wordOpenXml)) return false;
+            try
+            {
+                var document = new XmlDocument { XmlResolver = null };
+                document.LoadXml(wordOpenXml);
+                var namespaces = new XmlNamespaceManager(document.NameTable);
+                namespaces.AddNamespace("pkg",
+                    "http://schemas.microsoft.com/office/2006/xmlPackage");
+                namespaces.AddNamespace("w",
+                    "http://schemas.openxmlformats.org/wordprocessingml/2006/main");
+                var mainDocument = document.SelectSingleNode(
+                    "//pkg:part[@pkg:name='/word/document.xml']/pkg:xmlData",
+                    namespaces) ?? (XmlNode)document;
+                var run = mainDocument.SelectSingleNode(".//w:r[w:drawing]", namespaces);
+                if (run == null) return false;
+                var colorNode = run.SelectSingleNode("w:rPr/w:color", namespaces);
+                // Automatic is identified from Font.Color before this parser runs.
+                // A missing node here therefore means the negative COM value was not
+                // a serialised theme colour; retain the caller's normal fallback.
+                if (colorNode == null) return false;
+                var value = colorNode.Attributes?["val",
+                    "http://schemas.openxmlformats.org/wordprocessingml/2006/main"]?.Value;
+                if (string.IsNullOrWhiteSpace(value) ||
+                    string.Equals(value, "auto", StringComparison.OrdinalIgnoreCase))
+                {
+                    color = AutomaticTextColor;
+                    return true;
+                }
+                if (value.Length != 6 ||
+                    !int.TryParse(value, NumberStyles.HexNumber,
+                        CultureInfo.InvariantCulture, out var rgb))
+                    return false;
+                var red = (rgb >> 16) & 0xff;
+                var green = (rgb >> 8) & 0xff;
+                var blue = rgb & 0xff;
+                color = red | (green << 8) | (blue << 16);
+                return true;
+            }
+            catch (XmlException)
+            {
+                return false;
+            }
+        }
+
+        private static void ApplyBaselinePosition(WordInterop.InlineShape shape,
+            LaTeXBlockMetadata metadata)
+        {
+            if (metadata.Mode != LaTeXBlockLayoutMode.Auto)
+            {
+                // A fixed-width Content Block is a page-like frame, not one
+                // baseline-bearing text line. Its vertical placement is already
+                // resolved inside TeX, so no surrounding-run offset applies here.
+                shape.Range.Font.Position = 0;
+                return;
+            }
+            // Word aligns the bottom of an InlineShape to the text baseline. Move the image
+            // character down by the TeX box depth. This is always the TeX/Western baseline:
+            // CJK glyph extents inside the SVG do not define a second alignment reference.
+            // Font.Position is relative to Word's current line baseline. Moving the
+            // image down by its TeX depth makes the baseline inside the SVG coincide
+            // with that line baseline. Neighboring run positions are unrelated.
+            shape.Range.Font.Position =
+                -(int)Math.Round(metadata.DepthPt, MidpointRounding.AwayFromZero);
         }
 
         private static void MoveCaretAfterRange(WordInterop.Range range)
@@ -1966,6 +2409,17 @@ namespace LaTeXBlocks.Word
 
             if (patched == flatOpc) return shape;
             var originalStart = shape.Range.Start;
+            // InsertXML normally appends a temporary paragraph boundary to the
+            // imported Flat OPC run. At the physical end of an existing paragraph,
+            // however, Word reuses the paragraph mark that was already after the
+            // drawing. Remember that distinction before deleting the original
+            // shape: an existing paragraph mark belongs to the document and must
+            // never be removed as normalization scaffolding.
+            var hadParagraphMarkAfter = false;
+            var originalFollowingCharacter = shape.Range.Duplicate;
+            originalFollowingCharacter.Collapse(WordInterop.WdCollapseDirection.wdCollapseEnd);
+            if (originalFollowingCharacter.MoveEnd(WordInterop.WdUnits.wdCharacter, 1) == 1)
+                hadParagraphMarkAfter = originalFollowingCharacter.Text == "\r";
             // InsertXML reconstructs the containing paragraph while importing Flat OPC.
             // Preserve its direct paragraph formatting (notably the equation tab stops)
             // so normalizing one SVG cannot silently rewrite the host paragraph.
@@ -1996,7 +2450,9 @@ namespace LaTeXBlocks.Word
 
             var separator = replacement.Range.Duplicate;
             separator.Collapse(WordInterop.WdCollapseDirection.wdCollapseEnd);
-            if (separator.MoveEnd(WordInterop.WdUnits.wdCharacter, 1) == 1 && separator.Text == "\r")
+            if (!hadParagraphMarkAfter &&
+                separator.MoveEnd(WordInterop.WdUnits.wdCharacter, 1) == 1 &&
+                separator.Text == "\r")
                 separator.Delete();
             replacement.Range.ParagraphFormat = paragraphFormat;
             return replacement;
@@ -2139,6 +2595,18 @@ namespace LaTeXBlocks.Word
             return currentSizePt >= 1 && currentSizePt <= 200 &&
                    Math.Abs(selectedSizePt - currentSizePt) > 0.001 &&
                    Math.Abs(renderedSizePt - currentSizePt) > 0.001;
+        }
+
+        internal static bool TryClassifyHostFormatChange(LaTeXBlockLayoutMode mode,
+            double selectedSizePt, int selectedTextColor, double currentSizePt,
+            int currentTextColor, double renderedSizePt, out bool fontSizeChanged,
+            out bool textColorChanged)
+        {
+            fontSizeChanged = mode == LaTeXBlockLayoutMode.Auto &&
+                ShouldRefreshForHostFontSizeChange(selectedSizePt, currentSizePt,
+                    renderedSizePt);
+            textColorChanged = !TextColorsEqual(selectedTextColor, currentTextColor);
+            return fontSizeChanged || textColorChanged;
         }
 
         private string PrepareInsertionSvg(LaTeXBlockRender render, LaTeXBlockLayoutMode mode)

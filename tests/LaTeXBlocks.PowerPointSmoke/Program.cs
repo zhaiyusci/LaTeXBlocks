@@ -214,19 +214,32 @@ namespace LaTeXBlocks.PowerPointSmoke
                     explicitDefaultRender, explicitDefaultStyle, true);
                 Assert(PowerPointBlockService.IsStyleApplied(explicitDefaultBlock) &&
                        string.Equals(explicitDefaultBlock.Tags[
-                           PowerPointBlockService.StyleAppliedTag], "1", StringComparison.Ordinal),
+                            PowerPointBlockService.StyleAppliedTag], "1", StringComparison.Ordinal),
                     "An explicitly accepted default PowerPoint style was not persisted separately from legacy defaults.");
+                explicitDefaultBlock.Tags.Delete(PowerPointBlockService.StyleAppliedTag);
+                explicitDefaultBlock.Tags.Add(LaTeXBlockStyle.TagName,
+                    "LaTeXBlocksStyle/1;leading=1.2;padding=0;valign=bottom;" +
+                    "text=000000;fill=none;border=0;bordercolor=000000");
+                Assert(PowerPointBlockService.IsStyleApplied(explicitDefaultBlock) &&
+                       PowerPointBlockService.ReadStyle(explicitDefaultBlock)
+                           .VerticalAlignment == LaTeXBlockVerticalAlignment.Bottom,
+                    "A pre-marker PowerPoint style lost its persisted vertical alignment or applied-style semantics.");
                 explicitDefaultBlock.Delete();
                 Release(explicitDefaultBlock);
                 // TeX owns content colour and leading. The SVG owns padding, fill,
-                // border and vertical placement; PowerPoint still receives one
+                // and border; PowerPoint still receives one
                 // ordinary picture whose author-facing source remains unchanged.
                 const string styledSource = "First styled line.\\par Second styled line with $E=mc^2$.";
                 var styledStyle = new LaTeXBlockStyle(1.5, 8,
-                    LaTeXBlockVerticalAlignment.Middle, Color.FromArgb(24, 55, 102),
+                    LaTeXBlockVerticalAlignment.Middle,
+                    Color.FromArgb(24, 55, 102),
                     true, Color.FromArgb(241, 245, 255), 1.25,
                     Color.FromArgb(51, 98, 162));
                 Assert(LaTeXBlockStyle.ReadFromTag(styledStyle.ToString()).Equals(styledStyle) &&
+                       styledStyle.ToString().IndexOf("valign=middle", StringComparison.Ordinal) >= 0 &&
+                       LaTeXBlockStyle.ReadFromTag("LaTeXBlocksStyle/1;leading=1.5;" +
+                           "padding=8;valign=middle;text=183766;fill=F1F5FF;" +
+                           "border=1.25;bordercolor=3362A2").Equals(styledStyle) &&
                        LaTeXBlockStyle.ReadFromTag(null).Equals(LaTeXBlockStyle.Default) &&
                        LaTeXBlockStyle.ReadFromTag("LaTeXBlocksStyle/1;leading=not-a-number;" +
                            "padding=not-a-number;border=not-a-number")
@@ -239,7 +252,7 @@ namespace LaTeXBlocks.PowerPointSmoke
                            StringComparison.Ordinal) &&
                        styledWrapper.IndexOf("\\renewcommand{\\baselinestretch}{1.5}",
                            StringComparison.Ordinal) >= 0 &&
-                       styledWrapper.IndexOf("\\setbox\\strutbox=\\hbox", StringComparison.Ordinal) >= 0 &&
+                       styledWrapper.IndexOf("\\setbox\\strutbox", StringComparison.Ordinal) >= 0 &&
                        styledWrapper.IndexOf("\\setlength{\\parindent}{0pt}", StringComparison.Ordinal) >= 0 &&
                        styledWrapper.IndexOf("\\setlength{\\leftskip}{0pt}", StringComparison.Ordinal) >= 0 &&
                        styledWrapper.IndexOf("\\parshape=0", StringComparison.Ordinal) >= 0 &&
@@ -250,23 +263,31 @@ namespace LaTeXBlocks.PowerPointSmoke
                        styledWrapper.IndexOf("\\colorbox", StringComparison.Ordinal) < 0 &&
                        styledWrapper.IndexOf("\\vbox to ", StringComparison.Ordinal) < 0 &&
                        styledWrapper.IndexOf(styledSource, StringComparison.Ordinal) >= 0,
-                    "The PowerPoint TeX wrapper did not retain a typographic line box without moving frame styling into TeX.");
+                    "The PowerPoint TeX wrapper did not establish stable outer text-line metrics.");
                 var fixedBoxWrapper = styledStyle.WrapSource(styledSource, inheritedSize,
                     true, 200, 80);
+                var topBoxWrapper = new LaTeXBlockStyle(1.2, 0,
+                    LaTeXBlockVerticalAlignment.Top).WrapSource(styledSource, inheritedSize,
+                        true, 200, 80);
+                var bottomBoxWrapper = new LaTeXBlockStyle(1.2, 0,
+                    LaTeXBlockVerticalAlignment.Bottom).WrapSource(styledSource, inheritedSize,
+                        true, 200, 80);
                 Assert(fixedBoxWrapper.IndexOf("\\setlength{\\hsize}{200pt}",
                            StringComparison.Ordinal) >= 0 &&
                        fixedBoxWrapper.IndexOf("\\setbox2=\\vbox to 80pt", StringComparison.Ordinal) >= 0 &&
-                       fixedBoxWrapper.IndexOf("\\vss\\box0\\vss", StringComparison.Ordinal) >= 0 &&
+                       fixedBoxWrapper.IndexOf("\\vss\\box0\\vss%", StringComparison.Ordinal) >= 0 &&
+                       topBoxWrapper.IndexOf("\\box0\\vss%", StringComparison.Ordinal) >= 0 &&
+                       topBoxWrapper.IndexOf("\\vss\\box0", StringComparison.Ordinal) < 0 &&
+                       bottomBoxWrapper.IndexOf("\\vss\\box0%", StringComparison.Ordinal) >= 0 &&
+                       bottomBoxWrapper.IndexOf("\\vss\\box0\\vss%", StringComparison.Ordinal) < 0 &&
                        fixedBoxWrapper.IndexOf("\\hbox to 200pt{\\box2\\hss}",
-                           StringComparison.Ordinal) >= 0,
-                    "A fixed Block did not put its width and vertical alignment into TeX.");
-                // A short lowercase glyph must retain normal ascender/descender
-                // room when a Block is aligned at its top, rather than letting the
-                // SVG crop shrink to the x-height.  The same single-line box is
-                // expected for x-height, cap-height, and descender-bearing text.
-                var typographicBoxStyle = new LaTeXBlockStyle(1.2, 0,
-                    LaTeXBlockVerticalAlignment.Top);
-                var xHeightRender = service.RenderPreviewAsync("x", 180, profile,
+                            StringComparison.Ordinal) >= 0 &&
+                       topBoxWrapper.IndexOf("\\noindent\\strut%", StringComparison.Ordinal) >= 0 &&
+                       fixedBoxWrapper.IndexOf("\\noindent\\strut%", StringComparison.Ordinal) >= 0 &&
+                       bottomBoxWrapper.IndexOf("\\noindent\\strut%", StringComparison.Ordinal) >= 0,
+                    "A fixed Block did not combine stable text-line metrics with TeX Top/Middle/Bottom placement.");
+                var typographicBoxStyle = new LaTeXBlockStyle(1.2, 0);
+                var lowercaseRender = service.RenderPreviewAsync("a", 180, profile,
                     inheritedSize, typographicBoxStyle, null, null, true).GetAwaiter().GetResult();
                 var capHeightRender = service.RenderPreviewAsync("A", 180, profile,
                     inheritedSize, typographicBoxStyle, null, null, true).GetAwaiter().GetResult();
@@ -275,12 +296,21 @@ namespace LaTeXBlocks.PowerPointSmoke
                 var terminalParagraphRender = service.RenderPreviewAsync("x\\par", 180,
                     profile, inheritedSize, typographicBoxStyle, null, null, true)
                     .GetAwaiter().GetResult();
-                var xHeightPt = PowerPointBlockService.ReadSvgHeightPt(xHeightRender.SvgBytes);
-                Assert(Math.Abs(xHeightPt - PowerPointBlockService.ReadSvgHeightPt(capHeightRender.SvgBytes)) < 0.05 &&
-                       Math.Abs(xHeightPt - PowerPointBlockService.ReadSvgHeightPt(descenderRender.SvgBytes)) < 0.05 &&
-                       Math.Abs(xHeightPt - PowerPointBlockService.ReadSvgHeightPt(terminalParagraphRender.SvgBytes)) < 0.05 &&
-                       Math.Abs(xHeightPt - inheritedSize * typographicBoxStyle.LineSpacing) < 0.25,
-                    "A styled fixed Block still aligns a one-line text glyph's ink instead of its final TeX line box.");
+                var lowercaseHeightPt = PowerPointBlockService.ReadSvgHeightPt(
+                    lowercaseRender.SvgBytes);
+                Assert(Math.Abs(lowercaseHeightPt - PowerPointBlockService.ReadSvgHeightPt(
+                           capHeightRender.SvgBytes)) < 0.05 &&
+                       Math.Abs(lowercaseHeightPt - PowerPointBlockService.ReadSvgHeightPt(
+                           descenderRender.SvgBytes)) < 0.05 &&
+                       Math.Abs(lowercaseHeightPt - PowerPointBlockService.ReadSvgHeightPt(
+                           terminalParagraphRender.SvgBytes)) < 0.05 &&
+                       Math.Abs(lowercaseHeightPt - inheritedSize *
+                           typographicBoxStyle.LineSpacing) < 0.25 &&
+                       Math.Abs(ReadSvgViewBoxY(lowercaseRender.SvgBytes) -
+                           ReadSvgViewBoxY(capHeightRender.SvgBytes)) < 0.05 &&
+                       Math.Abs(ReadSvgViewBoxY(lowercaseRender.SvgBytes) -
+                           ReadSvgViewBoxY(descenderRender.SvgBytes)) < 0.05,
+                    "A lowercase-only PowerPoint Block collapsed to its ink instead of a full TeX line box.");
                 var displayWrapper = typographicBoxStyle.WrapSource("\\[E=mc^2\\]",
                     inheritedSize, true);
                 Assert(displayWrapper.IndexOf("\\noindent\\strut", StringComparison.Ordinal) < 0 &&
@@ -345,7 +375,7 @@ namespace LaTeXBlocks.PowerPointSmoke
                        !string.Equals(Convert.ToBase64String(topRender.SvgBytes),
                            Convert.ToBase64String(bottomRender.SvgBytes),
                            StringComparison.Ordinal),
-                    "Top and bottom TeX vertical alignment did not produce distinct fixed-height boxes.");
+                    "Top and Bottom did not produce distinct TeX-aligned fixed-height boxes.");
                 const string leadingSource = "A deliberately long ordinary sentence wraps over several lines " +
                     "inside this narrow TeX block so the selected line spacing is measurable.";
                 var tightLeading = service.RenderPreviewAsync(leadingSource, 110, profile,
@@ -355,35 +385,23 @@ namespace LaTeXBlocks.PowerPointSmoke
                 Assert(PowerPointBlockService.ReadSvgHeightPt(looseLeading.SvgBytes) >
                        PowerPointBlockService.ReadSvgHeightPt(tightLeading.SvgBytes) + 8,
                     "The TeX line-spacing control did not change ordinary paragraph leading.");
-                // Top is also the style default. Its bare-SVG path must therefore
-                // honour the chosen vertical policy rather than silently using the
-                // historical centered viewport when a user changes only the host
-                // frame height.
+                // A bare SVG frame preserves the TeX viewport's top-left origin.
                 var defaultNaturalHeight = PowerPointBlockService.ReadSvgHeightPt(render.SvgBytes);
                 var defaultTopFrame = PowerPointBlockService.FrameSvg(render.SvgBytes,
                     PowerPointBlockService.ReadSvgWidthPt(render.SvgBytes),
-                    defaultNaturalHeight + 42, LaTeXBlockVerticalAlignment.Top);
-                var defaultMiddleFrame = PowerPointBlockService.FrameSvg(render.SvgBytes,
-                    PowerPointBlockService.ReadSvgWidthPt(render.SvgBytes),
-                    defaultNaturalHeight + 42, LaTeXBlockVerticalAlignment.Middle);
-                var defaultBottomFrame = PowerPointBlockService.FrameSvg(render.SvgBytes,
-                    PowerPointBlockService.ReadSvgWidthPt(render.SvgBytes),
-                    defaultNaturalHeight + 42, LaTeXBlockVerticalAlignment.Bottom);
+                    defaultNaturalHeight + 42);
                 Assert(Math.Abs(ReadSvgViewBoxY(defaultTopFrame) -
-                           ReadSvgViewBoxY(render.SvgBytes)) < 0.001 &&
-                       ReadSvgViewBoxY(defaultTopFrame) >
-                           ReadSvgViewBoxY(defaultMiddleFrame) + 0.1 &&
-                       ReadSvgViewBoxY(defaultMiddleFrame) >
-                           ReadSvgViewBoxY(defaultBottomFrame) + 0.1,
-                    "Top on a default PowerPoint block did not anchor the TeX viewport to the top of its host frame.");
+                            ReadSvgViewBoxY(render.SvgBytes)) < 0.001,
+                    "A default PowerPoint block did not keep the TeX viewport at the top of its host frame.");
                 var leftAnchoredFrame = PowerPointBlockService.FrameSvg(render.SvgBytes,
                     PowerPointBlockService.ReadSvgWidthPt(render.SvgBytes) + 42,
-                    defaultNaturalHeight, LaTeXBlockVerticalAlignment.Top);
+                    defaultNaturalHeight);
                 Assert(Math.Abs(ReadSvgViewBoxDimension(leftAnchoredFrame, 0) -
                                 ReadSvgViewBoxDimension(render.SvgBytes, 0)) < 0.001,
                     "A wider PowerPoint Block centered the TeX viewport instead of keeping its left edge fixed.");
                 var constrainedStyle = new LaTeXBlockStyle(1.2, 6,
-                    LaTeXBlockVerticalAlignment.Bottom, Color.Black, true,
+                    LaTeXBlockVerticalAlignment.Bottom,
+                    Color.Black, true,
                     Color.FromArgb(250, 250, 250), 0.75, Color.Black);
                 var constrainedRender = service.RenderPreviewAsync(leadingSource, 110,
                     profile, inheritedSize, constrainedStyle, 24).GetAwaiter().GetResult();

@@ -98,12 +98,16 @@ The visual SVG and its source are one semantic object, not an image plus a dupli
 - Title metadata stores only identity and rendering/layout facts needed to edit the object.
 - For Word inline and numbered formulas, the drawing run's native `Font.Color` remains the authoritative text color.
   Fixed Content Blocks instead persist a declarative block style in their Title metadata; their editor is the
-  authoritative color/leading/padding UI. Neither route copies visual settings into Alternative Text.
+  authoritative color/leading/padding/vertical-placement UI. Neither route copies visual settings into Alternative
+  Text.
 - Both hosts share one style model. Before a styled fixed-block preview or committed render, the service subtracts
-  padding and border from the authored outer frame and constructs a scoped TeX box with that exact content width and
-  height. TeX sets paragraph indentation to zero and owns leading, text color, and Top/Middle/Bottom placement. The
-  SVG root only paints padding, background, and border and clips the authored outer frame. It never rewrites
-  Alternative Text or relies on Office Fill/Line formatting for a
+  the configured padding on all four sides from the authored outer frame and constructs a scoped TeX box with that
+  exact content width and height. TeX sets paragraph indentation to zero, keeps horizontal layout left-aligned, and
+  owns leading, text color, and Top/Middle/Bottom placement inside its fixed-height `vbox`. Its ordinary-text branch
+  gives the outer text lines a stable typographic height/depth so lowercase-only content cannot collapse to x-height;
+  standalone display math receives no paragraph or line-box injection. The SVG root places that returned box at the padding origin, paints the background and inside border, and
+  clips the authored outer frame. It performs no second vertical-placement calculation, never rewrites Alternative
+  Text, and does not rely on Office Fill/Line formatting for a
   block's visible decoration. An explicit style is meaningful even at its apparent defaults: 1.20× leading is authored
   in TeX. Legacy shapes with no Word `style=` payload or no PowerPoint explicit-style marker remain on the compatible
   bare route until edited.

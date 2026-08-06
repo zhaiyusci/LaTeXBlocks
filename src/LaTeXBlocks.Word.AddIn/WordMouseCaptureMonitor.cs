@@ -8,8 +8,10 @@ namespace LaTeXBlocks.Word
 {
     /// <summary>
     /// Observes the end of Word's native mouse-capture gesture without subclassing
-    /// an Office window.  Word has no object-model event equivalent to PowerPoint's
-    /// AfterShapeSizeChange, but a resize handle owns mouse capture until mouse-up.
+    /// an Office window. Word has no object-model event for a completed InlineShape
+    /// resize while that object remains selected. Ribbon commands deliberately do not
+    /// use this signal: opening or canceling a gallery can end capture without having
+    /// committed anything.
     ///
     /// The WinEvent callback intentionally does no COM work.  It only queues a
     /// one-shot UI timer on the VSTO thread; Word then has completed its own input

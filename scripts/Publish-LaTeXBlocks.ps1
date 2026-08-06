@@ -1,6 +1,6 @@
 param(
     [ValidatePattern('^\d+\.\d+\.\d+$')]
-    [string]$Version = '0.2.51',
+    [string]$Version = '0.2.61',
     [string]$StemTeXSourceDir
 )
 

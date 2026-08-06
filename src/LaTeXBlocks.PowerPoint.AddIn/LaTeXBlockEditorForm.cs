@@ -178,8 +178,8 @@ namespace LaTeXBlocks.PowerPoint
             verticalAlignmentBox.Items.AddRange(new object[] { "Top", "Middle", "Bottom" });
             verticalAlignmentBox.SelectedIndex = VerticalAlignmentToIndex(style.VerticalAlignment);
             statusToolTip.SetToolTip(verticalAlignmentBox,
-                "Controls the SVG frame only when the block has a fixed height. " +
-                "An auto-height block fits its content.");
+                "Aligns content inside the fixed-height TeX content box. " +
+                "The SVG shell does not apply a second alignment.");
             textColorButton = CreateColorButton(textColor);
             backgroundColorButton = CreateColorButton(backgroundColor);
             borderColorButton = CreateColorButton(borderColor);

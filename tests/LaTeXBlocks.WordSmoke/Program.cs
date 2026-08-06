@@ -6,6 +6,8 @@ using System.Text.RegularExpressions;
 using System.Diagnostics;
 using System.Threading;
 using System.Collections.Generic;
+using System.Windows.Automation;
+using System.Windows.Forms;
 using LaTeXBlocks.Word;
 using WordInterop = Microsoft.Office.Interop.Word;
 
@@ -14,7 +16,11 @@ namespace LaTeXBlocks.WordSmoke
     internal static class Program
     {
         private const string StartupShutdownProbeChild = "LATEXBLOCKS_STARTUP_SHUTDOWN_PROBE_CHILD";
+        private const string UiaFontColorSmoke = "LATEXBLOCKS_UIA_FONT_COLOR_SMOKE";
+        private const string UiaFontColorOnly = "LATEXBLOCKS_UIA_FONT_COLOR_ONLY";
         private const string WordJoiner = "\u2060";
+        private const uint MouseEventLeftDown = 0x0002;
+        private const uint MouseEventLeftUp = 0x0004;
 
         [STAThread]
         private static int Main()
@@ -34,6 +40,16 @@ namespace LaTeXBlocks.WordSmoke
             try
             {
                 Directory.CreateDirectory(artifactDirectory);
+                if (string.Equals(Environment.GetEnvironmentVariable(UiaFontColorOnly), "1",
+                        StringComparison.Ordinal))
+                {
+                    word = new WordInterop.Application();
+                    ownsWord = true;
+                    document = word.Documents.Add();
+                    RunFontColorAccessibilitySignalSmoke(word, document);
+                    Console.WriteLine("Word Font Color accessibility-only smoke passed.");
+                    return 0;
+                }
                 if (string.Equals(Environment.GetEnvironmentVariable(StartupShutdownProbeChild), "1",
                     StringComparison.Ordinal))
                 {
@@ -41,6 +57,7 @@ namespace LaTeXBlocks.WordSmoke
                     RunStartupShutdownProbe();
                     return 0;
                 }
+                RunWordFormatInteractionStateSmoke();
                 Console.WriteLine("StemTeX: testing immediate shutdown during renderer initialization...");
                 RunStartupShutdownProbeInIsolatedHost();
                 renderer = new StemTeXBackend();
@@ -176,6 +193,34 @@ namespace LaTeXBlocks.WordSmoke
                     LaTeXBlockService.ApplyTextColor(source, 0x00ff0000, true), 360, true);
                 var coloredTerminalNewlineSvg = renderer.RenderSvg(profile,
                     LaTeXBlockService.ApplyTextColor(source + "\n", 0x00ff0000, true), 360, true);
+                const double texPointToWordPoint = 72.0 / 72.27;
+                const double inlineLineBoxFontSizePt = 14.0;
+                var inlineLowercase = renderer.RenderSvg(profile, "a", 360, true,
+                    inlineLineBoxFontSizePt);
+                var inlineCapital = renderer.RenderSvg(profile, "A", 360, true,
+                    inlineLineBoxFontSizePt);
+                var inlineDescender = renderer.RenderSvg(profile, "g", 360, true,
+                    inlineLineBoxFontSizePt);
+                var inlineLowercaseHeightPt = LaTeXBlockService.ReadSvgHeightPt(
+                    inlineLowercase.Bytes);
+                var inlineCapitalHeightPt = LaTeXBlockService.ReadSvgHeightPt(
+                    inlineCapital.Bytes);
+                var inlineDescenderHeightPt = LaTeXBlockService.ReadSvgHeightPt(
+                    inlineDescender.Bytes);
+                var expectedInlineLineHeightPt = inlineLineBoxFontSizePt * 1.2 *
+                    texPointToWordPoint;
+                var expectedInlineLineDepthPt = expectedInlineLineHeightPt * 0.3;
+                Assert(Math.Abs(inlineLowercaseHeightPt - inlineCapitalHeightPt) < 0.05 &&
+                       Math.Abs(inlineLowercaseHeightPt - inlineDescenderHeightPt) < 0.05 &&
+                       Math.Abs(inlineLowercaseHeightPt - expectedInlineLineHeightPt) < 0.1 &&
+                       Math.Abs(inlineCapitalHeightPt - expectedInlineLineHeightPt) < 0.1 &&
+                       Math.Abs(inlineDescenderHeightPt - expectedInlineLineHeightPt) < 0.1 &&
+                       Math.Abs(inlineLowercase.DepthPt - inlineCapital.DepthPt) < 0.05 &&
+                       Math.Abs(inlineLowercase.DepthPt - inlineDescender.DepthPt) < 0.05 &&
+                       Math.Abs(inlineLowercase.DepthPt - expectedInlineLineDepthPt) < 0.1 &&
+                       Math.Abs(inlineCapital.DepthPt - expectedInlineLineDepthPt) < 0.1 &&
+                       Math.Abs(inlineDescender.DepthPt - expectedInlineLineDepthPt) < 0.1,
+                    "An auto-width single-baseline box did not use one standard TeX strut without preview padding.");
                 Assert(Math.Abs(LaTeXBlockService.ReadSvgWidthPt(autoSvg.Bytes) -
                                 LaTeXBlockService.ReadSvgWidthPt(coloredAutoSvg.Bytes)) < 0.01,
                     "The TeX color wrapper changed the auto-width formula's logical box.");
@@ -203,7 +248,6 @@ namespace LaTeXBlocks.WordSmoke
                 var logicalBox = renderer.RenderSvg(profile,
                     "\\hbox to 10pt{\\vrule width.1pt height1pt depth0pt\\hfil}", 360, true);
                 var logicalBoxWidthPt = LaTeXBlockService.ReadSvgWidthPt(logicalBox.Bytes);
-                const double texPointToWordPoint = 72.0 / 72.27;
                 Assert(Math.Abs(logicalBoxWidthPt - (10 * texPointToWordPoint)) < 0.01,
                     "Auto-width SVG added horizontal padding around the logical TeX box " +
                     "(width=" + logicalBoxWidthPt + "pt).");
@@ -267,6 +311,18 @@ namespace LaTeXBlocks.WordSmoke
                        reparsedStyledMetadata.HasExplicitStyle &&
                        reparsedStyledMetadata.Style.Equals(styledBlockStyle),
                     "A fixed Block style did not round-trip through Word Title metadata.");
+                var bottomMetadataStyle = LaTeXBlockStyle.ReadFromMetadataValue(
+                    "1,1.45,8.5,b,123456,F0EED0,1.25,654321");
+                Assert(styledBlockStyle.ToMetadataValue().StartsWith("1,1.45,8.5,m,",
+                           StringComparison.Ordinal) &&
+                       bottomMetadataStyle.VerticalAlignment ==
+                           LaTeXBlockVerticalAlignment.Bottom &&
+                       bottomMetadataStyle.Equals(new LaTeXBlockStyle(1.45, 8.5,
+                           LaTeXBlockVerticalAlignment.Bottom,
+                           System.Drawing.Color.FromArgb(0x12, 0x34, 0x56), true,
+                           System.Drawing.Color.FromArgb(0xf0, 0xee, 0xd0), 1.25,
+                           System.Drawing.Color.FromArgb(0x65, 0x43, 0x21))),
+                    "Word did not preserve Top/Middle/Bottom values in its v1 style payload.");
                 var autoMetadataWithStyle = LaTeXBlockMetadata.Create(180, 2.5,
                     LaTeXBlockLayoutMode.Auto, 14, LaTeXBlockRole.Content,
                     styledBlockStyle);
@@ -297,18 +353,52 @@ namespace LaTeXBlocks.WordSmoke
                     "The Word display Block style moved paragraph decoration into TeX.");
                 var fixedWordBoxSource = styledBlockStyle.WrapSource(
                     "First paragraph.\\par Second paragraph.", 14, true, 160, 42);
+                var topWordBoxSource = new LaTeXBlockStyle(1.2, 0,
+                    LaTeXBlockVerticalAlignment.Top).WrapSource(
+                        "First paragraph.\\par Second paragraph.", 14, true, 160, 42);
+                var bottomWordBoxSource = new LaTeXBlockStyle(1.2, 0,
+                    LaTeXBlockVerticalAlignment.Bottom).WrapSource(
+                        "First paragraph.\\par Second paragraph.", 14, true, 160, 42);
                 Assert(fixedWordBoxSource.IndexOf("\\setlength{\\parindent}{0pt}",
                            StringComparison.Ordinal) >= 0 &&
                        fixedWordBoxSource.IndexOf("\\setlength{\\hsize}{160pt}",
                            StringComparison.Ordinal) >= 0 &&
                        fixedWordBoxSource.IndexOf("\\setbox2=\\vbox to 42pt",
                            StringComparison.Ordinal) >= 0 &&
-                       fixedWordBoxSource.IndexOf("\\vss\\box0\\vss",
-                           StringComparison.Ordinal) >= 0,
-                    "Word did not delegate fixed-box paragraph and vertical layout to TeX.");
+                       fixedWordBoxSource.IndexOf("\\vss\\box0\\vss%",
+                            StringComparison.Ordinal) >= 0 &&
+                       topWordBoxSource.IndexOf("\\box0\\vss%",
+                            StringComparison.Ordinal) >= 0 &&
+                       topWordBoxSource.IndexOf("\\vss\\box0",
+                            StringComparison.Ordinal) < 0 &&
+                       bottomWordBoxSource.IndexOf("\\vss\\box0%",
+                            StringComparison.Ordinal) >= 0 &&
+                       bottomWordBoxSource.IndexOf("\\vss\\box0\\vss%",
+                            StringComparison.Ordinal) < 0 &&
+                       topWordBoxSource.IndexOf("\\noindent\\strut%",
+                            StringComparison.Ordinal) >= 0 &&
+                       fixedWordBoxSource.IndexOf("\\noindent\\strut%",
+                            StringComparison.Ordinal) >= 0 &&
+                       bottomWordBoxSource.IndexOf("\\noindent\\strut%",
+                            StringComparison.Ordinal) >= 0,
+                    "Word did not combine stable text-line metrics with TeX Top/Middle/Bottom placement.");
                 var styledSvgBytes = LaTeXBlockSvgFrame.Decorate(svg.Bytes, styledBlockStyle,
                     213.25, 89.75);
                 var styledSvgText = Encoding.UTF8.GetString(styledSvgBytes);
+                var shellTopStyle = new LaTeXBlockStyle(styledBlockStyle.LineSpacing,
+                    styledBlockStyle.PaddingPt, LaTeXBlockVerticalAlignment.Top,
+                    styledBlockStyle.TextColor, styledBlockStyle.HasBackgroundFill,
+                    styledBlockStyle.BackgroundColor, styledBlockStyle.BorderThicknessPt,
+                    styledBlockStyle.BorderColor);
+                var shellBottomStyle = new LaTeXBlockStyle(styledBlockStyle.LineSpacing,
+                    styledBlockStyle.PaddingPt, LaTeXBlockVerticalAlignment.Bottom,
+                    styledBlockStyle.TextColor, styledBlockStyle.HasBackgroundFill,
+                    styledBlockStyle.BackgroundColor, styledBlockStyle.BorderThicknessPt,
+                    styledBlockStyle.BorderColor);
+                var topShell = LaTeXBlockSvgFrame.Decorate(svg.Bytes, shellTopStyle,
+                    213.25, 89.75);
+                var bottomShell = LaTeXBlockSvgFrame.Decorate(svg.Bytes, shellBottomStyle,
+                    213.25, 89.75);
                 Assert(Math.Abs(LaTeXBlockService.ReadSvgWidthPt(styledSvgBytes) - 213.25) < 0.001 &&
                        Math.Abs(LaTeXBlockService.ReadSvgHeightPt(styledSvgBytes) - 89.75) < 0.001 &&
                        styledSvgText.IndexOf("data-latexblocks-frame='1'", StringComparison.Ordinal) >= 0 &&
@@ -317,6 +407,9 @@ namespace LaTeXBlocks.WordSmoke
                        styledSvgText.IndexOf("#654321", StringComparison.Ordinal) >= 0 &&
                        styledSvgText.IndexOf("fill='#123456'", StringComparison.OrdinalIgnoreCase) >= 0,
                     "The shared styled SVG frame did not preserve Word's exact frame or paint all shell layers.");
+                Assert(string.Equals(Encoding.UTF8.GetString(topShell),
+                           Encoding.UTF8.GetString(bottomShell), StringComparison.Ordinal),
+                    "The SVG shell performed a second vertical-alignment calculation after TeX.");
                 var framedSvgBytes = LaTeXBlockService.FrameSvg(svg.Bytes, 213.25, 89.75);
                 Assert(Math.Abs(LaTeXBlockService.ReadSvgWidthPt(framedSvgBytes) - 213.25) < 0.001 &&
                        Math.Abs(LaTeXBlockService.ReadSvgHeightPt(framedSvgBytes) - 89.75) < 0.001 &&
@@ -400,11 +493,25 @@ namespace LaTeXBlocks.WordSmoke
                 catch (ArgumentException) { texTagRejected = true; }
                 Assert(texTagRejected, "A TeX-side tag was allowed to compete with Word-owned numbering.");
                 Console.WriteLine("StemTeX: testing natural-width display-style rendering...");
+                var simpleDisplaySvg = renderer.RenderSvg(profile,
+                    LaTeXBlockService.PrepareDisplayMathSource("\\[a\\]"),
+                    360, true, 10);
                 var displaySvg = renderer.RenderSvg(profile,
                     LaTeXBlockService.PrepareDisplayMathSource("\\[\\sum_{i=1}^n \\frac{1}{i}\\]"),
                     360, true, 10);
-                Assert(LaTeXBlockService.ReadSvgWidthPt(displaySvg.Bytes) < 100,
-                    "Display-style math retained StemTeX's fixed-width page canvas.");
+                var expectedDisplayLineHeightPt = 10 * 1.2 * texPointToWordPoint;
+                var simpleDisplayHeightPt = LaTeXBlockService.ReadSvgHeightPt(
+                    simpleDisplaySvg.Bytes);
+                var tallDisplayHeightPt = LaTeXBlockService.ReadSvgHeightPt(displaySvg.Bytes);
+                Console.WriteLine("StemTeX: display line box simple height/depth=" +
+                    simpleDisplayHeightPt + "/" + simpleDisplaySvg.DepthPt +
+                    "pt, tall=" + tallDisplayHeightPt + "/" + displaySvg.DepthPt + "pt.");
+                Assert(LaTeXBlockService.ReadSvgWidthPt(displaySvg.Bytes) < 100 &&
+                       Math.Abs(simpleDisplayHeightPt - expectedDisplayLineHeightPt) < 0.1 &&
+                       Math.Abs(simpleDisplaySvg.DepthPt -
+                           expectedDisplayLineHeightPt * 0.3) < 0.1 &&
+                       tallDisplayHeightPt > simpleDisplayHeightPt,
+                    "Natural-width display-style math did not combine the standard minimum line box with taller formula metrics.");
                 var commentedDisplaySvg = renderer.RenderSvg(profile, preparedCommentedDisplay, 360, true, 10);
                 Assert(commentedDisplaySvg.Bytes.Length > 0,
                     "A legal trailing TeX comment swallowed the generated display or measurement boundary.");
@@ -454,6 +561,39 @@ namespace LaTeXBlocks.WordSmoke
                 document.Content.Font.Size = 11;
                 document.Range(document.Content.End - 1, document.Content.End - 1).Select();
                 var service = new LaTeXBlockService(word, renderer);
+                var fixedBorderBeforeAuto = service.RenderPreview("a", 180,
+                    LaTeXBlockLayoutMode.Fixed, profile, 14);
+                var serviceAutoLine = service.RenderPreview("a", 180,
+                    LaTeXBlockLayoutMode.Auto, profile, 14);
+                var fixedBorderAfterAuto = service.RenderPreview("a", 180,
+                    LaTeXBlockLayoutMode.Fixed, profile, 14);
+                Assert(Math.Abs(LaTeXBlockService.ReadSvgWidthPt(fixedBorderBeforeAuto.SvgBytes) -
+                           LaTeXBlockService.ReadSvgWidthPt(fixedBorderAfterAuto.SvgBytes)) < 0.02 &&
+                       Math.Abs(LaTeXBlockService.ReadSvgHeightPt(fixedBorderBeforeAuto.SvgBytes) -
+                           LaTeXBlockService.ReadSvgHeightPt(fixedBorderAfterAuto.SvgBytes)) < 0.02 &&
+                       Math.Abs(LaTeXBlockService.ReadSvgHeightPt(serviceAutoLine.SvgBytes) -
+                           expectedInlineLineHeightPt) < 0.1 &&
+                       Math.Abs(serviceAutoLine.DepthPt - expectedInlineLineDepthPt) < 0.1,
+                    "PreviewBorder state leaked between fixed and standard-line-box Auto renders.");
+                var lineBoxStyle = new LaTeXBlockStyle(1.2, 0,
+                    LaTeXBlockVerticalAlignment.Top);
+                var lowercaseLine = service.RenderPreview("a", 180,
+                    LaTeXBlockLayoutMode.Fixed, profile, 14, false,
+                    LaTeXBlockService.AutomaticTextColor, lineBoxStyle);
+                var capitalLine = service.RenderPreview("A", 180,
+                    LaTeXBlockLayoutMode.Fixed, profile, 14, false,
+                    LaTeXBlockService.AutomaticTextColor, lineBoxStyle);
+                var descenderLine = service.RenderPreview("g", 180,
+                    LaTeXBlockLayoutMode.Fixed, profile, 14, false,
+                    LaTeXBlockService.AutomaticTextColor, lineBoxStyle);
+                var lowercaseHeightPt = LaTeXBlockService.ReadSvgHeightPt(
+                    lowercaseLine.SvgBytes);
+                Assert(Math.Abs(lowercaseHeightPt - LaTeXBlockService.ReadSvgHeightPt(
+                           capitalLine.SvgBytes)) < 0.05 &&
+                       Math.Abs(lowercaseHeightPt - LaTeXBlockService.ReadSvgHeightPt(
+                           descenderLine.SvgBytes)) < 0.05 &&
+                       Math.Abs(lowercaseHeightPt - 14 * lineBoxStyle.LineSpacing) < 0.25,
+                    "A lowercase-only Word Block collapsed to its ink instead of a full TeX line box.");
                 var page = document.Sections[1].PageSetup;
                 var expectedTextAreaWidth = (double)page.PageWidth - page.LeftMargin - page.RightMargin;
                 var textAreaWidth = service.ResolveTextAreaWidth(word.Selection.Range);
@@ -579,6 +719,44 @@ namespace LaTeXBlocks.WordSmoke
                 word.Selection.NoProofing = 0;
 
                 var reusableInlineRender = new LaTeXBlockRender(null, autoSvg11.Bytes, autoSvg11.DepthPt, 11);
+                const string paragraphEndProbe = "paragraph-end probe";
+                const string followingParagraphProbe = "following paragraph";
+                var paragraphEndFixtureStart = document.Content.End - 1;
+                document.Range(paragraphEndFixtureStart, paragraphEndFixtureStart).Text =
+                    paragraphEndProbe + "\r" + followingParagraphProbe;
+                var paragraphMarkPosition = paragraphEndFixtureStart + paragraphEndProbe.Length;
+                var paragraphCountBeforeEndInsertion = document.Paragraphs.Count;
+                Assert(document.Range(paragraphMarkPosition, paragraphMarkPosition + 1).Text == "\r" &&
+                       document.Range(paragraphMarkPosition + 1,
+                           paragraphMarkPosition + 1 + followingParagraphProbe.Length).Text ==
+                               followingParagraphProbe,
+                    "The paragraph-end insertion fixture did not contain two distinct paragraphs.");
+                document.Range(paragraphMarkPosition, paragraphMarkPosition).Select();
+                var paragraphEndShape = service.InsertRendered(source, 360,
+                    LaTeXBlockLayoutMode.Auto, reusableInlineRender);
+                AssertInlineWordJoinerBoundary(paragraphEndShape, 2,
+                    "Formula inserted at a paragraph end");
+                Assert(document.Paragraphs.Count == paragraphCountBeforeEndInsertion &&
+                       document.Range(paragraphEndShape.Range.End + 1,
+                           paragraphEndShape.Range.End + 2).Text == "\r" &&
+                       document.Range(paragraphEndShape.Range.End + 2,
+                           paragraphEndShape.Range.End + 2 + followingParagraphProbe.Length).Text ==
+                               followingParagraphProbe,
+                    "Normalizing a formula inserted at a paragraph end consumed the paragraph mark or merged the following paragraph.");
+                paragraphEndShape = service.UpdateRendered(paragraphEndShape, updatedSource, 360,
+                    LaTeXBlockLayoutMode.Auto, reusableInlineRender, false);
+                AssertInlineWordJoinerBoundary(paragraphEndShape, 2,
+                    "Formula updated at a paragraph end");
+                Assert(document.Paragraphs.Count == paragraphCountBeforeEndInsertion &&
+                       document.Range(paragraphEndShape.Range.End + 1,
+                           paragraphEndShape.Range.End + 2).Text == "\r" &&
+                       document.Range(paragraphEndShape.Range.End + 2,
+                           paragraphEndShape.Range.End + 2 + followingParagraphProbe.Length).Text ==
+                               followingParagraphProbe,
+                    "Updating a formula at a paragraph end consumed the paragraph mark or merged the following paragraph.");
+                document.Range(paragraphEndFixtureStart, document.Content.End - 1).Delete();
+                document.Range(document.Content.End - 1, document.Content.End - 1).Select();
+
                 var existingTextStart = document.Content.End - 1;
                 document.Range(existingTextStart, existingTextStart).Text = "and we.";
                 document.Range(existingTextStart, existingTextStart).Select();
@@ -610,13 +788,50 @@ namespace LaTeXBlocks.WordSmoke
                 var raisedTextStart = word.Selection.Start;
                 word.Selection.TypeText("x");
                 var raisedText = document.Range(raisedTextStart, raisedTextStart + 1);
-                Assert(raisedShape.Range.Font.Position == 2 - raisedDepth && raisedText.Font.Position == 0 &&
+                Assert(raisedShape.Range.Font.Position == -raisedDepth && raisedText.Font.Position == 0 &&
                     raisedText.NoProofing == 0 &&
                     document.Range(raisedShape.Range.End, raisedShape.Range.End + 1).Text == WordJoiner,
-                    "Inline baseline compensation was not relative to the deliberate host position, or its " +
+                    "Inline baseline compensation inherited the insertion position, or its " +
                     "picture-only formatting leaked into the paragraph insertion format.");
                 document.Range(raisedStart, document.Content.End - 1).Delete();
                 document.Range(document.Content.End - 1, document.Content.End - 1).Select();
+                word.Selection.Font.Position = 0;
+                word.Selection.NoProofing = 0;
+
+                // Formula placement is independent of the Font.Position carried by
+                // adjacent text and manual-break characters.
+                var manualBreakStart = document.Content.End - 1;
+                const string manualBreakFixture = "before\vafter";
+                document.Range(manualBreakStart, manualBreakStart).Text =
+                    manualBreakFixture;
+                var manualBreakPosition = manualBreakStart + "before".Length;
+                document.Range(manualBreakPosition,
+                    manualBreakPosition + 1).Font.Position = -7;
+                document.Range(manualBreakPosition + 1,
+                    manualBreakPosition + 1 + "after".Length).Font.Position = 0;
+                document.Range(manualBreakPosition + 1,
+                    manualBreakPosition + 1).Select();
+                var visualLineShape = service.InsertRendered(source, 360,
+                    LaTeXBlockLayoutMode.Auto, reusableInlineRender);
+                visualLineShape.Range.Font.Position = 13;
+                visualLineShape = service.UpdateRendered(visualLineShape,
+                    updatedSource, 360, LaTeXBlockLayoutMode.Auto,
+                    reusableInlineRender, false);
+                Assert(visualLineShape.Range.Font.Position ==
+                           -(int)Math.Round(reusableInlineRender.DepthPt,
+                               MidpointRounding.AwayFromZero) &&
+                       document.Range(visualLineShape.Range.End + 1,
+                           visualLineShape.Range.End + 1 + "after".Length).Text ==
+                               "after" &&
+                       document.Range(visualLineShape.Range.End + 1,
+                           visualLineShape.Range.End + 1 + "after".Length)
+                           .Font.Position == 0,
+                    "Updating a visual-line-start formula reused the manual break's " +
+                    "position or changed the following text baseline.");
+                document.Range(manualBreakStart,
+                    document.Content.End - 1).Delete();
+                document.Range(document.Content.End - 1,
+                    document.Content.End - 1).Select();
                 word.Selection.Font.Position = 0;
                 word.Selection.NoProofing = 0;
 
@@ -1179,15 +1394,17 @@ namespace LaTeXBlocks.WordSmoke
                     LaTeXBlockLayoutMode.Fixed, render, style);
                 Assert(LaTeXBlockService.TryReadContract(shape, out var metadata, out var source) &&
                        source == "\\[E=mc^2\\]" && metadata.HasExplicitStyle &&
-                       metadata.Style.Equals(style),
+                       metadata.Style.Equals(style) && shape.Range.Font.Position == 0,
                     "Inserting a styled Word Block lost its TeX source or persistent style.");
+                // Fixed Content has no surrounding-text baseline. Damage the old
+                // character position so Update must restore the mode-owned zero.
+                shape.Range.Font.Position = 9;
                 const double resizedWidth = 278.25;
                 const double resizedHeight = 76.5;
-                var resizedRaw = service.RenderPreview(source, resizedWidth,
+                var resized = service.RenderPreview(source, resizedWidth,
                     LaTeXBlockLayoutMode.Fixed, profile, 14, false,
-                    LaTeXBlockService.ToWordColor(style.TextColor), style);
-                var resized = service.FrameFloatingRender(resizedRaw, resizedWidth,
-                    resizedHeight, style);
+                    LaTeXBlockService.ToWordColor(style.TextColor), style,
+                    resizedHeight, resizedWidth);
                 shape = service.UpdateRendered(shape, source, resizedWidth,
                     LaTeXBlockLayoutMode.Fixed, resized, false, style);
                 var decoratedText = Encoding.UTF8.GetString(resized.SvgBytes);
@@ -1195,6 +1412,7 @@ namespace LaTeXBlocks.WordSmoke
                        metadata.Style.Equals(style) &&
                        Math.Abs(shape.Width - resizedWidth) < 0.05 &&
                        Math.Abs(shape.Height - resizedHeight) < 0.05 &&
+                       shape.Range.Font.Position == 0 &&
                        CountOccurrences(decoratedText, "data-latexblocks-frame='1'") == 1 &&
                        CountOccurrences(decoratedText, "data-latexblocks-border='1'") == 1,
                     "A Word fixed-Block resize did not repaint exactly one persistent SVG style shell.");
@@ -1239,11 +1457,43 @@ namespace LaTeXBlocks.WordSmoke
         {
             const string inlineSource = "$E=mc^2$";
             const string displaySource = "\\[E=mc^2\\]";
+            const string hostText = "Format host ";
             const int wordRed = 0x0000ff;   // WdColor is BGR, so this is RGB FF0000.
             const int wordBlue = 0x00ff0000; // WdColor is BGR, so this is RGB 0000FF.
+            const int surroundingHostPosition = 2;
+            const int customBold = -1;
+            const int customItalic = -1;
+            const int customNoProofing = -1;
+            const WordInterop.WdColorIndex customHighlight =
+                WordInterop.WdColorIndex.wdYellow;
+            const double initialFontSizePt = 14;
+            const double changedFontSizePt = 18;
+            const double movedAwayFontSizePt = 20;
             WordInterop.Document document = null;
             try
             {
+                var colorSignals = new WordFontColorInteractionState();
+                Assert(!colorSignals.Observe(WordFontColorSignal.MoreColorsOpened) &&
+                       !colorSignals.Observe(WordFontColorSignal.MoreColorsClosed) &&
+                       !colorSignals.Observe(WordFontColorSignal.MoreColorsOpened) &&
+                       !colorSignals.Observe(WordFontColorSignal.MoreColorsCanceled) &&
+                       colorSignals.Observe(WordFontColorSignal.MainButtonInvoked) &&
+                       colorSignals.Observe(WordFontColorSignal.PaletteItemCommitted) &&
+                       !colorSignals.Observe(WordFontColorSignal.MoreColorsAccepted),
+                    "The Font Color interaction state confused gallery open/cancel with a commit.");
+                colorSignals = new WordFontColorInteractionState();
+                Assert(!colorSignals.Observe(WordFontColorSignal.MoreColorsOpened) &&
+                       !colorSignals.Observe(WordFontColorSignal.MoreColorsAccepted) &&
+                       colorSignals.Observe(WordFontColorSignal.MoreColorsClosed) &&
+                       !colorSignals.Observe(WordFontColorSignal.MoreColorsClosed),
+                    "The Font Color interaction state did not require one More Colors OK followed by dialog close.");
+                colorSignals = new WordFontColorInteractionState();
+                Assert(!colorSignals.Observe(WordFontColorSignal.MoreColorsOpened) &&
+                       !colorSignals.Observe(WordFontColorSignal.MoreColorsAccepted) &&
+                       !colorSignals.Observe(WordFontColorSignal.MoreColorsRejected) &&
+                       !colorSignals.Observe(WordFontColorSignal.MoreColorsClosed),
+                    "Cancel/close could reuse a stale More Colors acceptance intent.");
+
                 Assert(LaTeXBlockService.ApplyTextColor(inlineSource, wordRed)
                            .IndexOf("\\color[HTML]{FF0000}", StringComparison.Ordinal) >= 0 &&
                        LaTeXBlockService.ApplyTextColor(inlineSource, wordBlue)
@@ -1255,39 +1505,269 @@ namespace LaTeXBlocks.WordSmoke
                 Console.WriteLine("Word: testing native text color for inline and display formulas...");
                 if (File.Exists(documentPath)) File.Delete(documentPath);
                 document = word.Documents.Add();
+                document.Range(0, 0).Text = hostText;
                 document.Content.Font.Name = "Times New Roman";
-                document.Content.Font.Size = 14;
-                document.Range(0, 0).Select();
+                document.Content.Font.Size = (float)initialFontSizePt;
+                document.Range(0, hostText.Length).Font.Position = surroundingHostPosition;
+                document.Range(document.Content.End - 1, document.Content.End - 1).Select();
+                word.Selection.Font.Position = surroundingHostPosition;
                 word.Selection.Font.Color = (WordInterop.WdColor)wordRed;
                 Assert(LaTeXBlockService.TextColorsEqual(
                         LaTeXBlockService.ResolveTextColor(word.Selection), wordRed),
                     "A collapsed Word selection did not expose its native text color.");
 
                 var automaticRender = service.RenderPreview(inlineSource, 360,
-                    LaTeXBlockLayoutMode.Auto, profile, 14);
+                    LaTeXBlockLayoutMode.Auto, profile, initialFontSizePt);
                 var inline = service.InsertBlock(inlineSource, 360,
                     LaTeXBlockLayoutMode.Auto, profile);
-                Assert(inline.AlternativeText == inlineSource &&
+                Assert(LaTeXBlockService.TryReadContract(inline,
+                           out var inlineMetadataBeforeColorRefresh, out _) &&
+                       inline.AlternativeText == inlineSource &&
                        LaTeXBlockService.TextColorsEqual((int)inline.Range.Font.Color, wordRed),
                     "An inline formula did not preserve its raw TeX source and native Word text color.");
                 var inlineRedSvg = service.RenderPreview(inlineSource, 360,
-                    LaTeXBlockLayoutMode.Auto, profile, 14, false, wordRed);
+                    LaTeXBlockLayoutMode.Auto, profile, initialFontSizePt, false, wordRed);
                 Assert(Convert.ToBase64String(automaticRender.SvgBytes) !=
                        Convert.ToBase64String(inlineRedSvg.SvgBytes),
                     "The SVG generated for an explicit Word text color is identical to automatic text color.");
                 Assert(Math.Abs(LaTeXBlockService.ReadSvgWidthPt(automaticRender.SvgBytes) -
-                                LaTeXBlockService.ReadSvgWidthPt(inlineRedSvg.SvgBytes)) < 0.01,
+                                 LaTeXBlockService.ReadSvgWidthPt(inlineRedSvg.SvgBytes)) < 0.01,
                     "Applying Word Font.Color changed the inline formula's TeX box width.");
 
-                // A native color command changes the drawing run first. The event-driven
-                // refresh path then renders the SVG from that same authoritative value.
-                inline.Range.Font.Color = (WordInterop.WdColor)wordBlue;
-                var recoloredInline = service.UpdateBlock(inline, inlineSource, 360,
-                    LaTeXBlockLayoutMode.Auto, profile, 14, false);
-                Assert(recoloredInline.AlternativeText == inlineSource &&
-                       LaTeXBlockService.TextColorsEqual((int)recoloredInline.Range.Font.Color,
-                           wordBlue),
-                    "Updating an inline formula lost the user-selected Word text color.");
+                if (string.Equals(Environment.GetEnvironmentVariable(UiaFontColorSmoke), "1",
+                        StringComparison.Ordinal))
+                    RunFontColorAccessibilitySignalSmoke(word, document);
+
+                // Word enables Font Color for an exact InlineShape selection but the
+                // built-in command is a host no-op. Verify that premise, then exercise
+                // the production collapsed-caret proxy. The transaction must restore
+                // the exact picture selection and never include the two U+2060
+                // placement boundaries in the user's semantic selection.
+                Assert(word.CommandBars.GetEnabledMso("FontColorPicker"),
+                    "Word's built-in Font Color command is disabled in the smoke fixture.");
+                var pickerProbe = document.Range(0, 1);
+                pickerProbe.Select();
+                word.CommandBars.ExecuteMso("FontColorPicker");
+                var pickerTextColor = LaTeXBlockService.ResolveTextColor(pickerProbe);
+                pickerProbe.Font.Color = (WordInterop.WdColor)wordRed;
+                var colorDifferentFromPicker =
+                    LaTeXBlockService.TextColorsEqual(pickerTextColor, wordRed)
+                        ? wordBlue
+                        : wordRed;
+                inline.Range.Font.Color = (WordInterop.WdColor)colorDifferentFromPicker;
+                inline.Range.Select();
+                Assert(IsExactlySelectedInlineShape(word, inline),
+                    "The native Font Color host-contract fixture did not begin with an exact InlineShape selection.");
+                word.CommandBars.ExecuteMso("FontColorPicker");
+                Assert(IsExactlySelectedInlineShape(word, inline) &&
+                       LaTeXBlockService.TextColorsEqual(
+                           LaTeXBlockService.ResolveTextColor(inline.Range),
+                           colorDifferentFromPicker),
+                    "Word unexpectedly applied Font Color to an exact InlineShape selection; " +
+                    "the semantic-selection contract must be revalidated.");
+
+                Assert(service.TryApplyCurrentFontColorToSelectedInlineFormula(
+                           out var nativeTextFormula, out var previousPickerColor,
+                           out var appliedPickerColor, out var pickerDescriptor) &&
+                        nativeTextFormula.Range.Start == inline.Range.Start &&
+                        nativeTextFormula.Range.End == inline.Range.End,
+                    "The selected inline formula did not accept the current Font Color value through the caret proxy.");
+                Assert(IsExactlySelectedInlineShape(word, inline) &&
+                       LaTeXBlockService.TextColorsEqual(previousPickerColor,
+                           colorDifferentFromPicker) &&
+                       LaTeXBlockService.TextColorsEqual(appliedPickerColor,
+                           pickerTextColor) &&
+                       (pickerDescriptor.Kind !=
+                            LaTeXBlockService.NativeTextColorKind.Theme ||
+                        pickerDescriptor.ThemeColor !=
+                            WordInterop.WdThemeColorIndex.wdNotThemeColor),
+                    "The caret proxy did not preserve an exact formula selection or capture the current picker colour.");
+                Assert(
+                        document.Range(inline.Range.Start - 1, inline.Range.Start).Text == WordJoiner &&
+                        document.Range(inline.Range.End, inline.Range.End + 1).Text == WordJoiner,
+                    "The Font Color proxy damaged an inline formula's U+2060 boundaries.");
+                Assert(LaTeXBlockService.TextColorsEqual(
+                           LaTeXBlockService.ResolveTextColor(inline.Range), pickerTextColor) &&
+                       LaTeXBlockService.TextColorsEqual(
+                           LaTeXBlockService.ResolveTextColor(
+                               document.Range(0, hostText.Length)), wordRed),
+                    "The Font Color proxy did not apply the picker colour exclusively to the formula run.");
+
+                // Theme colours are negative encoded values in Font.Color and even in
+                // TextColor.RGB. The complete formula scaffold's Flat OPC contains
+                // Word's resolved w:color/@w:val; consume that RGB rather than
+                // silently treating every theme swatch as Automatic.
+                inline.Range.Font.TextColor.ObjectThemeColor =
+                    WordInterop.WdThemeColorIndex.wdThemeColorAccent1;
+                inline.Range.Font.TextColor.TintAndShade = 0.4f;
+                var rawThemeColor = (int)inline.Range.Font.Color;
+                var resolvedThemeColor = LaTeXBlockService.ResolveTextColor(inline.Range);
+                var themeScaffoldXml = document.Range(inline.Range.Start - 1,
+                    inline.Range.End + 1).WordOpenXML;
+                var themeDescriptor =
+                    LaTeXBlockService.NativeTextColorDescriptor.Automatic;
+                Assert(rawThemeColor < 0 &&
+                       rawThemeColor != LaTeXBlockService.AutomaticTextColor &&
+                       resolvedThemeColor >= 0 && resolvedThemeColor <= 0x00ffffff &&
+                       LaTeXBlockService.TryParseResolvedTextColorFromWordOpenXml(
+                           themeScaffoldXml, out var parsedThemeColor) &&
+                       parsedThemeColor == resolvedThemeColor &&
+                       LaTeXBlockService.NativeTextColorDescriptor.TryCapture(
+                           inline.Range, out themeDescriptor) &&
+                       themeDescriptor.Kind ==
+                           LaTeXBlockService.NativeTextColorKind.Theme &&
+                       themeDescriptor.ThemeColor ==
+                           WordInterop.WdThemeColorIndex.wdThemeColorAccent1 &&
+                       Math.Abs(themeDescriptor.TintAndShade - 0.4f) < 0.000001f &&
+                       LaTeXBlockService.ApplyTextColor(inlineSource, resolvedThemeColor)
+                           .IndexOf("\\color[HTML]", StringComparison.Ordinal) >= 0,
+                    "A Word theme font colour was mistaken for Automatic or was not " +
+                    "resolved from the formula drawing run.");
+                var themeRender = service.RenderCommittedAsync(inlineSource, 360,
+                    LaTeXBlockLayoutMode.Auto, profile, initialFontSizePt, false,
+                    resolvedThemeColor).GetAwaiter().GetResult();
+                inline.Range.Select();
+                inline = service.UpdateRendered(inline, inlineSource, 360,
+                    LaTeXBlockLayoutMode.Auto, themeRender, false);
+                inline.Range.Select();
+                Assert(IsExactlySelectedInlineShape(word, inline) &&
+                       LaTeXBlockService.NativeTextColorDescriptor.TryCapture(
+                           inline.Range, out var replacementThemeDescriptor) &&
+                       replacementThemeDescriptor.Equals(themeDescriptor),
+                    "Replacing a themed formula SVG downgraded its native theme colour to direct RGB.");
+                inline.Range.Font.Color = (WordInterop.WdColor)wordRed;
+
+                // A drawing-run color update happens before the event-driven refresh;
+                // the renderer then consumes that same authoritative Word value.
+                inline.Range.Font.Bold = customBold;
+                inline.Range.Font.Italic = customItalic;
+                inline.Range.Font.Underline = WordInterop.WdUnderline.wdUnderlineSingle;
+                inline.Range.NoProofing = customNoProofing;
+                inline.Range.HighlightColorIndex = customHighlight;
+                // Baseline position is derived state. Damage the old value so this
+                // regression fails if an update snapshots and restores it verbatim.
+                inline.Range.Font.Position = 9;
+                inline.Range.Font.Subscript = -1;
+                Assert(inline.Range.Font.Subscript == -1,
+                    "The format-refresh fixture could not apply stale subscript state.");
+                inline.Range.Select();
+                var selectedFontSizeBeforeColor = (double)inline.Range.Font.Size;
+                var selectedTextColorBeforeColor =
+                    LaTeXBlockService.ResolveTextColor(inline.Range);
+                word.Selection.Font.Color = (WordInterop.WdColor)wordBlue;
+                var liveSelectedFontSize = (double)inline.Range.Font.Size;
+                var liveSelectedTextColor = LaTeXBlockService.ResolveTextColor(inline.Range);
+                var exactSelectionNeedsRefresh =
+                    LaTeXBlockService.TryClassifyHostFormatChange(
+                        inlineMetadataBeforeColorRefresh.Mode,
+                        selectedFontSizeBeforeColor, selectedTextColorBeforeColor,
+                        liveSelectedFontSize, liveSelectedTextColor,
+                        inlineMetadataBeforeColorRefresh.FontSizePt,
+                        out var exactSelectionChangedSize,
+                        out var exactSelectionChangedColor);
+                Assert(IsExactlySelectedInlineShape(word, inline) &&
+                       word.Selection.Range.InlineShapes.Count == 1 &&
+                       LaTeXBlockService.TextColorsEqual(
+                           liveSelectedTextColor, wordBlue) &&
+                       exactSelectionNeedsRefresh && !exactSelectionChangedSize &&
+                       exactSelectionChangedColor,
+                    "Writing Font.Color to an exact InlineShape selection did not update " +
+                    "its observable drawing-run colour, preserve the object selection, " +
+                    "or classify the gesture as a colour-only SVG refresh.");
+                var blueRefreshRender = service.RenderCommittedAsync(inlineSource, 360,
+                    LaTeXBlockLayoutMode.Auto, profile, liveSelectedFontSize, false,
+                    liveSelectedTextColor)
+                    .GetAwaiter().GetResult();
+                var restoreColorSelection = IsExactlySelectedInlineShape(word, inline);
+                Assert(restoreColorSelection,
+                    "The selected formula was no longer selected when its color render completed.");
+                var recoloredInline = service.UpdateRendered(inline, inlineSource, 360,
+                    LaTeXBlockLayoutMode.Auto, blueRefreshRender, false);
+                // CompleteFormatRefresh follows these same two operations. It restores
+                // selection only when the pending drawing was still selected when its
+                // committed render finished; UpdateRendered(false) itself must not move
+                // the user's selection to the trailing insertion point.
+                if (restoreColorSelection)
+                    recoloredInline.Range.Select();
+                WaitFor(() => IsExactlySelectedInlineShape(word, recoloredInline),
+                    2000, "The automatic Font Color refresh did not restore the exact picture selection to the replacement formula.");
+                AssertAutoFormatRefreshState(recoloredInline,
+                    inlineMetadataBeforeColorRefresh.Id, inlineSource, 360,
+                    initialFontSizePt, wordBlue,
+                    blueRefreshRender.DepthPt, customBold, customItalic,
+                    WordInterop.WdUnderline.wdUnderlineSingle, customNoProofing,
+                    customHighlight,
+                    "Automatic Font Color refresh");
+                Assert(Convert.ToBase64String(blueRefreshRender.SvgBytes) !=
+                           Convert.ToBase64String(inlineRedSvg.SvgBytes),
+                    "The automatic Font Color refresh did not replace the red SVG with a blue render.");
+                Assert(!LaTeXBlockService.TryClassifyHostFormatChange(
+                        LaTeXBlockLayoutMode.Auto,
+                        (double)recoloredInline.Range.Font.Size,
+                        LaTeXBlockService.ResolveTextColor(recoloredInline.Range),
+                        (double)recoloredInline.Range.Font.Size,
+                        LaTeXBlockService.ResolveTextColor(recoloredInline.Range),
+                        blueRefreshRender.FontSizePt, out _, out _),
+                    "An unchanged formula selection was classified as another format refresh.");
+
+                // Font size is the other supported native format input. It changes TeX
+                // metrics, so preserve color and unrelated run formatting while deriving
+                // a fresh baseline from the new depth rather than the damaged old value.
+                recoloredInline.Range.Font.Position = 11;
+                recoloredInline.Range.Select();
+                word.Selection.Font.Size = (float)changedFontSizePt;
+                Assert(IsExactlySelectedInlineShape(word, recoloredInline),
+                    "Applying Font Size did not leave the exact formula picture selected for its asynchronous refresh.");
+                var sizeRefreshRender = service.RenderCommittedAsync(inlineSource, 360,
+                    LaTeXBlockLayoutMode.Auto, profile, changedFontSizePt, false, wordBlue)
+                    .GetAwaiter().GetResult();
+                var restoreSizeSelection = IsExactlySelectedInlineShape(word, recoloredInline);
+                Assert(restoreSizeSelection,
+                    "The selected formula was no longer selected when its font-size render completed.");
+                var resizedInline = service.UpdateRendered(recoloredInline, inlineSource, 360,
+                    LaTeXBlockLayoutMode.Auto, sizeRefreshRender, false);
+                if (restoreSizeSelection)
+                    resizedInline.Range.Select();
+                WaitFor(() => IsExactlySelectedInlineShape(word, resizedInline), 2000,
+                    "The automatic Font Size refresh did not restore the exact picture selection to the replacement formula.");
+                Assert(Math.Abs(sizeRefreshRender.DepthPt - blueRefreshRender.DepthPt) > 0.1,
+                    "Changing the requested TeX font size did not produce a new depth for baseline recomputation.");
+                AssertAutoFormatRefreshState(resizedInline,
+                    inlineMetadataBeforeColorRefresh.Id, inlineSource, 360,
+                    changedFontSizePt, wordBlue,
+                    sizeRefreshRender.DepthPt, customBold, customItalic,
+                    WordInterop.WdUnderline.wdUnderlineSingle, customNoProofing,
+                    customHighlight,
+                    "Automatic Font Size refresh");
+
+                // A late render may replace the object, but it may restore selection
+                // only if the old object is still semantically selected at completion.
+                resizedInline.Range.Font.Position = 13;
+                resizedInline.Range.Select();
+                word.Selection.Font.Size = (float)movedAwayFontSizePt;
+                var movedAwayRenderTask = service.RenderCommittedAsync(inlineSource, 360,
+                    LaTeXBlockLayoutMode.Auto, profile, movedAwayFontSizePt, false, wordBlue);
+                document.Range(0, hostText.Length).Select();
+                var movedSelectionStart = word.Selection.Start;
+                var movedSelectionEnd = word.Selection.End;
+                var movedAwayRender = movedAwayRenderTask.GetAwaiter().GetResult();
+                var restoreMovedSelection = IsExactlySelectedInlineShape(word, resizedInline);
+                Assert(!restoreMovedSelection,
+                    "The selection-away fixture still reported the pending formula as selected.");
+                var movedAwayInline = service.UpdateRendered(resizedInline, inlineSource, 360,
+                    LaTeXBlockLayoutMode.Auto, movedAwayRender, false);
+                if (restoreMovedSelection) movedAwayInline.Range.Select();
+                WaitFor(() => word.Selection.Start == movedSelectionStart &&
+                              word.Selection.End == movedSelectionEnd &&
+                              word.Selection.InlineShapes.Count == 0,
+                    2000, "A completed format refresh stole selection back from ordinary text.");
+                AssertAutoFormatRefreshState(movedAwayInline,
+                    inlineMetadataBeforeColorRefresh.Id, inlineSource, 360,
+                    movedAwayFontSizePt, wordBlue,
+                    movedAwayRender.DepthPt, customBold, customItalic,
+                    WordInterop.WdUnderline.wdUnderlineSingle, customNoProofing,
+                    customHighlight,
+                    "Selection-away Font Size refresh");
                 document.SaveAs2(documentPath, WordInterop.WdSaveFormat.wdFormatXMLDocument);
                 document.Close(WordInterop.WdSaveOptions.wdSaveChanges);
                 Release(document);
@@ -1296,12 +1776,16 @@ namespace LaTeXBlocks.WordSmoke
                 document = word.Documents.Open(documentPath, ReadOnly: false);
                 var reopenedInline = document.InlineShapes[1];
                 Assert(reopenedInline.AlternativeText == inlineSource &&
+                       Math.Abs((double)reopenedInline.Range.Font.Size -
+                           movedAwayFontSizePt) < 0.001 &&
                        LaTeXBlockService.TextColorsEqual((int)reopenedInline.Range.Font.Color,
-                           wordBlue),
-                    "The recolored inline formula did not preserve its Word text color after save and reopen.");
+                            wordBlue),
+                    "The format-refreshed inline formula did not preserve its size and color after save and reopen.");
                 document.Close(WordInterop.WdSaveOptions.wdDoNotSaveChanges);
                 Release(document);
                 document = null;
+
+                RunMixedSelectionTextColorSmoke(word, service, profile, wordRed, wordBlue);
 
                 document = word.Documents.Add();
                 document.Content.Font.Name = "Times New Roman";
@@ -1350,6 +1834,329 @@ namespace LaTeXBlocks.WordSmoke
                     Release(document);
                 }
             }
+        }
+
+        private static void RunMixedSelectionTextColorSmoke(WordInterop.Application word,
+            LaTeXBlockService service, string profile, int initialColor, int changedColor)
+        {
+            const string firstSource = "$a^2$";
+            const string secondSource = "$b^2$";
+            const string fixtureText = "left xx middle yy right\rnext";
+            const double fontSizePt = 14;
+            const int firstBold = -1;
+            const int firstItalic = 0;
+            const int secondBold = 0;
+            const int secondItalic = -1;
+            const int firstNoProofing = -1;
+            const int secondNoProofing = 0;
+            var firstUnderline = WordInterop.WdUnderline.wdUnderlineSingle;
+            var secondUnderline = WordInterop.WdUnderline.wdUnderlineDouble;
+            var firstHighlight = WordInterop.WdColorIndex.wdYellow;
+            var secondHighlight = WordInterop.WdColorIndex.wdTurquoise;
+            var simplifiedChinese = (WordInterop.WdLanguageID)2052;
+            WordInterop.Document document = null;
+            WordInterop.Range selectionLease = null;
+            try
+            {
+                Console.WriteLine("Word: testing Font Color across a mixed text/formula selection...");
+                document = word.Documents.Add();
+                document.Range(0, 0).Text = fixtureText;
+                document.Content.Font.Name = "Times New Roman";
+                document.Content.Font.Size = (float)fontSizePt;
+                document.Content.Font.Color = (WordInterop.WdColor)initialColor;
+
+                var firstRender = service.RenderPreview(firstSource, 360,
+                    LaTeXBlockLayoutMode.Auto, profile, fontSizePt, false, initialColor);
+                var firstPlaceholder = (document.Content.Text ?? string.Empty)
+                    .IndexOf("xx", StringComparison.Ordinal);
+                Assert(firstPlaceholder >= 0,
+                    "The mixed-selection fixture lost its first formula placeholder.");
+                document.Range(firstPlaceholder, firstPlaceholder + 2).Select();
+                var first = service.InsertRendered(firstSource, 360,
+                    LaTeXBlockLayoutMode.Auto, firstRender);
+
+                var secondRender = service.RenderPreview(secondSource, 360,
+                    LaTeXBlockLayoutMode.Auto, profile, fontSizePt, false, initialColor);
+                var secondPlaceholder = (document.Content.Text ?? string.Empty)
+                    .IndexOf("yy", StringComparison.Ordinal);
+                Assert(secondPlaceholder >= 0,
+                    "The mixed-selection fixture lost its second formula placeholder.");
+                document.Range(secondPlaceholder, secondPlaceholder + 2).Select();
+                var second = service.InsertRendered(secondSource, 360,
+                    LaTeXBlockLayoutMode.Auto, secondRender);
+
+                Assert(LaTeXBlockService.TryReadContract(first, out var firstMetadata,
+                           out var firstStoredSource) && firstStoredSource == firstSource,
+                    "The mixed-selection fixture did not create its first automatic formula.");
+                Assert(LaTeXBlockService.TryReadContract(second, out var secondMetadata,
+                           out var secondStoredSource) && secondStoredSource == secondSource,
+                    "The mixed-selection fixture did not create two valid automatic formulas.");
+
+                // Give the two formula runs deliberately different sentinels. A color
+                // refresh must preserve each run independently rather than cloning the
+                // mixed range's first format or restoring Word defaults.
+                first.Range.Font.Bold = firstBold;
+                first.Range.Font.Italic = firstItalic;
+                first.Range.Font.Underline = firstUnderline;
+                first.Range.Font.Name = "Arial";
+                first.Range.Font.Spacing = 1.25f;
+                first.Range.NoProofing = firstNoProofing;
+                first.Range.HighlightColorIndex = firstHighlight;
+                first.Range.LanguageID = WordInterop.WdLanguageID.wdEnglishUS;
+                first.Range.Font.Position = 9;
+                first.Range.Font.Subscript = -1;
+
+                second.Range.Font.Bold = secondBold;
+                second.Range.Font.Italic = secondItalic;
+                second.Range.Font.Underline = secondUnderline;
+                second.Range.Font.Name = "Calibri";
+                second.Range.Font.Scaling = 105;
+                second.Range.NoProofing = secondNoProofing;
+                second.Range.HighlightColorIndex = secondHighlight;
+                second.Range.LanguageIDFarEast = simplifiedChinese;
+                second.Range.Font.Position = -7;
+                second.Range.Font.Superscript = -1;
+
+                var firstParagraphEnd = (document.Content.Text ?? string.Empty)
+                    .IndexOf('\r');
+                Assert(firstParagraphEnd > second.Range.End,
+                    "The mixed-selection fixture did not retain its first paragraph.");
+                document.Range(0, firstParagraphEnd).Select();
+                var selectionStart = word.Selection.Start;
+                var selectionEnd = word.Selection.End;
+                selectionLease = word.Selection.Range.Duplicate;
+                var paragraphCount = document.Paragraphs.Count;
+                var contentBeforeRefresh = document.Content.Text;
+                Assert(word.Selection.Type !=
+                           WordInterop.WdSelectionType.wdSelectionInlineShape &&
+                       word.Selection.Range.InlineShapes.Count == 2,
+                    "The mixed-selection fixture was not an ordinary range containing two formulas.");
+
+                word.Selection.Font.Color = (WordInterop.WdColor)changedColor;
+                Assert(word.Selection.Start == selectionStart &&
+                       word.Selection.End == selectionEnd &&
+                       LaTeXBlockService.TextColorsEqual(
+                           LaTeXBlockService.ResolveTextColor(first.Range), changedColor) &&
+                       LaTeXBlockService.TextColorsEqual(
+                           LaTeXBlockService.ResolveTextColor(second.Range), changedColor),
+                    "Word did not apply Font Color to both formulas while preserving the mixed range selection.");
+
+                var firstChangedRender = service.RenderCommittedAsync(firstSource, 360,
+                        LaTeXBlockLayoutMode.Auto, profile, fontSizePt, false, changedColor)
+                    .GetAwaiter().GetResult();
+                var secondChangedRender = service.RenderCommittedAsync(secondSource, 360,
+                        LaTeXBlockLayoutMode.Auto, profile, fontSizePt, false, changedColor)
+                    .GetAwaiter().GetResult();
+                first = service.UpdateRendered(first, firstSource, 360,
+                    LaTeXBlockLayoutMode.Auto, firstChangedRender, false);
+                selectionLease.Select();
+                var rebasedSelectionLease = word.Selection.Range.Duplicate;
+                Release(selectionLease);
+                selectionLease = rebasedSelectionLease;
+                second = service.UpdateRendered(second, secondSource, 360,
+                    LaTeXBlockLayoutMode.Auto, secondChangedRender, false);
+
+                // UpdateRendered deliberately does not steal a user's selection. A
+                // caller that captured an unchanged mixed range restores and rebases
+                // that lease after each drawing replacement, before a later formula
+                // in the same selection completes.
+                selectionLease.Select();
+                Assert(word.Selection.Start == selectionStart &&
+                       word.Selection.End == selectionEnd &&
+                       word.Selection.Type !=
+                           WordInterop.WdSelectionType.wdSelectionInlineShape &&
+                       word.Selection.Range.InlineShapes.Count == 2,
+                    "Refreshing formulas did not permit restoration of the original mixed selection.");
+
+                AssertAutoFormatRefreshState(first, firstMetadata.Id, firstSource, 360,
+                    fontSizePt, changedColor,
+                    firstChangedRender.DepthPt, firstBold, firstItalic, firstUnderline,
+                    firstNoProofing, firstHighlight, "First mixed-selection formula");
+                AssertAutoFormatRefreshState(second, secondMetadata.Id, secondSource, 360,
+                    fontSizePt, changedColor,
+                    secondChangedRender.DepthPt, secondBold, secondItalic, secondUnderline,
+                    secondNoProofing, secondHighlight, "Second mixed-selection formula");
+                Assert(first.Range.Font.Name == "Arial" &&
+                       Math.Abs((double)first.Range.Font.Spacing - 1.25) < 0.001 &&
+                       first.Range.LanguageID == WordInterop.WdLanguageID.wdEnglishUS &&
+                       second.Range.Font.Name == "Calibri" &&
+                       second.Range.Font.Scaling == 105 &&
+                       second.Range.LanguageIDFarEast == simplifiedChinese,
+                    "A mixed-selection color refresh reset or exchanged unrelated formula-run attributes.");
+
+                var refreshedText = document.Content.Text ?? string.Empty;
+                var leftIndex = refreshedText.IndexOf("left", StringComparison.Ordinal);
+                var middleIndex = refreshedText.IndexOf("middle", StringComparison.Ordinal);
+                var rightIndex = refreshedText.IndexOf("right", StringComparison.Ordinal);
+                var nextIndex = refreshedText.IndexOf("next", StringComparison.Ordinal);
+                Assert(leftIndex >= 0 && middleIndex >= 0 && rightIndex >= 0 && nextIndex >= 0 &&
+                       LaTeXBlockService.TextColorsEqual(
+                           LaTeXBlockService.ResolveTextColor(
+                               document.Range(leftIndex, leftIndex + 4)), changedColor) &&
+                       LaTeXBlockService.TextColorsEqual(
+                           LaTeXBlockService.ResolveTextColor(
+                               document.Range(middleIndex, middleIndex + 6)), changedColor) &&
+                       LaTeXBlockService.TextColorsEqual(
+                           LaTeXBlockService.ResolveTextColor(
+                               document.Range(rightIndex, rightIndex + 5)), changedColor) &&
+                       LaTeXBlockService.TextColorsEqual(
+                           LaTeXBlockService.ResolveTextColor(
+                               document.Range(nextIndex, nextIndex + 4)), initialColor),
+                    "The mixed Font Color action leaked outside its selected paragraph or failed to color its text runs.");
+                Assert(document.Paragraphs.Count == paragraphCount &&
+                       document.Content.Text == contentBeforeRefresh,
+                    "Refreshing a mixed selection changed document text or paragraph boundaries.");
+                AssertInlineWordJoinerBoundary(first, 4,
+                    "First mixed-selection formula");
+                AssertInlineWordJoinerBoundary(second, 4,
+                    "Second mixed-selection formula");
+                Console.WriteLine("Word: mixed text/formula Font Color refresh passed.");
+            }
+            finally
+            {
+                if (selectionLease != null) Release(selectionLease);
+                if (document != null)
+                {
+                    document.Close(WordInterop.WdSaveOptions.wdDoNotSaveChanges);
+                    Release(document);
+                }
+            }
+        }
+
+        private static void RunWordFormatInteractionStateSmoke()
+        {
+            Console.WriteLine("Word: testing abstract format-interaction transactions...");
+            var state = new WordFormatTransactionState();
+            var began = state.Begin(WordFormatProperty.TextColor,
+                WordFormatInteractionOrigin.FontColorPalette,
+                out var canceledPrevious);
+            Assert(canceledPrevious == null && began.InteractionId > 0 &&
+                   began.InteractionId == state.ActiveInteractionId,
+                "A format interaction did not expose one positive active transaction id.");
+            var firstId = began.InteractionId;
+            AssertFormatInteractionSignal(began, firstId,
+                WordFormatInteractionPhase.Began, WordFormatProperty.TextColor,
+                WordFormatInteractionOrigin.FontColorPalette,
+                "Initial format interaction");
+
+            Assert(state.UpdateOrigin(firstId,
+                       WordFormatInteractionOrigin.FontColorMoreColorsDialog) &&
+                   !state.UpdateOrigin(firstId + 1,
+                       WordFormatInteractionOrigin.FontColorMainButton),
+                "A format transaction accepted an origin update for the wrong id.");
+            Assert(state.Commit(firstId + 1, WordFormatProperty.TextColor,
+                       WordFormatInteractionOrigin.FontColorMoreColorsDialog) == null &&
+                   state.ActiveInteractionId == firstId,
+                "A stale commit closed the currently active format transaction.");
+            var committed = state.Commit(firstId, WordFormatProperty.TextColor,
+                WordFormatInteractionOrigin.FontColorMoreColorsDialog);
+            Assert(committed != null && state.ActiveInteractionId == 0,
+                "Committing an active format interaction did not produce exactly one terminal signal.");
+            AssertFormatInteractionSignal(committed, firstId,
+                WordFormatInteractionPhase.Committed, WordFormatProperty.TextColor,
+                WordFormatInteractionOrigin.FontColorMoreColorsDialog,
+                "Committed format interaction");
+
+            // Duplicate native close/commit notifications carry the same token. Once
+            // that token is terminal, neither another Commit nor Cancel may emit a
+            // second terminal or synthesize a new transaction implicitly.
+            Assert(state.Commit(firstId, WordFormatProperty.TextColor,
+                       WordFormatInteractionOrigin.FontColorMoreColorsDialog) == null &&
+                   state.Cancel(firstId, WordFormatProperty.TextColor,
+                       WordFormatInteractionOrigin.FontColorMoreColorsDialog) == null &&
+                   state.ActiveInteractionId == 0,
+                "A duplicate terminal event completed an already committed transaction.");
+
+            var canceledBegin = state.Begin(WordFormatProperty.TextColor,
+                WordFormatInteractionOrigin.FontColorPalette,
+                out canceledPrevious);
+            var canceledId = canceledBegin.InteractionId;
+            Assert(canceledPrevious == null,
+                "Beginning an idle format state unexpectedly canceled another transaction.");
+            Assert(state.Cancel(canceledId + 1, WordFormatProperty.TextColor,
+                       WordFormatInteractionOrigin.FontColorPalette) == null &&
+                   state.ActiveInteractionId == canceledId,
+                "A stale cancel closed the currently active format transaction.");
+            var canceled = state.Cancel(canceledId, WordFormatProperty.TextColor,
+                WordFormatInteractionOrigin.FontColorPalette);
+            Assert(canceled != null && state.ActiveInteractionId == 0,
+                "Cancel did not close its active format transaction exactly once.");
+            AssertFormatInteractionSignal(canceled, canceledId,
+                WordFormatInteractionPhase.Canceled, WordFormatProperty.TextColor,
+                WordFormatInteractionOrigin.FontColorPalette,
+                "Canceled format interaction");
+            Assert(state.Cancel(canceledId, WordFormatProperty.TextColor,
+                       WordFormatInteractionOrigin.FontColorPalette) == null,
+                "A repeated cancel emitted a second terminal for the same transaction.");
+
+            // Starting a new interaction while another is active must explicitly
+            // cancel the old id before exposing the new one. A late terminal can then
+            // be rejected by consumers through the id boundary instead of completing
+            // whichever selection happens to be current.
+            var supersededBegin = state.Begin(WordFormatProperty.TextColor,
+                WordFormatInteractionOrigin.FontColorPalette,
+                out canceledPrevious);
+            Assert(canceledPrevious == null,
+                "The supersession fixture did not begin from an idle state.");
+            var supersededId = supersededBegin.InteractionId;
+            Assert(state.UpdateOrigin(supersededId,
+                    WordFormatInteractionOrigin.FontColorMoreColorsDialog),
+                "The live transaction did not accept its More Colors origin transition.");
+            var replacementBegin = state.Begin(WordFormatProperty.TextColor,
+                WordFormatInteractionOrigin.FontColorMainButton,
+                out var supersededCanceled);
+            Assert(supersededCanceled != null &&
+                   supersededCanceled.InteractionId == supersededId &&
+                   replacementBegin.InteractionId != supersededId &&
+                   replacementBegin.InteractionId == state.ActiveInteractionId,
+                "Replacing an active format transaction did not isolate the old and new ids.");
+            AssertFormatInteractionSignal(supersededCanceled, supersededId,
+                WordFormatInteractionPhase.Canceled, WordFormatProperty.TextColor,
+                WordFormatInteractionOrigin.FontColorMoreColorsDialog,
+                "Superseded format interaction");
+            var replacementId = replacementBegin.InteractionId;
+            AssertFormatInteractionSignal(replacementBegin, replacementId,
+                WordFormatInteractionPhase.Began, WordFormatProperty.TextColor,
+                WordFormatInteractionOrigin.FontColorMainButton,
+                "Replacement format interaction");
+            Assert(state.Commit(supersededId, WordFormatProperty.TextColor,
+                       WordFormatInteractionOrigin.FontColorMoreColorsDialog) == null &&
+                   state.Cancel(supersededId, WordFormatProperty.TextColor,
+                       WordFormatInteractionOrigin.FontColorMoreColorsDialog) == null &&
+                   state.ActiveInteractionId == replacementId,
+                "A late terminal from the superseded id closed its replacement transaction.");
+            var replacementCommit = state.Commit(replacementId,
+                WordFormatProperty.TextColor,
+                WordFormatInteractionOrigin.FontColorMainButton);
+            Assert(replacementCommit != null && state.ActiveInteractionId == 0,
+                "The replacement format transaction did not commit once.");
+            AssertFormatInteractionSignal(replacementCommit, replacementId,
+                WordFormatInteractionPhase.Committed, WordFormatProperty.TextColor,
+                WordFormatInteractionOrigin.FontColorMainButton,
+                "Replacement format commit");
+
+            Assert(state.Commit(0, WordFormatProperty.TextColor,
+                       WordFormatInteractionOrigin.FontColorMainButton) == null &&
+                   state.Commit(replacementId + 1, WordFormatProperty.TextColor,
+                       WordFormatInteractionOrigin.FontColorMainButton) == null &&
+                   state.Cancel(replacementId + 1, WordFormatProperty.TextColor,
+                       WordFormatInteractionOrigin.FontColorMainButton) == null &&
+                   state.ActiveInteractionId == 0,
+                "A terminal without a matching Begin synthesized or reused a transaction.");
+            Console.WriteLine("Word: abstract format-interaction transactions passed.");
+        }
+
+        private static void AssertFormatInteractionSignal(
+            WordFormatInteractionEventArgs signal, long expectedId,
+            WordFormatInteractionPhase expectedPhase,
+            WordFormatProperty expectedProperty,
+            WordFormatInteractionOrigin expectedOrigin, string context)
+        {
+            Assert(signal != null && signal.InteractionId == expectedId &&
+                   signal.Phase == expectedPhase &&
+                   signal.Property == expectedProperty &&
+                   signal.Origin == expectedOrigin,
+                context + " carried the wrong id, phase, property, or origin.");
         }
 
         private static void RunFloatingBlockSmoke(WordInterop.Application word, LaTeXBlockService service,
@@ -1828,6 +2635,512 @@ namespace LaTeXBlocks.WordSmoke
             }
         }
 
+        private static bool IsExactlySelectedInlineShape(WordInterop.Application word,
+            WordInterop.InlineShape shape)
+        {
+            if (word == null || shape == null) return false;
+            try
+            {
+                var selection = word.Selection;
+                return selection != null &&
+                       selection.Type == WordInterop.WdSelectionType.wdSelectionInlineShape &&
+                       selection.InlineShapes.Count == 1 &&
+                       selection.Start == shape.Range.Start &&
+                       selection.End == shape.Range.End;
+            }
+            catch (COMException) { return false; }
+        }
+
+        private static void RunFontColorAccessibilitySignalSmoke(
+            WordInterop.Application word, WordInterop.Document document)
+        {
+            Console.WriteLine("Word: testing live Font Color accessibility commits...");
+            var previousVisible = word.Visible;
+            Control dispatcher = null;
+            WordFontColorMonitor monitor = null;
+            try
+            {
+                document.Range(0, 1).Select();
+                word.Visible = true;
+                word.ActiveWindow.Activate();
+                try { word.CommandBars.ExecuteMso("TabHomeWord"); }
+                catch (Exception) { SendKeys.SendWait("%h"); }
+
+                var wordWindowHandle = new IntPtr(word.ActiveWindow.Hwnd);
+                GetWindowThreadProcessId(wordWindowHandle, out var wordProcessId);
+                Assert(wordProcessId != 0,
+                    "The live Font Color smoke could not identify WINWORD.EXE.");
+                AllowSetForegroundWindow(wordProcessId);
+                Assert(SetForegroundWindow(wordWindowHandle),
+                    "Windows refused to foreground the isolated Word instance.");
+                WaitFor(() => GetForegroundWindow() == wordWindowHandle, 2000,
+                    "The isolated Word instance did not become the foreground window.");
+                dispatcher = new Control();
+                dispatcher.CreateControl();
+                monitor = new WordFontColorMonitor(dispatcher,
+                    unchecked((int)wordProcessId));
+                var commits = 0;
+                var interactionGate = new object();
+                var begunInteractions = new HashSet<long>();
+                var completedInteractions = new HashSet<long>();
+                var interactionOrigins =
+                    new Dictionary<long, WordFormatInteractionOrigin>();
+                var terminalPhases =
+                    new Dictionary<long, WordFormatInteractionPhase>();
+                string interactionOrderFailure = null;
+                monitor.FormatInteraction += (sender, args) =>
+                {
+                    lock (interactionGate)
+                    {
+                        if (args.Phase == WordFormatInteractionPhase.Began)
+                        {
+                            if (!begunInteractions.Add(args.InteractionId) ||
+                                completedInteractions.Contains(args.InteractionId))
+                                interactionOrderFailure = "Duplicate/late Began for " +
+                                    args.InteractionId + ".";
+                            interactionOrigins[args.InteractionId] = args.Origin;
+                        }
+                        else if (!begunInteractions.Contains(args.InteractionId))
+                        {
+                            interactionOrderFailure = args.Phase +
+                                " arrived before Began for " + args.InteractionId + ".";
+                        }
+                        else if (!completedInteractions.Add(args.InteractionId))
+                        {
+                            interactionOrderFailure = "Duplicate terminal for " +
+                                args.InteractionId + ".";
+                        }
+                        else
+                        {
+                            terminalPhases[args.InteractionId] = args.Phase;
+                        }
+                    }
+                    if (args.Phase == WordFormatInteractionPhase.Committed)
+                        Interlocked.Increment(ref commits);
+                };
+                Func<long> getSingleActivePaletteInteraction = () =>
+                {
+                    lock (interactionGate)
+                    {
+                        long result = 0;
+                        foreach (var pair in interactionOrigins)
+                        {
+                            if (pair.Value !=
+                                    WordFormatInteractionOrigin.FontColorPalette ||
+                                completedInteractions.Contains(pair.Key))
+                                continue;
+                            if (result != 0) return -1;
+                            result = pair.Key;
+                        }
+                        return result;
+                    }
+                };
+                Func<long, WordFormatInteractionPhase, bool> hasTerminal =
+                    (interactionId, phase) =>
+                    {
+                        lock (interactionGate)
+                            return terminalPhases.TryGetValue(interactionId,
+                                       out var actual) && actual == phase;
+                    };
+                monitor.Start();
+
+                AutomationElement picker = null;
+                WaitFor(() =>
+                {
+                    var root = AutomationElement.FromHandle(wordWindowHandle);
+                    picker = root?.FindFirst(TreeScope.Descendants,
+                        new PropertyCondition(AutomationElement.AutomationIdProperty,
+                            "FontColorPicker"));
+                    return picker != null;
+                }, 5000, "Word's FontColorPicker was not exposed through UI Automation.");
+
+                var mainButton = picker.FindFirst(TreeScope.Descendants,
+                    new AndCondition(
+                        new PropertyCondition(AutomationElement.ControlTypeProperty,
+                            ControlType.Button),
+                        new PropertyCondition(AutomationElement.ClassNameProperty,
+                            "NetUIRibbonButton")));
+                object mainPattern = null;
+                Assert(mainButton != null && mainButton.TryGetCurrentPattern(
+                           InvokePattern.Pattern, out mainPattern),
+                    "Word's Font Color main button did not expose InvokePattern.");
+                ((InvokePattern)mainPattern).Invoke();
+                WaitFor(() => Volatile.Read(ref commits) >= 1, 3000,
+                    "The Font Color main-button Invoke was not observed as a commit.");
+
+                var dropDown = picker.FindFirst(TreeScope.Descendants,
+                    new PropertyCondition(AutomationElement.AutomationIdProperty,
+                        "FontColorPicker_Dropdown"));
+                object expandPattern = null;
+                Assert(dropDown != null && picker.TryGetCurrentPattern(
+                           ExpandCollapsePattern.Pattern, out expandPattern),
+                    "Word's Font Color split button did not expose ExpandCollapsePattern.");
+                ((ExpandCollapsePattern)expandPattern).Expand();
+                WaitFor(() => ((ExpandCollapsePattern)expandPattern).Current
+                        .ExpandCollapseState == ExpandCollapseState.Expanded,
+                    3000, "Word's Font Color dropdown did not remain expanded.");
+                var pickerBounds = picker.Current.BoundingRectangle;
+                Func<AutomationElement> findVisibleSwatch = () =>
+                {
+                    var candidates = AutomationElement.RootElement.FindAll(
+                        TreeScope.Descendants,
+                        new AndCondition(
+                            new PropertyCondition(AutomationElement.ProcessIdProperty,
+                                unchecked((int)wordProcessId)),
+                            new PropertyCondition(AutomationElement.ControlTypeProperty,
+                                ControlType.ListItem),
+                            new PropertyCondition(AutomationElement.ClassNameProperty,
+                                "NetUIGalleryButton")));
+                    foreach (AutomationElement candidate in candidates)
+                    {
+                        if (!candidate.Current.IsEnabled || candidate.Current.IsOffscreen ||
+                            !candidate.TryGetCurrentPattern(InvokePattern.Pattern, out _))
+                            continue;
+                        var bounds = candidate.Current.BoundingRectangle;
+                        if (bounds.Width <= 0 || bounds.Height <= 0 ||
+                            bounds.Top < pickerBounds.Bottom - 1 ||
+                            bounds.Right < pickerBounds.Left ||
+                            bounds.Left > pickerBounds.Right)
+                            continue;
+                        var hitElement = AutomationElement.FromPoint(
+                            new System.Windows.Point(
+                                bounds.Left + bounds.Width / 2,
+                                bounds.Top + bounds.Height / 2));
+                        if (IsElementOrDescendantOf(hitElement, candidate) ||
+                            IsElementOrDescendantOf(candidate, hitElement))
+                            return candidate;
+                    }
+                    return null;
+                };
+
+                AutomationElement swatch = null;
+                var swatchTreePrinted = false;
+                var paletteRetry = Stopwatch.StartNew();
+                WaitFor(() =>
+                {
+                    try
+                    {
+                        var diagnosticCount = 0;
+                        var printThisPass = !swatchTreePrinted;
+                        var candidates = AutomationElement.RootElement.FindAll(
+                            TreeScope.Descendants,
+                            new AndCondition(
+                                new PropertyCondition(AutomationElement.ProcessIdProperty,
+                                    unchecked((int)wordProcessId)),
+                                new PropertyCondition(AutomationElement.ControlTypeProperty,
+                                    ControlType.ListItem),
+                                new PropertyCondition(AutomationElement.ClassNameProperty,
+                                    "NetUIGalleryButton")));
+                        if (printThisPass)
+                        {
+                            swatchTreePrinted = true;
+                            Console.WriteLine("Word: visible NetUIGalleryButton candidates=" +
+                                candidates.Count + ".");
+                        }
+                        foreach (AutomationElement candidate in candidates)
+                        {
+                            if (!candidate.Current.IsEnabled || candidate.Current.IsOffscreen)
+                                continue;
+                            if (!candidate.TryGetCurrentPattern(InvokePattern.Pattern,
+                                    out _)) continue;
+                            var candidateBounds = candidate.Current.BoundingRectangle;
+                            if (candidateBounds.Width <= 0 || candidateBounds.Height <= 0)
+                                continue;
+                            // Office's popup provider can disappear while its ancestor
+                            // chain is queried. Geometry is stable enough for this test:
+                            // a Font Color popup item is below and horizontally overlaps
+                            // the split button that was just expanded.
+                            if (candidateBounds.Top < pickerBounds.Bottom - 1 ||
+                                candidateBounds.Right < pickerBounds.Left ||
+                                candidateBounds.Left > pickerBounds.Right)
+                                continue;
+                            var candidateHit = AutomationElement.FromPoint(
+                                new System.Windows.Point(
+                                    candidateBounds.Left + candidateBounds.Width / 2,
+                                    candidateBounds.Top + candidateBounds.Height / 2));
+                            if (diagnosticCount++ < 16 && printThisPass)
+                                Console.WriteLine("  candidate '" +
+                                    (candidate.Current.Name ?? string.Empty) + "' bounds=" +
+                                    candidateBounds + " hit=" +
+                                    (candidateHit?.Current.ClassName ?? "<none>") + ".");
+                            if (!IsElementOrDescendantOf(candidateHit, candidate) &&
+                                !IsElementOrDescendantOf(candidate, candidateHit))
+                                continue;
+                            swatch = candidate;
+                            return true;
+                        }
+                        if (paletteRetry.ElapsedMilliseconds >= 750)
+                        {
+                            // Office can transiently report Expanded while exposing a
+                            // stale popup tree whose screen bounds hit the document.
+                            // Close and reopen the same control instead of accepting
+                            // those stale elements as a human-click target.
+                            ((ExpandCollapsePattern)expandPattern).Collapse();
+                            System.Windows.Forms.Application.DoEvents();
+                            ((ExpandCollapsePattern)expandPattern).Expand();
+                            paletteRetry.Restart();
+                        }
+                        return false;
+                    }
+                    catch (ElementNotAvailableException) { return false; }
+                    catch (InvalidOperationException) { return false; }
+                }, 5000, "Word's open Font Color palette exposed no invokable swatch.");
+                object swatchPattern = null;
+                Assert(swatch.TryGetCurrentPattern(InvokePattern.Pattern,
+                           out swatchPattern),
+                    "The selected Font Color swatch lost InvokePattern.");
+                var swatchBounds = swatch.Current.BoundingRectangle;
+                var swatchCenter = new System.Windows.Point(
+                    swatchBounds.Left + swatchBounds.Width / 2,
+                    swatchBounds.Top + swatchBounds.Height / 2);
+                var hit = AutomationElement.FromPoint(swatchCenter);
+                Assert(IsElementOrDescendantOf(hit, swatch) ||
+                       IsElementOrDescendantOf(swatch, hit),
+                    "The selected Font Color swatch center hit a different UIA element: " +
+                    (hit?.Current.ClassName ?? "<none>") + ".");
+                Console.WriteLine("Word: clicking Font Color swatch '" +
+                    (swatch.Current.Name ?? string.Empty) + "' at " + swatchCenter + ".");
+                Assert(SetCursorPos((int)Math.Round(swatchCenter.X),
+                           (int)Math.Round(swatchCenter.Y)),
+                    "Windows rejected the Font Color hover probe position.");
+                var hoverTimer = Stopwatch.StartNew();
+                while (hoverTimer.ElapsedMilliseconds < 500)
+                {
+                    System.Windows.Forms.Application.DoEvents();
+                    Thread.Sleep(20);
+                }
+                Assert(Volatile.Read(ref commits) == 1,
+                    "Merely hovering a Font Color swatch was misclassified as a commit (" +
+                    monitor.DiagnosticStateForTest + ").");
+                WaitFor(() => getSingleActivePaletteInteraction() > 0, 3000,
+                    "The first open Font Color palette had no single active transaction.");
+                var escapedPaletteInteractionId =
+                    getSingleActivePaletteInteraction();
+                // A collapse notification may race ahead of the mouse-up that chose a
+                // swatch, so the monitor intentionally keeps the hovered candidate for
+                // a short grace. Prove that this grace is bound to the same down/up
+                // gesture: Esc plus a later document click at the stale screen rectangle
+                // must not be mistaken for a colour choice.
+                SendKeys.SendWait("{ESC}");
+                WaitFor(() => ((ExpandCollapsePattern)expandPattern).Current
+                        .ExpandCollapseState != ExpandCollapseState.Expanded,
+                    3000, "Word's Font Color dropdown did not close on Escape.");
+                AutomationElement staleRectangleHit = null;
+                WaitFor(() =>
+                {
+                    try
+                    {
+                        staleRectangleHit = AutomationElement.FromPoint(swatchCenter);
+                        if (staleRectangleHit == null ||
+                            staleRectangleHit.Current.ProcessId !=
+                                unchecked((int)wordProcessId))
+                            return false;
+                        var hitClass = staleRectangleHit.Current.ClassName ??
+                            string.Empty;
+                        return !string.Equals(hitClass, "NetUIGalleryButton",
+                                   StringComparison.OrdinalIgnoreCase) &&
+                               !string.Equals(hitClass,
+                                   "NetUIGalleryCategoryContainer",
+                                   StringComparison.OrdinalIgnoreCase) &&
+                               !HasAutomationAncestorClass(staleRectangleHit,
+                                   "NetUIToolWindow") &&
+                               !HasAutomationAncestorClass(staleRectangleHit,
+                                   "Net UI Tool Window");
+                    }
+                    catch (ElementNotAvailableException) { return false; }
+                    catch (InvalidOperationException) { return false; }
+                }, 3000, "The canceled palette's old rectangle was still occupied " +
+                    "by a popup instead of the Word document.");
+                ClickAt(swatchCenter.X, swatchCenter.Y);
+                var canceledClickTimer = Stopwatch.StartNew();
+                while (canceledClickTimer.ElapsedMilliseconds < 350)
+                {
+                    System.Windows.Forms.Application.DoEvents();
+                    Thread.Sleep(20);
+                }
+                Assert(Volatile.Read(ref commits) == 1,
+                    "A document click inside a canceled palette's stale rectangle " +
+                    "was misclassified as a Font Color commit (" +
+                    monitor.DiagnosticStateForTest + ").");
+                WaitFor(() => hasTerminal(escapedPaletteInteractionId,
+                        WordFormatInteractionPhase.Canceled), 4000,
+                    "Escape did not cancel the first palette transaction.");
+
+                ((ExpandCollapsePattern)expandPattern).Expand();
+                WaitFor(() => ((ExpandCollapsePattern)expandPattern).Current
+                        .ExpandCollapseState == ExpandCollapseState.Expanded,
+                    3000, "Word's Font Color dropdown did not reopen after Escape.");
+                swatch = null;
+                WaitFor(() =>
+                {
+                    try
+                    {
+                        swatch = findVisibleSwatch();
+                        return swatch != null;
+                    }
+                    catch (ElementNotAvailableException) { return false; }
+                    catch (InvalidOperationException) { return false; }
+                }, 5000, "Word's reopened Font Color palette exposed no live swatch.");
+                swatchBounds = swatch.Current.BoundingRectangle;
+                swatchCenter = new System.Windows.Point(
+                    swatchBounds.Left + swatchBounds.Width / 2,
+                    swatchBounds.Top + swatchBounds.Height / 2);
+                Assert(SetCursorPos((int)Math.Round(swatchCenter.X),
+                           (int)Math.Round(swatchCenter.Y)),
+                    "Windows rejected the reopened Font Color hover position.");
+                var reopenedHoverTimer = Stopwatch.StartNew();
+                while (reopenedHoverTimer.ElapsedMilliseconds < 250)
+                {
+                    System.Windows.Forms.Application.DoEvents();
+                    Thread.Sleep(20);
+                }
+                Assert(Volatile.Read(ref commits) == 1,
+                    "Hovering the reopened Font Color palette was misclassified as " +
+                    "a commit (" + monitor.DiagnosticStateForTest + ").");
+                WaitFor(() => getSingleActivePaletteInteraction() > 0, 3000,
+                    "The reopened Font Color palette had no single active transaction.");
+                Assert(getSingleActivePaletteInteraction() !=
+                           escapedPaletteInteractionId,
+                    "The reopened Font Color palette reused the canceled transaction.");
+                // Current Office exposes hover through MSAA OBJECT_SELECTION but no
+                // reliable swatch Invoke. Exercise the real mouse-up confirmation that
+                // turns only the same candidate's paired down/up into a semantic commit.
+                var commitsBeforeClick = Volatile.Read(ref commits);
+                ClickAt(swatchBounds.Left + swatchBounds.Width / 2,
+                    swatchBounds.Top + swatchBounds.Height / 2);
+                WaitFor(() => Volatile.Read(ref commits) == commitsBeforeClick + 1,
+                    8000,
+                    "A Font Color palette swatch was not observed through WinEvent/MSAA (" +
+                    monitor.DiagnosticStateForTest + ").");
+                var quietTimer = Stopwatch.StartNew();
+                while (quietTimer.ElapsedMilliseconds < 2000)
+                {
+                    System.Windows.Forms.Application.DoEvents();
+                    Thread.Sleep(20);
+                }
+                Assert(Volatile.Read(ref commits) == commitsBeforeClick + 1,
+                    "One Font Color click produced duplicate semantic commits (" +
+                    monitor.DiagnosticStateForTest + ").");
+
+                long committedPaletteInteractionId = 0;
+                lock (interactionGate)
+                {
+                    Assert(string.IsNullOrEmpty(interactionOrderFailure),
+                        "Font Color semantic transactions were delivered out of order: " +
+                        interactionOrderFailure);
+                    foreach (var pair in interactionOrigins)
+                    {
+                        if (pair.Value !=
+                                WordFormatInteractionOrigin.FontColorPalette ||
+                            !terminalPhases.TryGetValue(pair.Key, out var phase) ||
+                            phase != WordFormatInteractionPhase.Committed)
+                            continue;
+                        Assert(committedPaletteInteractionId == 0,
+                            "More than one palette transaction committed for one click.");
+                        committedPaletteInteractionId = pair.Key;
+                    }
+                    Assert(committedPaletteInteractionId != 0 &&
+                           committedPaletteInteractionId !=
+                               escapedPaletteInteractionId,
+                        "The reopened palette did not commit a fresh transaction.");
+                }
+
+                // A late duplicate Expanded used to leave the session permanently
+                // active after commit. Open it once more and require a new token, then
+                // cancel it cleanly so every observed Begin has one terminal.
+                ((ExpandCollapsePattern)expandPattern).Expand();
+                WaitFor(() => ((ExpandCollapsePattern)expandPattern).Current
+                        .ExpandCollapseState == ExpandCollapseState.Expanded,
+                    3000, "Word's Font Color dropdown did not open after a commit.");
+                WaitFor(() => getSingleActivePaletteInteraction() > 0, 3000,
+                    "Opening Font Color after a commit did not begin a new transaction.");
+                var finalPaletteInteractionId =
+                    getSingleActivePaletteInteraction();
+                Assert(finalPaletteInteractionId != committedPaletteInteractionId &&
+                       finalPaletteInteractionId != escapedPaletteInteractionId,
+                    "Opening Font Color after a commit reused an old transaction.");
+                SendKeys.SendWait("{ESC}");
+                WaitFor(() => ((ExpandCollapsePattern)expandPattern).Current
+                        .ExpandCollapseState != ExpandCollapseState.Expanded,
+                    3000, "The final Font Color palette did not close on Escape.");
+                WaitFor(() => hasTerminal(finalPaletteInteractionId,
+                        WordFormatInteractionPhase.Canceled), 4000,
+                    "The final palette transaction did not cancel cleanly.");
+                WaitFor(() =>
+                {
+                    lock (interactionGate)
+                        return begunInteractions.SetEquals(completedInteractions);
+                }, 4000, "At least one Font Color transaction remained active " +
+                    "after the final palette cancellation.");
+                lock (interactionGate)
+                {
+                    Assert(begunInteractions.SetEquals(completedInteractions),
+                        "At least one Font Color transaction had no terminal phase.");
+                    Assert(string.IsNullOrEmpty(interactionOrderFailure),
+                        "Font Color semantic transactions were delivered out of order: " +
+                        interactionOrderFailure);
+                    var mainTransactions = 0;
+                    foreach (var pair in interactionOrigins)
+                    {
+                        if (pair.Value != WordFormatInteractionOrigin.
+                                FontColorMainButton)
+                            continue;
+                        mainTransactions++;
+                        Assert(terminalPhases.TryGetValue(pair.Key,
+                                   out var mainTerminal) &&
+                               mainTerminal ==
+                                   WordFormatInteractionPhase.Committed,
+                            "The Font Color main-button transaction did not commit.");
+                    }
+                    Assert(mainTransactions == 1,
+                        "The Font Color main button produced an unexpected number " +
+                        "of semantic transactions.");
+                }
+                Assert(Volatile.Read(ref commits) == commitsBeforeClick + 1,
+                    "Canceling the final palette changed the commit count.");
+                Console.WriteLine("Word: live Font Color accessibility commits passed.");
+            }
+            finally
+            {
+                monitor?.Dispose();
+                dispatcher?.Dispose();
+                word.Visible = previousVisible;
+            }
+        }
+
+        private static void AssertAutoFormatRefreshState(WordInterop.InlineShape shape,
+            Guid expectedId, string expectedSource, double expectedWidthPt,
+            double expectedFontSizePt, int expectedTextColor,
+            double expectedDepthPt, int expectedBold, int expectedItalic,
+            WordInterop.WdUnderline expectedUnderline, int expectedNoProofing,
+            WordInterop.WdColorIndex expectedHighlight, string context)
+        {
+            var expectedPosition = -(int)Math.Round(expectedDepthPt,
+                MidpointRounding.AwayFromZero);
+            Assert(LaTeXBlockService.TryReadContract(shape, out var metadata, out var source) &&
+                   metadata.Id == expectedId && source == expectedSource &&
+                   metadata.Role == LaTeXBlockRole.Content &&
+                   metadata.Mode == LaTeXBlockLayoutMode.Auto &&
+                   Math.Abs(metadata.WidthPt - expectedWidthPt) < 0.001 &&
+                   Math.Abs(metadata.FontSizePt - expectedFontSizePt) < 0.001 &&
+                   Math.Abs(metadata.DepthPt - expectedDepthPt) < 0.01 &&
+                   shape.AlternativeText == expectedSource &&
+                   Math.Abs((double)shape.Range.Font.Size - expectedFontSizePt) < 0.001 &&
+                   Math.Abs((double)shape.Range.Font.SizeBi - expectedFontSizePt) < 0.001 &&
+                   LaTeXBlockService.TextColorsEqual((int)shape.Range.Font.Color,
+                       expectedTextColor) &&
+                   shape.Range.Font.Position == expectedPosition &&
+                   shape.Range.Font.Subscript == 0 &&
+                   shape.Range.Font.Superscript == 0 &&
+                   shape.Range.Font.Bold == expectedBold &&
+                   shape.Range.Font.Italic == expectedItalic &&
+                   shape.Range.Font.Underline == expectedUnderline &&
+                   shape.Range.NoProofing == expectedNoProofing &&
+                   shape.Range.HighlightColorIndex == expectedHighlight,
+                context + " did not preserve identity/source/layout/native formatting, " +
+                "or did not derive its baseline from the new TeX depth.");
+        }
+
         private static void AssertInlineWordJoinerBoundary(WordInterop.InlineShape shape,
             int expectedJoinerCount, string context)
         {
@@ -2006,6 +3319,90 @@ namespace LaTeXBlocks.WordSmoke
                 Thread.Sleep(20);
             }
             throw new InvalidOperationException(message);
+        }
+
+        private static void ClickAt(double x, double y)
+        {
+            var targetX = (int)Math.Round(x);
+            var targetY = (int)Math.Round(y);
+            Assert(SetCursorPos(targetX, targetY),
+                "Windows rejected the requested test cursor position.");
+            GetCursorPos(out var actual);
+            Assert(Math.Abs(actual.X - targetX) <= 1 &&
+                   Math.Abs(actual.Y - targetY) <= 1,
+                "The test cursor was DPI-virtualized away from the UIA target (requested=" +
+                targetX + "," + targetY + "; actual=" + actual.X + "," + actual.Y + ").");
+            mouse_event(MouseEventLeftDown, 0, 0, 0, UIntPtr.Zero);
+            Thread.Sleep(60);
+            mouse_event(MouseEventLeftUp, 0, 0, 0, UIntPtr.Zero);
+        }
+
+        private static bool HasAutomationAncestorClass(AutomationElement element,
+            string className)
+        {
+            var current = element;
+            for (var depth = 0; depth < 16 && current != null; depth++)
+            {
+                try
+                {
+                    if (string.Equals(current.Current.ClassName, className,
+                            StringComparison.OrdinalIgnoreCase))
+                        return true;
+                    current = TreeWalker.RawViewWalker.GetParent(current);
+                }
+                catch (ElementNotAvailableException) { return false; }
+            }
+            return false;
+        }
+
+        private static bool IsElementOrDescendantOf(AutomationElement element,
+            AutomationElement ancestor)
+        {
+            var current = element;
+            for (var depth = 0; depth < 16 && current != null; depth++)
+            {
+                try
+                {
+                    if (Automation.Compare(current, ancestor)) return true;
+                    current = TreeWalker.RawViewWalker.GetParent(current);
+                }
+                catch (ElementNotAvailableException) { return false; }
+            }
+            return false;
+        }
+
+        [DllImport("user32.dll")]
+        private static extern uint GetWindowThreadProcessId(IntPtr window,
+            out uint processId);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool SetForegroundWindow(IntPtr window);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool AllowSetForegroundWindow(uint processId);
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr GetForegroundWindow();
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool SetCursorPos(int x, int y);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetCursorPos(out NativePoint point);
+
+        [DllImport("user32.dll")]
+        private static extern void mouse_event(uint flags, uint dx, uint dy,
+            uint data, UIntPtr extraInfo);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct NativePoint
+        {
+            internal int X;
+            internal int Y;
         }
 
         private static string EquationNumberText(WordInterop.Field field)

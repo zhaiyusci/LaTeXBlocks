@@ -34,11 +34,15 @@ CR to LF before rendering and storage; all other source characters are preserved
 stable across save/reopen without changing TeX comment boundaries.
 
 The stable ID survives edits. Width is the StemTeX typesetting constraint, not a DPI value and not a raster-image
-scale. For a one-line inline source, depth is measured from an invisible dvisvgm marker at the TeX baseline to the
-SVG viewport bottom. `framewidth` and `frameheight`, when present, are the authored physical SVG root for a floating
+scale. For a natural-width single-baseline source, depth is measured from an invisible dvisvgm marker at the TeX
+baseline to the SVG viewport bottom. It includes the standard minimum `\strutbox` depth, or a larger natural content
+depth when required. `framewidth` and `frameheight`, when present, are the authored physical SVG root for a floating
 fixed block; they are deliberately distinct from the TeX measure. `style`, when present, is a delimiter-safe compact
 serialization of the shared Block style (leading, padding, vertical placement, text/fill/border colors, and border
 width). It appears only for a fixed ordinary Content Block; it never replaces TeX source in Alternative Text.
+The version-one Word style payload's fourth `t/m/b` slot stores Top/Middle/Bottom vertical placement. Current writers
+emit the selected value, and readers restore all three values; retaining this version-one layout keeps existing Blocks
+compatible without a metadata-version change.
 Metadata written before `role`, frame fields, or `style` continues to parse as ordinary `content` with the historical
 unstyled rendering route.
 
@@ -56,10 +60,12 @@ A fixed-width content block has the same frame contract whether Word represents 
 Text**) or as a floating `Shape` under any Layout Option. `width` is the TeX typesetting measure, while
 `framewidth`/`frameheight` are the user-owned outer SVG frame. A size change creates a fresh TeX render; the root SVG
 is then reframed to the exact outer dimensions by expanding its viewport (transparent space) or reducing it (clip),
-never by scaling TeX glyph coordinates. For a styled Block, the fresh root also paints padding, fill, four in-viewport
-border strips, and the chosen Top/Middle/Bottom placement; the border therefore always remains at the current frame
-edge after a resize. A changed frame width derives a new TeX measure from the prior SVG root; a height-only change
-rerenders at the existing measure.
+never by scaling TeX glyph coordinates. For a styled Block, the fresh root also paints padding, fill, and four
+in-viewport border strips; the border therefore always remains at the current frame edge after a resize. The outer
+frame minus padding is the exact TeX content box: TeX keeps its contents horizontally left-aligned and performs the
+stored Top/Middle/Bottom placement inside a fixed-height `vbox`. The SVG shell places that box at the padding origin
+and does not calculate another vertical offset. A changed frame width derives a new TeX measure from the prior SVG
+root; a height-only change rerenders at the existing measure.
 
 Word's COM model has no `AfterShapeSizeChange` equivalent. The add-in therefore observes Word's documented,
 process-scoped native mouse-capture completion event, posts one UI-thread turn after mouse-up, and then reads the final
@@ -87,13 +93,52 @@ next starts. Runtime selection and profile discovery are specified in [STEMTEX_I
 
 ## Geometry and vertical baseline
 
-Word aligns an inline image through its layout bottom, while `InlineShape.Range.Font.Position` persists only whole points. For a surrounding run position `p` and TeX depth `d`, LaTeX Blocks applies `Font.Position = p - round(d)` and moves the SVG viewBox by the residual `d - round(d)`. `InlineShapes.AddPicture` initially quantizes an SVG's physical dimensions through CSS pixels. LaTeX Blocks therefore converts the final SVG dimensions directly to EMUs (`cx = round(width_pt × 12700)`, `cy = round(height_pt × 12700)`) and writes the exact pair to both `wp:inline/wp:extent` and `pic:spPr/a:xfrm/a:ext`. Every `wp:effectExtent` side (`l`, `t`, `r`, and `b`) is normalized to zero. These are vector-layout coordinates, not a DPI calculation. For auto-width content, the SVG viewport is the exact TeX box: explicit TeX glue remains part of that box, while the add-in supplies no display padding, ink padding, or horizontal-space correction. `InsertXML` reconstructs the containing paragraph, so the add-in duplicates and restores its complete direct `ParagraphFormat`; editing an SVG must not erase indentation, spacing, or equation tab stops. Fixed-width multiline blocks have no single surrounding-text baseline and retain position zero. A numbered equation is instead one natural-width TeX display box and therefore has one measurable baseline.
+Word aligns an inline image through its layout bottom, while `InlineShape.Range.Font.Position` persists only whole points. For TeX depth `d`, LaTeX Blocks applies `Font.Position = -round(d)` and moves the SVG viewBox by the residual `d - round(d)`. `Font.Position` is already relative to the current Word line baseline; neighboring text positions therefore never enter formula placement. `InlineShapes.AddPicture` initially quantizes an SVG's physical dimensions through CSS pixels. LaTeX Blocks therefore converts the final SVG dimensions directly to EMUs (`cx = round(width_pt × 12700)`, `cy = round(height_pt × 12700)`) and writes the exact pair to both `wp:inline/wp:extent` and `pic:spPr/a:xfrm/a:ext`. Every `wp:effectExtent` side (`l`, `t`, `r`, and `b`) is normalized to zero. These are vector-layout coordinates, not a DPI calculation. For auto-width content, the SVG viewport is the exact TeX box: explicit TeX glue remains part of that box, while the add-in supplies no display padding, ink padding, or horizontal-space correction. `InsertXML` reconstructs the containing paragraph, so the add-in duplicates and restores its complete direct `ParagraphFormat`; editing an SVG must not erase indentation, spacing, or equation tab stops. Fixed-width multiline blocks have no single text baseline and retain position zero. A numbered equation is instead one natural-width TeX display box and therefore has one measurable baseline.
 
 The negative position belongs only to the inline picture character. Word omits that character-level `w:position` and
 `w:sz` when the one-character image range is exported as Flat OPC, so the add-in restores both the TeX design size and
 baseline position on the final image after normalizing its drawing extent. `w:sz` is semantic host-run state:
 changing it does not rescale the SVG, but it keeps Word's Font Size UI and formula refresh logic consistent with the
 size StemTeX actually rendered.
+
+## Word character-format ownership
+
+Replacing an SVG also replaces its one-character Word run. Updates therefore merge properties by ownership instead
+of accepting Word's defaults or copying the old run indiscriminately:
+
+| Property group | Update rule |
+| --- | --- |
+| Authoritative formula state | TeX source, stable ID, role, layout mode, typesetting width, explicit Block style, and authored frame data come from the edit request plus existing object metadata. They are not inferred from character formatting. |
+| Native renderer inputs | For Auto and numbered formulas, `Font.Size`/`SizeBi` represent one TeX design size; native Font Size changes rerender the SVG. Native Font Color similarly rerenders Auto and legacy unstyled objects. Its Word value remains a descriptor—Automatic, direct BGR, or theme slot plus tint/shade—while the renderer receives the resolved display BGR. A styled Fixed Block takes its colour and TeX size from its durable style/editor metadata instead. |
+| Formula-derived output | SVG bytes and physical extents, TeX depth, and frame geometry come from the new render. Auto/numbered `Font.Position` is recomputed as `-round(new depth)` relative to Word's current line baseline; Fixed Content is reset to position zero. `Subscript` and `Superscript` are cleared because script placement belongs in TeX source, not in a second Word transform. |
+| Independent Word run format | Font family metadata, bold/italic/underline/strike/hidden state, spacing, scaling, kerning, proofing state, highlight, and language IDs survive replacement. Except for the renderer inputs listed above, these values do not alter glyphs inside the SVG; spacing/scaling may still alter Word's treatment of the drawing character around its exact SVG extent. The resolved direct values are preserved, not the identity of a Word character style. A native theme colour is the exception: its theme slot and tint/shade are deliberately restored after drawing normalization rather than downgraded to RGB. |
+| Paragraph and UI state | Direct `ParagraphFormat` and document-owned paragraph marks survive normalization. An exact InlineShape selection transfers to the replacement only if that same old object is still selected when rendering commits. A mixed text range uses one shared duplicated-range lease and is restored after each selected formula replacement only while the user still owns that range; a later caret move is never reversed. |
+
+The commit path rechecks the live native size and colour before replacing the object. If either changed while StemTeX
+was rendering, the stale SVG is discarded and one merged refresh is queued. Word enables Font Color for an exact
+`InlineShape` selection but its built-in command does not modify that drawing run. LaTeX Blocks therefore listens to
+one value-free native-format transaction stream (`Began`, `Committed`, `Canceled`) rather than exposing UIA/MSAA
+details to the document layer. The main button has a direct Invoke. A gallery popup is a separate `NetUIToolWindow`:
+MSAA selection identifies the active hovered swatch, but hover alone never commits; a left-button down/up pair that
+starts on that same live popup swatch (or a provider Invoke on builds that expose one) confirms the gesture. The
+candidate survives the popup's short close-ordering window, but an Escape followed by a click in its stale screen
+rectangle cannot commit. A generation-bound timer defers the semantic commit until Word has processed the native
+mouse command. Every lifecycle signal then leaves one FIFO UI-thread queue, so `Began` always precedes the matching
+terminal signal even when UIA, MSAA, and Win32 callbacks arrive on different threads. More Colors commits only after
+**OK** and dialog close; opening a menu, Cancel, Escape, and window close do not commit.
+
+For an exact formula selection, a confirmed action uses a collapsed-caret `ExecuteMso("FontColorPicker")` transaction
+to read Word's current picker descriptor, immediately restores the exact picture selection, applies the descriptor to
+the drawing run, and queues the render. For an ordinary range containing text and one or more formulas, Word has
+already written the native colour to every selected drawing character; the transaction coordinator reads each frozen
+formula target and queues only its colour delta, without probing or rewriting ordinary text. Programmatic
+accessibility echoes are suppressed. These paths are separate from the generic mouse-capture monitor used only for
+frame resizing; they do not poll and never make the U+2060 scaffold the user's selection.
+
+The update then snapshots independent run format, inserts and normalizes the new drawing, reapplies that format,
+overwrites renderer inputs and derived placement, and finally reapplies any native theme descriptor. Consequently
+changing one supported property cannot restore the others to defaults, while a damaged old baseline can never be
+mistaken for user-owned state.
 
 ## Inline word-spacing scaffold
 
@@ -106,17 +151,22 @@ is changed into a fixed-width block, its unshared boundary joiners are removed; 
 neighboring auto formula remains for that neighbor. Fixed-width blocks and Word-native numbered equations are not
 wrapped because they do not participate in running-text word spacing. After insertion or replacement the selection
 collapses after the trailing joiner, so following typing is placed outside the formula scaffold and cannot inherit the
-picture character's `w:position` or `w:noProof`.
+picture character's `w:position` or `w:noProof`. When the user selects the formula itself, Word's exact InlineShape
+selection is retained; the boundary pair is never permanently included merely to route a native formatting command.
 
 ## Font-size synchronization
 
 Auto-width formulas store the TeX design size used to render them. LaTeX Blocks listens to Word's native Font Size
 combo-box command and rerenders formulas in the selected range at the new TeX size. Because Word has no general
-formatting-changed event, shortcut and other native formatting paths use a selection-bound snapshot: on entering a
-selection, the add-in records each auto formula's image-character size by stable block ID; on leaving, it refreshes
-only when that same host size actually changed and the SVG has not already been rendered at the new size. A plain
-select/deselect cycle therefore cannot rerender a formula merely because its stored TeX size differed from inherited
-Word formatting. No live Word `Range` is retained, and there is no timer or document-wide background scan.
+formatting-changed event, native formatting paths use a selection-bound snapshot: on entering a selection, the add-in
+records each auto formula's image-character size and colour against that selected drawing identity. The native Font
+Size combo has its own command callback; Font Color uses the dedicated transaction described above and reconciles a
+mixed range immediately. Keyboard, macro, and other formatting paths are still checked when the user leaves the
+selection. A refresh occurs only when the host value actually changed and the SVG has not already been rendered at
+that value. A plain select/deselect cycle therefore cannot rerender a formula merely because its stored TeX size
+differed from inherited Word formatting. The coordinator never retains the mutable global `Selection`; a bounded
+duplicated-range lease exists only for the affected asynchronous replacements. There is no recurring timer or
+document-wide background scan.
 
 Font size is a renderer input, not an image transform. For an auto-width inline object, LaTeX Blocks reads `Selection.Font.Size`, which is Word's actual typing size. This distinction matters at a run boundary and after changing the size of a collapsed caret: `Selection.Range.Font.Size` can still describe the character to the right even though newly typed text uses another size. For a mixed non-collapsed selection, Word reports `wdUndefined`; replacement then follows Word's native rule and uses the first selected character's insertion size. The resolved size is passed through StemTeX 0.12's native per-request `font_size_pt` API. StemTeX applies the size inside its live TeX worker, so the resulting SVG, natural width, math metrics, script sizes, optical-size choices, and TeX depth are all produced at the requested size. The add-in does not inject `\fontsize` into the user's source and never enlarges a 10 pt SVG to imitate another TeX size. Fixed-width blocks preserve their explicit document design and editor size.
 
@@ -135,7 +185,7 @@ baseline exactly once.
 
 ### Auto-width inline formula
 
-Auto mode is the traditional equation-in-running-text path. The source must be a single-line inline TeX fragment. It is typeset into a TeX `\hbox`; temporary dvisvgm markers report the box's start coordinate, end coordinate, and baseline. Wrapper line breaks are suppressed so they cannot become TeX interword glue at either edge; explicit spacing written in the source is preserved. Horizontally, the embedded SVG is the exact TeX box. Neither the profile's generic page-preview border, a logical/ink-union crop, vector safety padding, nor any application-added edge spacing becomes part of that image. It removes all measurement markers before embedding the SVG.
+Auto mode is the traditional equation-in-running-text path. The source must be a single-line inline TeX fragment. It is typeset into a TeX `\hbox` containing one zero-width standard `\strut`; temporary dvisvgm markers report the box's start coordinate, end coordinate, and baseline. The strut supplies a stable minimum `0.7 × \baselineskip` height and `0.3 × \baselineskip` depth without changing the formula width, while taller content expands naturally. Wrapper line breaks are suppressed so they cannot become TeX interword glue at either edge; explicit spacing written in the source is preserved. The embedded SVG uses `\PreviewBorder=0pt`. Its horizontal viewport is the union of the logical TeX width and genuine ink overhang, while its vertical viewport is the completed TeX line box; no vector safety padding or application-added edge spacing is introduced. All temporary measurement markers are removed before embedding the SVG.
 
 An auto-width formula whose role is ordinary content is surrounded by exactly one U+2060 WORD JOINER on each side.
 Those invisible boundary characters keep any user-authored U+0020 spaces out of Word's image-adjacency layout path;
@@ -147,7 +197,7 @@ The large temporary StemTeX canvas is solely a measurement surface. Its width is
 
 ### Fixed-width LaTeX block
 
-Fixed mode preserves the caller's typesetting width and supports display math, multiple lines, and paragraph-like LaTeX content. It deliberately keeps that page-width canvas. Such content does not have one meaningful surrounding-text baseline, so multiline/display blocks remain at Word position zero. Its editor exposes TeX font size, line spacing, uniform padding, vertical placement, text color, fill, and border controls. The authored outer frame minus padding/border becomes an exact TeX box with zero paragraph indentation; TeX owns leading, text color, and vertical placement. All outer decoration remains one SVG shell, not a Word Shape Fill/Line and not a TeX `\fbox`.
+Fixed mode preserves the caller's typesetting width and supports display math, multiple lines, and paragraph-like LaTeX content. It deliberately keeps that page-width canvas. Such content does not have one meaningful surrounding-text baseline, so multiline/display blocks remain at Word position zero. Its editor exposes TeX font size, line spacing, uniform padding, Top/Middle/Bottom vertical placement, text color, fill, and border controls. The authored outer frame minus padding becomes an exact TeX box with zero paragraph indentation. TeX owns leading, text color, horizontal left alignment, and vertical placement inside its fixed-height `vbox`. Ordinary text receives stable first/final line height and depth so x-height-only content cannot touch a Top-aligned content edge; standalone display math remains unwrapped. The SVG shell only adds padding, fill, an inside border, and clipping; it neither aligns the content again nor uses a Word Shape Fill/Line or TeX `\fbox`.
 
 Objects created before the mode field existed parse as `fixed`, preserving their former behavior. An inline fixed
 Content Block can be explicitly converted between modes. A floating Block remains fixed while it owns a physical
@@ -181,7 +231,8 @@ paragraph's typography.
 The authoritative source may use `\[...\]`, `$$...$$`, `\(...\)`, `$...$`, `displaymath`, or `equation` delimiters.
 For rendering only, LaTeX Blocks removes that outer delimiter and submits `\(\displaystyle <body>\)` through the
 existing auto-width hbox measurement path. Thus TeX selects display-style fractions, limits, and glyph metrics while
-the SVG is cropped to the formula's natural box. The wrapper never enters Alternative Text. A full TeX display
+the resulting single-baseline box receives the same standard minimum strut as an inline formula. The wrapper never
+enters Alternative Text. A full TeX display
 environment would retain the requested page width and is deliberately not embedded as the inline Word object.
 
 The right-aligned tab segment contains literal parentheses around a native field:

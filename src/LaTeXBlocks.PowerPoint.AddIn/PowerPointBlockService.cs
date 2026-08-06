@@ -126,8 +126,8 @@ namespace LaTeXBlocks.PowerPoint
                 throw new ArgumentOutOfRangeException(nameof(fontSizePt));
 
             style = style ?? LaTeXBlockStyle.Default;
-            // TeX owns the contents (glyphs, paragraph layout, leading and text
-            // colour). The final SVG owns the outer shell. In particular, do not
+            // TeX owns the contents (glyphs, paragraph layout, leading, vertical
+            // placement and text colour). The final SVG owns the outer shell. Do not
             // ask TeX \fbox / \colorbox to paint a full PowerPoint frame: TeX's
             // preview coordinates can lie outside dvisvgm's root viewport.
             var styleIsApplied = styleWasExplicit || !style.IsDefault;
@@ -190,7 +190,7 @@ namespace LaTeXBlocks.PowerPoint
             var framedSvg = styleIsApplied
                 ? render.SvgBytes
                 : FrameSvg(render.SvgBytes, ReadSvgWidthPt(render.SvgBytes),
-                    ReadSvgHeightPt(render.SvgBytes), style.VerticalAlignment);
+                    ReadSvgHeightPt(render.SvgBytes));
             var size = ReadSvgSize(framedSvg);
             var framedPath = WriteSvg(framedSvg);
             ResolveInsertionPoint(slide, size.WidthPt, size.HeightPt, out var left, out var top);
@@ -248,7 +248,8 @@ namespace LaTeXBlocks.PowerPoint
             var requestedFrameHeightPt = frameHeightPt ?? ReadFrameHeightPt(oldShape);
             var requestedFrameWidthPt = frameWidthPt ?? ReadFrameWidthPt(oldShape);
             // A non-default render already contains its complete SVG shell:
-            // padding, background, border, and vertical placement. Never add a
+            // padding, background, and border. Its vertical placement was resolved
+            // inside the TeX content box. Never add a
             // second host-side transparent frame; it would make the PowerPoint
             // extent disagree with the authored SVG frame. The requested frame is
             // authoritative: if its viewport is smaller than the TeX result, SVG
@@ -256,7 +257,7 @@ namespace LaTeXBlocks.PowerPoint
             var framedSvg = styleIsApplied
                 ? render.SvgBytes
                 : FrameSvg(render.SvgBytes, requestedFrameWidthPt,
-                    requestedFrameHeightPt, style.VerticalAlignment);
+                    requestedFrameHeightPt);
             var sourceSize = ReadSvgSize(framedSvg);
             var framedPath = WriteSvg(framedSvg);
             var newWidth = (float)sourceSize.WidthPt;
@@ -605,179 +606,13 @@ namespace LaTeXBlocks.PowerPoint
         internal static double ReadSvgWidthPt(byte[] svgBytes) => ReadSvgLengthPt(svgBytes, "width");
         internal static double ReadSvgHeightPt(byte[] svgBytes) => ReadSvgLengthPt(svgBytes, "height");
 
-        // StemTeX owns the content SVG. PowerPoint owns a surrounding block frame.
-        // Styled blocks use the same root-viewport technique, but also paint their
-        // own SVG shell. Keeping that shell in SVG rather than TeX avoids the
-        // preview/minipage coordinate mismatch that could place TeX's right edge
-        // outside the root viewBox.
-        private static byte[] DecorateSvg(byte[] svgBytes, LaTeXBlockStyle style,
-            double requestedFrameWidthPt, double? requestedFrameHeightPt)
-        {
-            if (svgBytes == null || svgBytes.Length == 0)
-                throw new ArgumentException("StemTeX returned an empty SVG.", nameof(svgBytes));
-            if (style == null) throw new ArgumentNullException(nameof(style));
-
-            var naturalSize = ReadSvgSize(svgBytes);
-            // A native PowerPoint frame is an explicit user instruction. Keep its
-            // physical size exactly, even when the unchanged TeX content will not
-            // fit. The root SVG viewport below provides the intentional clip.
-            var frameWidthPt = ClampHostFrameWidth(requestedFrameWidthPt);
-            var requestedHeight = requestedFrameHeightPt.HasValue &&
-                requestedFrameHeightPt.Value > 0 &&
-                !double.IsNaN(requestedFrameHeightPt.Value) &&
-                !double.IsInfinity(requestedFrameHeightPt.Value)
-                ? ClampHostFrameHeight(requestedFrameHeightPt.Value)
-                : 0;
-            // A newly inserted auto-height block has no requested host height, so
-            // it starts at the natural content extent. Once a height is supplied,
-            // including one smaller than that extent, it is exact.
-            var frameHeightPt = requestedHeight > 0
-                ? requestedHeight
-                : naturalSize.HeightPt + 2 * style.PaddingPt;
-
-            // The content remains at its original scale. Any extra horizontal
-            // space stays on the right; vertical extra space follows the selected
-            // Top/Middle/Bottom policy. The border is part of the inner inset.
-            // Slack deliberately remains signed. For an undersized frame that
-            // produces a right-edge horizontal crop; vertically it lets the selected
-            // Top/Middle/Bottom alignment decide which edge is preserved.
-            var horizontalSlackPt = frameWidthPt -
-                naturalSize.WidthPt - 2 * style.PaddingPt;
-            var leftPt = style.PaddingPt;
-            var rightPt = frameWidthPt - naturalSize.WidthPt - leftPt;
-            var verticalSlackPt = frameHeightPt -
-                naturalSize.HeightPt - 2 * style.PaddingPt;
-            double topPt;
-            switch (style.VerticalAlignment)
-            {
-                case LaTeXBlockVerticalAlignment.Middle:
-                    topPt = style.PaddingPt + verticalSlackPt / 2.0;
-                    break;
-                case LaTeXBlockVerticalAlignment.Bottom:
-                    topPt = style.PaddingPt + verticalSlackPt;
-                    break;
-                default:
-                    topPt = style.PaddingPt;
-                    break;
-            }
-            var bottomPt = frameHeightPt - naturalSize.HeightPt - topPt;
-
-            var svg = Encoding.UTF8.GetString(svgBytes);
-            var root = Regex.Match(svg, "<svg\\b[^>]*>",
-                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
-            if (!root.Success)
-                throw new InvalidDataException("StemTeX SVG has no root svg element.");
-            var closingIndex = svg.LastIndexOf("</svg>", StringComparison.OrdinalIgnoreCase);
-            if (closingIndex < root.Index + root.Length)
-                throw new InvalidDataException("StemTeX SVG has no closing root svg element.");
-
-            var rootTag = root.Value;
-            var viewBox = Regex.Match(rootTag,
-                "\\bviewBox=(?<q>['\"])(?<x>[-+0-9.eE]+)\\s+(?<y>[-+0-9.eE]+)\\s+" +
-                "(?<w>[-+0-9.eE]+)\\s+(?<h>[-+0-9.eE]+)\\k<q>",
-                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
-            if (!viewBox.Success ||
-                !TryReadFinitePositive(viewBox.Groups["w"].Value, out var viewBoxWidth) ||
-                !TryReadFinitePositive(viewBox.Groups["h"].Value, out var viewBoxHeight) ||
-                !TryReadFinite(viewBox.Groups["x"].Value, out var viewBoxX) ||
-                !TryReadFinite(viewBox.Groups["y"].Value, out var viewBoxY))
-                throw new InvalidDataException("StemTeX SVG has no numeric root viewBox.");
-
-            var xUnitsPerPt = viewBoxWidth / naturalSize.WidthPt;
-            var yUnitsPerPt = viewBoxHeight / naturalSize.HeightPt;
-            var frameViewBoxX = viewBoxX - leftPt * xUnitsPerPt;
-            var frameViewBoxY = viewBoxY - topPt * yUnitsPerPt;
-            var frameViewBoxWidth = viewBoxWidth + (leftPt + rightPt) * xUnitsPerPt;
-            var frameViewBoxHeight = viewBoxHeight + (topPt + bottomPt) * yUnitsPerPt;
-            var newViewBox = FormatSvgNumber(frameViewBoxX) + " " +
-                             FormatSvgNumber(frameViewBoxY) + " " +
-                             FormatSvgNumber(frameViewBoxWidth) + " " +
-                             FormatSvgNumber(frameViewBoxHeight);
-            rootTag = ReplaceSvgAttribute(rootTag, "width",
-                FormatSvgNumber(frameWidthPt) + "pt");
-            rootTag = ReplaceSvgAttribute(rootTag, "height",
-                FormatSvgNumber(frameHeightPt) + "pt");
-            rootTag = ReplaceSvgAttribute(rootTag, "viewBox", newViewBox);
-            // PowerPoint hosts the SVG as one image, but state the clip on the SVG
-            // itself as well: a deliberately undersized frame must not leak paint
-            // outside its authored viewport in another SVG consumer.
-            rootTag = ReplaceSvgAttribute(rootTag, "overflow", "hidden");
-
-            var frame = new StringBuilder();
-            frame.Append("<g data-latexblocks-frame='1'>");
-            if (style.HasBackgroundFill)
-            {
-                AppendSvgRect(frame, frameViewBoxX, frameViewBoxY, frameViewBoxWidth,
-                    frameViewBoxHeight, SvgColor(style.BackgroundColor));
-            }
-            frame.Append("</g>\n");
-
-            var border = new StringBuilder();
-            if (style.HasBorder)
-            {
-                // Use four filled strips, not a stroked rect. A stroke extends
-                // half outside its path and can be clipped at the SVG viewport.
-                var borderX = style.BorderThicknessPt * xUnitsPerPt;
-                var borderY = style.BorderThicknessPt * yUnitsPerPt;
-                var rightX = frameViewBoxX + frameViewBoxWidth - borderX;
-                var bottomY = frameViewBoxY + frameViewBoxHeight - borderY;
-                var color = SvgColor(style.BorderColor);
-                border.Append("<g data-latexblocks-border='1'>");
-                AppendSvgRect(border, frameViewBoxX, frameViewBoxY, frameViewBoxWidth,
-                    borderY, color);
-                AppendSvgRect(border, frameViewBoxX, bottomY, frameViewBoxWidth,
-                    borderY, color);
-                AppendSvgRect(border, frameViewBoxX, frameViewBoxY, borderX,
-                    frameViewBoxHeight, color);
-                AppendSvgRect(border, rightX, frameViewBoxY, borderX,
-                    frameViewBoxHeight, color);
-                border.Append("</g>\n");
-            }
-
-            var result = new StringBuilder(svg.Length + frame.Length + border.Length + 512);
-            result.Append(svg, 0, root.Index);
-            result.Append(rootTag);
-            result.Append('\n');
-            result.Append(frame);
-            result.Append(svg, root.Index + root.Length,
-                closingIndex - (root.Index + root.Length));
-            result.Append(border);
-            result.Append(svg, closingIndex, svg.Length - closingIndex);
-            return Encoding.UTF8.GetBytes(result.ToString());
-        }
-
-        private static void AppendSvgRect(StringBuilder svg, double x, double y,
-            double width, double height, string fill)
-        {
-            if (!(width > 0) || !(height > 0)) return;
-            svg.Append("<rect x='").Append(FormatSvgNumber(x)).Append("' y='")
-                .Append(FormatSvgNumber(y)).Append("' width='")
-                .Append(FormatSvgNumber(width)).Append("' height='")
-                .Append(FormatSvgNumber(height)).Append("' fill='").Append(fill)
-                .Append("'/>");
-        }
-
-        private static string SvgColor(System.Drawing.Color color)
-        {
-            return "#" + color.R.ToString("X2", CultureInfo.InvariantCulture) +
-                   color.G.ToString("X2", CultureInfo.InvariantCulture) +
-                   color.B.ToString("X2", CultureInfo.InvariantCulture);
-        }
-
-        private static string FormatSvgNumber(double value)
-        {
-            return value.ToString("0.#########", CultureInfo.InvariantCulture);
-        }
-
         // Reframe the root SVG without changing the TeX coordinate scale. A larger
         // target adds transparent viewport space; a smaller target selects a
-        // sub-viewport and clips overflow. Horizontal placement is left-aligned;
-        // vertical placement follows the requested Top/Middle/Bottom policy. The
+        // sub-viewport and clips overflow. Placement is top-left aligned. The
         // physical SVG dimensions therefore always equal the user-specified
         // PowerPoint frame.
         internal static byte[] FrameSvg(byte[] svgBytes, double requestedFrameWidthPt,
-            double requestedFrameHeightPt, LaTeXBlockVerticalAlignment verticalAlignment =
-                LaTeXBlockVerticalAlignment.Middle)
+            double requestedFrameHeightPt)
         {
             if (svgBytes == null || svgBytes.Length == 0)
                 throw new ArgumentException("StemTeX returned an empty SVG.", nameof(svgBytes));
@@ -810,26 +645,11 @@ namespace LaTeXBlocks.PowerPoint
             // Change each axis by the same ratio in physical and viewBox space.
             // This preserves the original TeX coordinate scale exactly; a larger
             // frame adds transparent space and a smaller one crops. The bare SVG
-            // path is deliberately given the same vertical policy as decorated
-            // blocks: `Top` means the original TeX viewport starts at the host
-            // frame's top edge, including when that style is otherwise default.
+            // path uses the same top-left origin as decorated blocks.
             var frameViewBoxWidth = viewBoxWidth * frameWidthPt / naturalSize.WidthPt;
             var frameViewBoxX = viewBoxX;
             var frameViewBoxHeight = viewBoxHeight * frameHeightPt / naturalSize.HeightPt;
-            var verticalExpansion = frameViewBoxHeight - viewBoxHeight;
-            double frameViewBoxY;
-            switch (verticalAlignment)
-            {
-                case LaTeXBlockVerticalAlignment.Top:
-                    frameViewBoxY = viewBoxY;
-                    break;
-                case LaTeXBlockVerticalAlignment.Bottom:
-                    frameViewBoxY = viewBoxY - verticalExpansion;
-                    break;
-                default:
-                    frameViewBoxY = viewBoxY - verticalExpansion / 2.0;
-                    break;
-            }
+            var frameViewBoxY = viewBoxY;
             var number = CultureInfo.InvariantCulture;
             var newViewBox = frameViewBoxX.ToString("0.######", number) + " " +
                              frameViewBoxY.ToString("0.######", number) + " " +

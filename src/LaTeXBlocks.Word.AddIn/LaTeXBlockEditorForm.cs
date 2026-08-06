@@ -199,6 +199,9 @@ namespace LaTeXBlocks.Word
             };
             verticalAlignmentBox.Items.AddRange(new object[] { "Top", "Middle", "Bottom" });
             verticalAlignmentBox.SelectedIndex = VerticalAlignmentToIndex(style.VerticalAlignment);
+            statusToolTip.SetToolTip(verticalAlignmentBox,
+                "Aligns content inside the fixed-height TeX content box. " +
+                "The SVG shell does not apply a second alignment.");
             textColorButton = CreateColorButton(this.textColor);
             backgroundColorButton = CreateColorButton(backgroundColor);
             borderColorButton = CreateColorButton(borderColor);

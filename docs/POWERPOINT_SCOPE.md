@@ -60,9 +60,9 @@ scripts, line breaking, and optical-size choices; the add-in never stretches SVG
 still cannot satisfy a user-specified frame after reflow, the root SVG viewport remains exactly that frame and clips
 the overflow. The host frame never silently grows back.
 
-The TeX layout area is horizontally left-anchored inside that host frame. Padding and an optional border define its
-left inset; any additional frame width remains on the right, and narrowing the frame clips the right edge. The SVG
-shell never recenters the TeX viewport.
+The TeX layout area is horizontally left-anchored inside that host frame. Padding alone defines its left inset; the
+optional border is painted inside the outer edge without shrinking the content box. Any additional frame width remains
+on the right, and narrowing the frame clips the right edge. The SVG shell never recenters the TeX viewport.
 
 The PowerPoint Ribbon deliberately exposes **Insert Block** and **Edit Block**, with no inline-math command.
 Double-clicking a recognized block opens the same editor. The Ribbon also exposes selection-aware
@@ -85,21 +85,25 @@ PowerPoint preview, insert, and rerender operations, and is not stored on indivi
 The PowerPoint editor offers a compact per-block style surface: ordinary-paragraph line spacing, uniform padding,
 Top/Middle/Bottom vertical placement, text color, background fill, and border color/width. This is not a facade over
 PowerPoint's picture formatting. The add-in keeps the author source verbatim in Alternative Text and serializes only
-the style values in a versioned PowerPoint-only tag. At render time, the add-in subtracts padding and border from the
-outer dimensions and StemTeX typesets an exact inner box with zero paragraph indentation, the selected leading,
-text color, and Top/Middle/Bottom placement. The add-in then paints only padding, background, and border into the
-finished SVG. This avoids treating a TeX `\\fbox` as the outer PowerPoint frame, whose paint can otherwise lie outside
+the style values in a versioned PowerPoint-only tag. At render time, the add-in subtracts padding from the outer
+dimensions and StemTeX typesets an exact inner box with zero paragraph indentation, the selected leading and text
+color, horizontal left alignment, and the selected Top/Middle/Bottom placement inside a fixed-height `vbox`. No
+SVG-side line metric is inferred: ordinary TeX text receives a stable first/final line box, while a standalone display
+remains free of paragraph or line-box injection. The add-in places the returned box at the padding origin, then paints
+only the background and inside border and clips the finished SVG; it performs no second vertical-alignment calculation. This avoids
+treating a TeX `\\fbox` as the outer PowerPoint frame, whose paint can otherwise lie outside
 dvisvgm's SVG viewport.
 
 The separate `LATEXBLOCKS_TEX_STYLE_APPLIED=1` marker distinguishes an editor-confirmed default style from a default
 style tag written by older releases. The former literally uses the editor's 1.20× leading and an SVG shell; the latter
-remains a compatible bare SVG until the user edits it. Non-default legacy style tags already opt into the styled route.
+remains a compatible bare SVG until the user edits it. Non-default legacy style tags already opt into the styled route,
+and their `valign=top|middle|bottom` value remains part of the version-one style contract and is restored as authored.
 
 New auto-height blocks fit their content, so vertical placement has no spare height to distribute. Once a block has a
 fixed native frame height, TeX receives the corresponding inner height and places its content at the selected Top,
-Middle, or Bottom position. When the content is taller than that explicit frame, the same TeX alignment chooses the
-preserved edge (or the center) and the outer SVG viewport clips the rest; it never scales the TeX result or
-grows the frame. The line-spacing control applies to ordinary paragraph leading. It deliberately does not redefine
+Middle, or Bottom position. When content exceeds that explicit frame, the same TeX alignment determines the preserved
+edge (or center), and the outer SVG viewport only clips the result; it never scales the TeX output, grows the frame, or
+aligns the content again. The line-spacing control applies to ordinary paragraph leading. It deliberately does not redefine
 the row spacing of math environments such as `align` or `gather`; those have their own TeX layout controls.
 
 The PowerPoint tag is host-specific, but the declared style model is shared with Word's fixed Content Block editor.

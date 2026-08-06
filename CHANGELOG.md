@@ -5,6 +5,107 @@ Word-and-PowerPoint package line.
 
 ## [Unreleased]
 
+## [0.2.61] — 2026-08-06
+
+### Word
+
+- Removed every Office COM call from the confirmed host-exit path. Word now owns destruction of its Quit, window,
+  and CommandBar connection points instead of the add-in issuing synchronous event-unsubscribe RPCs while Office is
+  already tearing those servers down.
+
+## [0.2.60] — 2026-08-06
+
+### Word
+
+- Prevented Word/VSTO shutdown from waiting for desktop-wide UI Automation event removal. On an actual host exit the
+  colour monitor makes callbacks inert, stops timers, releases native hooks, and lets process teardown reclaim UIA
+  registrations; ordinary disposal still unregisters them synchronously.
+
+## [0.2.59] — 2026-08-06
+
+### Word
+
+- Corrected inline baseline placement to use only the newly rendered TeX depth: `Font.Position = -round(depth)`.
+  Word already interprets this value relative to the current line baseline, so neighboring text, manual breaks, and
+  previously compensated formulas can no longer influence insertion, Update, Font Color, or Font Size refreshes.
+## [0.2.58] — 2026-08-06
+
+### Word
+
+- Fixed inline-formula baseline drift at the start of a visual line separated by a manual break (`Shift+Enter`).
+  Baseline resolution now treats Word's `\v` character as a hard boundary instead of inheriting the preceding
+  line-break run's compensated `Font.Position` and subtracting the TeX depth again during an update.
+
+## [0.2.57] — 2026-08-06
+
+### Word
+
+- Abstracted native Font Color as value-free `Began`/`Committed`/`Canceled` transactions instead of exposing raw
+  UIA/MSAA events to the Word document layer. A gallery hover identifies a scoped swatch but does not commit; an actual
+  click on that same swatch does. Opening or canceling the palette and canceling More Colors no longer apply a stale
+  last-used colour; the main button, a committed swatch, and More Colors **OK** each produce one update. Popup close
+  ordering cannot discard the active swatch, while a paired down/up on the live popup prevents an Escape followed by
+  a stale-coordinate click from committing. Generation-bound mouse confirmation is reconciled only after Word
+  processes its native command, and a single FIFO UI-thread queue preserves Begin-before-terminal ordering across
+  callback threads.
+- Made an ordinary text range containing one or more Auto formulas behave like text under Word's native Font Color:
+  Word colours the text and formula drawing characters, then LaTeX Blocks immediately rerenders each changed formula.
+  A shared range lease preserves the mixed selection across asynchronous replacements without stealing it back after
+  the user moves elsewhere.
+- Kept the formula as an exact `InlineShape` selection. On a confirmed colour commit, LaTeX Blocks briefly uses a
+  collapsed caret to read Word's current picker value, restores the exact picture selection, applies the value to the
+  drawing run, and queues the SVG refresh. The U+2060 spacing boundaries are never turned into a persistent text
+  selection, so copy, arrow navigation, and picture handles retain normal Word behavior.
+- Preserved Word's native colour semantics across SVG replacement: Automatic, direct BGR, and theme slot plus
+  tint/shade remain distinct, while StemTeX receives the resolved display RGB. Independent highlight, underline,
+  proofing/language properties still survive and the formula baseline is still recomputed.
+
+## [0.2.56] — 2026-08-06
+
+### Word
+
+- Attempted to observe native Font Color through the resize mouse-capture completion path. Exact InlineShape selection
+  proved to be a Word command no-op, and opening/canceling the gallery uses the same generic signal; 0.2.57 replaces
+  this insufficient route with command-specific accessibility events and a transactional caret probe.
+
+## [0.2.55] — 2026-08-06
+
+### Word
+
+- Made native formula-format refreshes property-aware rather than restoring the old drawing run wholesale. Font Size
+  and Font Color remain renderer inputs, independent Word formatting such as highlight, underline, proofing, language,
+  and other direct character attributes survives SVG replacement, while baseline position and script flags are always
+  recomputed from the new formula contract. The completion path also rejects an in-flight render when either live size
+  or colour has changed, including native colour races on legacy unstyled Fixed Blocks.
+- Kept an exactly selected formula highlighted after a native Font Color or font-size refresh replaces its SVG.
+  Selection is transferred only when the same old InlineShape is still selected at commit time; moving the caret
+  while TeX renders is respected and never causes the add-in to steal the selection back.
+- Preserved an existing paragraph mark when inserting or updating a formula at the end of a non-final paragraph.
+  SVG normalization now distinguishes Word's temporary `InsertXML` separator from the document-owned paragraph
+  terminator, so the following paragraph is no longer merged into the formula's paragraph.
+
+## [0.2.54] — 2026-08-06
+
+### Word and PowerPoint
+
+- Restored a stable TeX line box on the first and final lines of ordinary Block text. Lowercase-only runs such as
+  `aa` therefore retain the selected font's full typographic ascent/depth instead of collapsing to x-height at a
+  Top-aligned frame edge. Standalone display math remains free of paragraph or strut injection, and all fixed-frame
+  vertical placement remains inside TeX rather than the SVG shell.
+- Applied the same standard zero-width TeX strut to every natural-width, single-baseline formula box, including
+  inline math and Word-native displaystyle equations. These SVGs now use the strut as their minimum height/depth with
+  `PreviewBorder=0pt`; their horizontal TeX width and visible baseline remain unchanged, while taller math still
+  expands naturally.
+
+## [0.2.53] — 2026-08-06
+
+### Word and PowerPoint
+
+- Removed the obsolete fixed-Block line-box strut while retaining Top/Middle/Bottom in both editors and existing v1
+  style payloads. The authored outer frame minus padding now defines one exact, horizontally left-aligned TeX content
+  box; TeX alone performs the selected vertical placement inside its fixed-height `vbox`. The SVG layer places that
+  box at the padding origin and only adds fill, an inside border, and clipping, with no second alignment calculation.
+
 ## [0.2.51] — 2026-08-06
 
 ### Word
