@@ -20,14 +20,16 @@ namespace LaTeXBlocks.Word
 
     internal enum WordFormatProperty
     {
-        TextColor
+        TextColor,
+        FontSize
     }
 
     internal enum WordFormatInteractionOrigin
     {
         FontColorMainButton,
         FontColorPalette,
-        FontColorMoreColorsDialog
+        FontColorMoreColorsDialog,
+        FontSizeControl
     }
 
     /// <summary>
@@ -256,6 +258,7 @@ namespace LaTeXBlocks.Word
         private const string FontColorPickerId = "FontColorPicker";
         private const string FontColorDropDownId = "FontColorPicker_Dropdown";
         private const string MoreColorsId = "FontColorMoreColorsDialog";
+        private const string FontSizeId = "FontSize";
         private const int MaximumAncestorDepth = 16;
         private const uint EventObjectHide = 0x8003;
         private const uint EventObjectFocus = 0x8005;
@@ -298,6 +301,9 @@ namespace LaTeXBlocks.Word
         private AutomationElement automationRoot;
         private long suppressInvocationsUntilUtcTicks;
         private int suppressNextPickerInvocation;
+        private long mainButtonCommitDedupUntilUtcTicks;
+        private long fontSizeCommitDedupUntilUtcTicks;
+        private long fontSizeSessionUntilUtcTicks;
         private long paletteSessionUntilUtcTicks;
         private long paletteCandidateUntilUtcTicks;
         private IntPtr paletteCandidateHwnd;
@@ -483,7 +489,7 @@ namespace LaTeXBlocks.Word
                                  !invokedSnapshot.IsFontColorDropDown &&
                                  invokedSnapshot.IsMainButton &&
                                  !TryConsumeProgrammaticInvocationSuppression())
-                            Observe(WordFontColorSignal.MainButtonInvoked);
+                            ObserveMainButtonCommit();
                     }
                     return;
                 }
@@ -636,7 +642,53 @@ namespace LaTeXBlocks.Word
             // ListItems. More Colors is an empty-id NetUITWBtnMenuItem rather than
             // exposing its idMso through UIA, so classify by control type/class too.
             if (snapshot.IsMainButton)
-                Observe(WordFontColorSignal.MainButtonInvoked);
+                ObserveMainButtonCommit();
+        }
+
+        private void ObserveMainButtonCommit()
+        {
+            lock (stateGate)
+            {
+                var now = DateTime.UtcNow.Ticks;
+                if (now <= mainButtonCommitDedupUntilUtcTicks) return;
+                // The low-level mouse confirmation and an optional provider Invoke
+                // describe the same split-button gesture. Accept the first signal
+                // and suppress only its immediate duplicate.
+                mainButtonCommitDedupUntilUtcTicks =
+                    DateTime.UtcNow.AddMilliseconds(300).Ticks;
+            }
+            Observe(WordFontColorSignal.MainButtonInvoked);
+        }
+
+        private void ObserveFontSizeCommit()
+        {
+            lock (stateGate)
+            {
+                var now = DateTime.UtcNow.Ticks;
+                if (now <= fontSizeCommitDedupUntilUtcTicks) return;
+                fontSizeCommitDedupUntilUtcTicks =
+                    DateTime.UtcNow.AddMilliseconds(300).Ticks;
+                var began = formatTransactionState.Begin(WordFormatProperty.FontSize,
+                    WordFormatInteractionOrigin.FontSizeControl,
+                    out var canceledPrevious);
+                QueueFormatSignalLocked(canceledPrevious);
+                QueueFormatSignalLocked(began);
+                QueueFormatSignalLocked(formatTransactionState.Commit(
+                    began.InteractionId, WordFormatProperty.FontSize,
+                    WordFormatInteractionOrigin.FontSizeControl));
+            }
+        }
+
+        private void BeginFontSizeSession()
+        {
+            Interlocked.Exchange(ref fontSizeSessionUntilUtcTicks,
+                DateTime.UtcNow.AddSeconds(30).Ticks);
+        }
+
+        private bool TryConsumeFontSizeSession()
+        {
+            var deadline = Interlocked.Exchange(ref fontSizeSessionUntilUtcTicks, 0);
+            return deadline != 0 && DateTime.UtcNow.Ticks <= deadline;
         }
 
         private void ObserveCurrentPaletteCommit()
@@ -1346,6 +1398,9 @@ namespace LaTeXBlocks.Word
                     }
                     if (interactionId != 0)
                         SchedulePaletteCommit(interactionId);
+                    else if (message == WindowMessageLeftButtonUp &&
+                             processId == unchecked((uint)wordProcessId))
+                        QueueFormattingControlHitTest(mouse.Point);
                 }
                 catch
                 {
@@ -1355,6 +1410,40 @@ namespace LaTeXBlocks.Word
                 }
             }
             return CallNextHookEx(lowLevelMouseHook, hookCode, wParam, lParam);
+        }
+
+        private void QueueFormattingControlHitTest(NativePoint point)
+        {
+            // EVENT_OBJECT_INVOKED is optional for the main half of Office's split
+            // button. Confirm the released control independently. Run UIA away from
+            // the low-level hook so input delivery is never held up by a provider.
+            ThreadPool.QueueUserWorkItem(_ =>
+            {
+                if (disposed) return;
+                try
+                {
+                    var element = AutomationElement.FromPoint(
+                        new System.Windows.Point(point.X, point.Y));
+                    if (element == null) return;
+                    var snapshot = ElementSnapshot.Capture(element, wordProcessId);
+                    if (snapshot.IsInsideFontColorPicker &&
+                        !snapshot.IsFontColorDropDown && snapshot.IsMainButton &&
+                        !TryConsumeProgrammaticInvocationSuppression())
+                        ObserveMainButtonCommit();
+                    else if (snapshot.IsInsideFontSize &&
+                             !snapshot.IsPopupChoice)
+                        BeginFontSizeSession();
+                    else if (snapshot.IsInsideFontSize && snapshot.IsPopupChoice)
+                    {
+                        TryConsumeFontSizeSession();
+                        ObserveFontSizeCommit();
+                    }
+                    else if (TryConsumeFontSizeSession())
+                        ObserveFontSizeCommit();
+                }
+                catch (ElementNotAvailableException) { }
+                catch (InvalidOperationException) { }
+            });
         }
 
         private static bool IsSameWindowTree(IntPtr first, IntPtr second)
@@ -1567,14 +1656,15 @@ namespace LaTeXBlocks.Word
         {
             private ElementSnapshot(bool isWordProcess, string automationId,
                 bool isInsideFontColorPicker, bool isFontColorDropDown,
-                bool isMoreColorsButton, string className, int controlTypeId,
-                IntPtr nativeWindowHandle)
+                bool isMoreColorsButton, bool isInsideFontSize, string className,
+                int controlTypeId, IntPtr nativeWindowHandle)
             {
                 IsWordProcess = isWordProcess;
                 AutomationId = automationId;
                 IsInsideFontColorPicker = isInsideFontColorPicker;
                 IsFontColorDropDown = isFontColorDropDown;
                 IsMoreColorsButton = isMoreColorsButton;
+                IsInsideFontSize = isInsideFontSize;
                 ClassName = className;
                 ControlTypeId = controlTypeId;
                 NativeWindowHandle = nativeWindowHandle;
@@ -1585,6 +1675,7 @@ namespace LaTeXBlocks.Word
             internal bool IsInsideFontColorPicker { get; }
             internal bool IsFontColorDropDown { get; }
             internal bool IsMoreColorsButton { get; }
+            internal bool IsInsideFontSize { get; }
             internal string ClassName { get; }
             internal int ControlTypeId { get; }
             internal IntPtr NativeWindowHandle { get; }
@@ -1596,6 +1687,9 @@ namespace LaTeXBlocks.Word
                 ControlTypeId == ControlType.ListItem.Id ||
                 string.Equals(ClassName, "NetUIGalleryButton",
                     StringComparison.OrdinalIgnoreCase);
+            internal bool IsPopupChoice =>
+                ControlTypeId == ControlType.ListItem.Id ||
+                ControlTypeId == ControlType.MenuItem.Id;
             internal bool IsMoreColorsMenuItem => IsMoreColorsButton ||
                 (ControlTypeId == ControlType.MenuItem.Id &&
                  string.Equals(ClassName, "NetUITWBtnMenuItem",
@@ -1612,12 +1706,13 @@ namespace LaTeXBlocks.Word
                 var nativeWindowHandle = new IntPtr(
                     element.Current.NativeWindowHandle);
                 if (processId != wordProcessId)
-                    return new ElementSnapshot(false, automationId, false, false, false,
-                        className, controlTypeId, nativeWindowHandle);
+                    return new ElementSnapshot(false, automationId, false, false,
+                        false, false, className, controlTypeId, nativeWindowHandle);
 
                 var insidePicker = automationId == FontColorPickerId;
                 var isDropDown = automationId == FontColorDropDownId;
                 var isMoreColors = automationId == MoreColorsId;
+                var isFontSize = automationId == FontSizeId;
                 var current = element;
                 for (var depth = 0; depth < MaximumAncestorDepth && current != null; depth++)
                 {
@@ -1627,11 +1722,12 @@ namespace LaTeXBlocks.Word
                     insidePicker = insidePicker || ancestorId == FontColorPickerId;
                     isDropDown = isDropDown || ancestorId == FontColorDropDownId;
                     isMoreColors = isMoreColors || ancestorId == MoreColorsId;
+                    isFontSize = isFontSize || ancestorId == FontSizeId;
                     try { current = TreeWalker.RawViewWalker.GetParent(current); }
                     catch (ElementNotAvailableException) { break; }
                 }
                 return new ElementSnapshot(true, automationId, insidePicker,
-                    isDropDown, isMoreColors, className, controlTypeId,
+                    isDropDown, isMoreColors, isFontSize, className, controlTypeId,
                     nativeWindowHandle);
             }
         }

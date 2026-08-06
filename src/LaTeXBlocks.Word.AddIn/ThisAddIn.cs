@@ -21,6 +21,9 @@ namespace LaTeXBlocks.Word
         private string backendStatus = "not-started";
         private Office.CommandBarComboBox nativeFontSizeControl;
         private bool refreshingNativeFontSize;
+        private long lastFontSizeCommitUtcTicks;
+        private double lastFontSizeCommitPt;
+        private SelectionRangeLease lastFontSizeCommitLease;
         private List<SelectionFontSnapshot> previousSelectionFontSnapshots = new List<SelectionFontSnapshot>();
         private SelectionRangeLease previousSelectionRangeLease;
         private BlockFrameSnapshot previousBlockFrameSnapshot;
@@ -313,12 +316,18 @@ namespace LaTeXBlocks.Word
         private void WordFormatInteractionSource_FormatInteraction(object sender,
             WordFormatInteractionEventArgs e)
         {
-            if (e == null || e.Property != WordFormatProperty.TextColor ||
-                shuttingDown || !hostEventProcessingEnabled ||
+            if (e == null || shuttingDown || !hostEventProcessingEnabled ||
                 programmaticMutationDepth > 0 || Application.Documents.Count == 0)
                 return;
             try
             {
+                if (e.Property == WordFormatProperty.FontSize)
+                {
+                    if (e.Phase == WordFormatInteractionPhase.Committed)
+                        _ = CommitFontSizeInteractionAfterHostAsync();
+                    return;
+                }
+                if (e.Property != WordFormatProperty.TextColor) return;
                 switch (e.Phase)
                 {
                     case WordFormatInteractionPhase.Began:
@@ -330,7 +339,7 @@ namespace LaTeXBlocks.Word
                             pendingFontColorInteraction = null;
                         break;
                     case WordFormatInteractionPhase.Committed:
-                        CommitFontColorInteraction(e.InteractionId);
+                        QueueFontColorInteractionCommit(e.InteractionId);
                         break;
                 }
             }
@@ -342,6 +351,60 @@ namespace LaTeXBlocks.Word
                     MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
             finally { ribbon?.InvalidateWidthControl(); }
+        }
+
+        private async Task CommitFontSizeInteractionAfterHostAsync()
+        {
+            try
+            {
+                await Task.Delay(75).ConfigureAwait(false);
+                await InvokeOnWordUiAsync(RefreshSelectedFontSize).ConfigureAwait(false);
+            }
+            catch (TaskCanceledException) { }
+            catch (ObjectDisposedException) { }
+        }
+
+        private void QueueFontColorInteractionCommit(long interactionId)
+        {
+            // Ribbon accessibility notifications can precede Word's own command
+            // commit. Another posted UI callback is not a completion boundary: the
+            // Fluent command itself may also be posted behind it. Use one bounded
+            // post-command confirmation delay, then read Word exactly once on its UI
+            // thread. This is not a selection-change fallback or a recurring poll.
+            _ = CommitFontColorInteractionAfterHostAsync(interactionId);
+        }
+
+        private async Task CommitFontColorInteractionAfterHostAsync(long interactionId)
+        {
+            try
+            {
+                await Task.Delay(75).ConfigureAwait(false);
+                await InvokeOnWordUiAsync(() =>
+                {
+                    if (shuttingDown || !hostEventProcessingEnabled ||
+                        programmaticMutationDepth > 0 || Application.Documents.Count == 0)
+                        return;
+                    CommitFontColorInteraction(interactionId);
+                    ribbon?.InvalidateWidthControl();
+                }).ConfigureAwait(false);
+            }
+            catch (TaskCanceledException) { }
+            catch (ObjectDisposedException) { }
+            catch (Exception exception)
+            {
+                if (shuttingDown) return;
+                try
+                {
+                    await InvokeOnWordUiAsync(() =>
+                    {
+                        pendingFontColorInteraction = null;
+                        MessageBox.Show(new LaTeXBlocksRibbon.WordWindow(Application),
+                            exception.GetBaseException().Message, "LaTeX Blocks",
+                            MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    }).ConfigureAwait(false);
+                }
+                catch { }
+            }
         }
 
         private PendingFontColorInteraction CaptureFontColorInteraction(long interactionId)
@@ -1027,13 +1090,7 @@ namespace LaTeXBlocks.Word
             try
             {
                 refreshingNativeFontSize = true;
-                var selection = Application.Selection;
-                var size = (double)selection.Font.Size;
-                if (size < 1 || size > 200) return;
-                var selectionLease = SelectionRangeLease.Capture(selection);
-                QueueFormatRefresh(CaptureAutoBlocks(selection.Range, size, true,
-                    selectionLease));
-                RememberSelection(selection);
+                RefreshSelectedFontSize();
             }
             catch (Exception exception)
             {
@@ -1045,6 +1102,30 @@ namespace LaTeXBlocks.Word
                 refreshingNativeFontSize = false;
                 ribbon?.InvalidateWidthControl();
             }
+        }
+
+        private void RefreshSelectedFontSize()
+        {
+            if (shuttingDown || !hostEventProcessingEnabled ||
+                Application.Documents.Count == 0)
+                return;
+            var selection = Application.Selection;
+            var size = (double)selection.Font.Size;
+            if (size < 1 || size > 200) return;
+            var selectionLease = SelectionRangeLease.Capture(selection);
+            var now = DateTime.UtcNow.Ticks;
+            if (lastFontSizeCommitLease != null &&
+                now - lastFontSizeCommitUtcTicks <=
+                    TimeSpan.FromMilliseconds(500).Ticks &&
+                Math.Abs(lastFontSizeCommitPt - size) < 0.001 &&
+                lastFontSizeCommitLease.Matches(selection))
+                return;
+            lastFontSizeCommitUtcTicks = now;
+            lastFontSizeCommitPt = size;
+            lastFontSizeCommitLease = selectionLease;
+            QueueFormatRefresh(CaptureAutoBlocks(selection.Range, size, true,
+                selectionLease));
+            RememberSelection(selection);
         }
 
         private void Application_WindowSelectionChange(WordInterop.Selection selection)

@@ -5,6 +5,36 @@ Word-and-PowerPoint package line.
 
 ## [Unreleased]
 
+## [0.2.76] — 2026-08-07
+
+### Word
+
+- Added an immediate Font Size transaction for the Fluent Ribbon control and its detached popup list. Mouse selection
+  and legacy `CommandBarComboBox.Change` signals now converge on the same deduplicated batch refresh without requiring
+  the user to leave the selection.
+
+## [0.2.75] — 2026-08-07
+
+### Word
+
+- Added an explicit mouse-release signal for the main half of Word's Font Color split button, whose accessibility
+  provider does not reliably publish `EVENT_OBJECT_INVOKED`. Provider and mouse signals for the same gesture are
+  deduplicated before entering the existing colour refresh transaction.
+
+## [0.2.74] — 2026-08-07
+
+### Word
+
+- Replaced the ineffective extra-dispatch-turn Font Color synchronization with one bounded post-command delay before
+  reading Word's committed range colour. Formula refresh no longer depends on leaving the selection.
+
+## [0.2.73] — 2026-08-07
+
+### Word
+
+- Deferred native Font Color commits by one Word UI turn so the selected formulas read the colour after Word has
+  applied it and refresh immediately without requiring the user to clear the selection.
+
 ## [0.2.72] — 2026-08-07
 
 ### Word
