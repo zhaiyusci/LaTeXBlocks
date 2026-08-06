@@ -5,6 +5,69 @@ Word-and-PowerPoint package line.
 
 ## [Unreleased]
 
+## [0.2.51] — 2026-08-06
+
+### Word
+
+- **Paste from LaTeX** now parses adjacent dollar-delimited formulas such as `$a$$b$` as two inline formulas,
+  without changing the existing `$$...$$` display-math syntax.
+
+## [0.2.50] — 2026-08-06
+
+### Word
+
+- **Paste from LaTeX** now follows TeX newline semantics: a single physical newline becomes interword whitespace,
+  while two or more consecutive newlines collapse to one Word paragraph break. Explicit `\\` remains a manual
+  line break.
+
+## [0.2.49] — 2026-08-06
+
+### Word
+
+- Updating an inline formula now recomputes its baseline from adjacent prose and the newly rendered TeX depth,
+  repairing formulas whose drawing run has lost `w:position` instead of preserving the damaged position.
+
+## [0.2.48] — 2026-08-06
+
+### Word
+
+- Mixed **Paste from LaTeX** now restores the original Word `Font.Position` before every formula insertion, so the
+  TeX-depth compensation of an earlier inline formula cannot become the host baseline of a later formula.
+
+## [0.2.47] — 2026-08-06
+
+### Word and PowerPoint
+
+- Simplified the Fixed Block box model: the authored outer frame minus exactly twice the padding is the TeX content
+  box. Border thickness no longer changes the content measure; background and an inside border are painted only
+  after StemTeX returns the exact content SVG.
+- Wrapper setup is now space-neutral without ending or vertically shifting the surrounding TeX paragraph, so top
+  padding is preserved as literally as left padding.
+
+## [0.2.46] — 2026-08-06
+
+### Word and PowerPoint
+
+- Removed the real 1.67 em leading glue produced when StemTeX entered the request file in horizontal mode. Styled
+  Block content now begins at the SVG content-box origin, with only the explicitly configured padding remaining.
+
+## [0.2.45] — 2026-08-06
+
+### Word and PowerPoint
+
+- Fixed styled Block paragraphs now reset every inherited TeX left-margin mechanism (`parindent`, `leftskip`,
+  `parshape`, `hangindent`, and `everypar`) so the content origin is exactly the configured padding edge.
+
+## [0.2.44] — 2026-08-06
+
+### Word and PowerPoint
+
+- Fixed-width Blocks now keep the TeX viewport horizontally left-anchored. Padding and border define the left inset;
+  widening a frame adds room on the right, while narrowing it clips the right edge instead of centering the content.
+- Styled Fixed Blocks now derive an exact TeX content box from the authored outer frame minus padding and border.
+  TeX owns paragraph indentation (`0pt`) and Top/Middle/Bottom placement; SVG only paints the background/border shell
+  and clips at the requested outer bounds.
+
 ## [0.2.43] — 2026-08-06
 
 ### Word

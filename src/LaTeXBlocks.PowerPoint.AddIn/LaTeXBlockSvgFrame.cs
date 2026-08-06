@@ -12,13 +12,13 @@ namespace LaTeXBlocks.Word
 #endif
 {
     // Host-neutral SVG shell composition for styled fixed blocks.  TeX produces
-    // only the content's typographic box; this class gives it a precise outer
+    // the complete content layout box; this class gives it a precise outer
     // viewport without scaling glyphs.  The style wrapper guarantees that a
     // one-line lowercase run retains LaTeX's strut ascent/descent instead of being
     // reduced to its visible ink bounds. The root also provides an inherited
     // foreground colour for standalone displays, which must remain a pure TeX
     // vertical list. Both Office hosts therefore share padding, fill, border,
-    // crop and vertical-alignment semantics exactly.
+    // crop semantics exactly. Paragraph and alignment semantics remain in TeX.
     internal static class LaTeXBlockSvgFrame
     {
         internal static byte[] Decorate(byte[] svgBytes, LaTeXBlockStyle style,
@@ -40,27 +40,14 @@ namespace LaTeXBlocks.Word
                 : 0;
             var frameHeightPt = requestedHeight > 0
                 ? requestedHeight
-                : naturalSize.HeightPt + 2 * style.OuterInsetPt;
+                : naturalSize.HeightPt + 2 * style.PaddingPt;
 
-            var horizontalSlackPt = frameWidthPt - naturalSize.WidthPt -
-                2 * style.OuterInsetPt;
-            var leftPt = style.OuterInsetPt + horizontalSlackPt / 2.0;
+            // TeX has already made the exact inner layout box and aligned its
+            // contents. SVG only places that box at the top-left content origin,
+            // paints the shell, and clips any overflow at the authored frame.
+            var leftPt = style.PaddingPt;
             var rightPt = frameWidthPt - naturalSize.WidthPt - leftPt;
-            var verticalSlackPt = frameHeightPt - naturalSize.HeightPt -
-                2 * style.OuterInsetPt;
-            double topPt;
-            switch (style.VerticalAlignment)
-            {
-                case LaTeXBlockVerticalAlignment.Middle:
-                    topPt = style.OuterInsetPt + verticalSlackPt / 2.0;
-                    break;
-                case LaTeXBlockVerticalAlignment.Bottom:
-                    topPt = style.OuterInsetPt + verticalSlackPt;
-                    break;
-                default:
-                    topPt = style.OuterInsetPt;
-                    break;
-            }
+            var topPt = style.PaddingPt;
             var bottomPt = frameHeightPt - naturalSize.HeightPt - topPt;
 
             var svg = Encoding.UTF8.GetString(svgBytes);

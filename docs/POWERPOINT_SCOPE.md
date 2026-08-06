@@ -60,6 +60,10 @@ scripts, line breaking, and optical-size choices; the add-in never stretches SVG
 still cannot satisfy a user-specified frame after reflow, the root SVG viewport remains exactly that frame and clips
 the overflow. The host frame never silently grows back.
 
+The TeX layout area is horizontally left-anchored inside that host frame. Padding and an optional border define its
+left inset; any additional frame width remains on the right, and narrowing the frame clips the right edge. The SVG
+shell never recenters the TeX viewport.
+
 The PowerPoint Ribbon deliberately exposes **Insert Block** and **Edit Block**, with no inline-math command.
 Double-clicking a recognized block opens the same editor. The Ribbon also exposes selection-aware
 **Typesetting width (pt)** and **TeX size (pt)** fields, enabled only for one recognized block. The width field is
@@ -81,8 +85,9 @@ PowerPoint preview, insert, and rerender operations, and is not stored on indivi
 The PowerPoint editor offers a compact per-block style surface: ordinary-paragraph line spacing, uniform padding,
 Top/Middle/Bottom vertical placement, text color, background fill, and border color/width. This is not a facade over
 PowerPoint's picture formatting. The add-in keeps the author source verbatim in Alternative Text and serializes only
-the style values in a versioned PowerPoint-only tag. At render time, StemTeX applies the typographic part of the style
-(leading and text color), while the add-in composes padding, background, border, and vertical placement into the
+the style values in a versioned PowerPoint-only tag. At render time, the add-in subtracts padding and border from the
+outer dimensions and StemTeX typesets an exact inner box with zero paragraph indentation, the selected leading,
+text color, and Top/Middle/Bottom placement. The add-in then paints only padding, background, and border into the
 finished SVG. This avoids treating a TeX `\\fbox` as the outer PowerPoint frame, whose paint can otherwise lie outside
 dvisvgm's SVG viewport.
 
@@ -91,9 +96,9 @@ style tag written by older releases. The former literally uses the editor's 1.20
 remains a compatible bare SVG until the user edits it. Non-default legacy style tags already opt into the styled route.
 
 New auto-height blocks fit their content, so vertical placement has no spare height to distribute. Once a block has a
-fixed native frame height, the SVG viewport supplies the extra room and places the unchanged TeX content at the
-selected Top, Middle, or Bottom position. When the content is taller than that explicit frame, the same alignment
-chooses the preserved edge (or the center) and the SVG viewport clips the rest; it never scales the TeX result or
+fixed native frame height, TeX receives the corresponding inner height and places its content at the selected Top,
+Middle, or Bottom position. When the content is taller than that explicit frame, the same TeX alignment chooses the
+preserved edge (or the center) and the outer SVG viewport clips the rest; it never scales the TeX result or
 grows the frame. The line-spacing control applies to ordinary paragraph leading. It deliberately does not redefine
 the row spacing of math environments such as `align` or `gather`; those have their own TeX layout controls.
 

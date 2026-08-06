@@ -242,10 +242,17 @@ namespace LaTeXBlocks.Word
                 // foreground colour must still be authored in TeX, while the SVG
                 // shell makes the requested outer viewport exact. Older blocks
                 // without a style payload continue through the legacy bare path.
+                var authoredFrameWidthPt = outerWidthPt ?? widthPt;
                 var contentWidthPt = Math.Max(0.1,
-                    widthPt - 2 * style.OuterInsetPt);
+                    authoredFrameWidthPt - 2 * style.PaddingPt);
+                var contentHeightPt = outerHeightPt.HasValue
+                    ? Math.Max(0.1, outerHeightPt.Value - 2 * style.PaddingPt)
+                    : (double?)null;
                 rendererWidthPt = LaTeXBlockStyle.ToTeXLengthPt(contentWidthPt);
-                renderSource = style.WrapSource(renderSource, fontSizePt, true);
+                renderSource = style.WrapSource(renderSource, fontSizePt, true,
+                    rendererWidthPt, contentHeightPt.HasValue
+                        ? LaTeXBlockStyle.ToTeXLengthPt(contentHeightPt.Value)
+                        : (double?)null);
             }
             else
             {
@@ -289,6 +296,20 @@ namespace LaTeXBlocks.Word
         internal WordInterop.InlineShape InsertRendered(string source, double widthPt,
             LaTeXBlockLayoutMode mode, LaTeXBlockRender render, LaTeXBlockStyle style)
         {
+            return InsertRenderedCore(source, widthPt, mode, render, style, null);
+        }
+
+        internal WordInterop.InlineShape InsertRenderedAtHostPosition(string source,
+            double widthPt, LaTeXBlockLayoutMode mode, LaTeXBlockRender render,
+            int hostPosition)
+        {
+            return InsertRenderedCore(source, widthPt, mode, render, null, hostPosition);
+        }
+
+        private WordInterop.InlineShape InsertRenderedCore(string source, double widthPt,
+            LaTeXBlockLayoutMode mode, LaTeXBlockRender render, LaTeXBlockStyle style,
+            int? hostPositionOverride)
+        {
             EnsureDocument();
             if (render == null) throw new ArgumentNullException(nameof(render));
             // The style editor belongs to Fixed Content Blocks. A caller can reuse
@@ -306,6 +327,7 @@ namespace LaTeXBlocks.Word
                 application.UndoRecord.StartCustomRecord("Insert LaTeX Block");
                 undoStarted = true;
                 return InsertRenderedAt(target, source, mode, render, metadata, true,
+                    hostPositionOverride,
                     () => documentMutated = true);
             }
             catch (Exception exception)
@@ -409,10 +431,11 @@ namespace LaTeXBlocks.Word
         private WordInterop.InlineShape InsertRenderedAt(WordInterop.Range requestedTarget, string source,
             LaTeXBlockLayoutMode mode, LaTeXBlockRender render, LaTeXBlockMetadata metadata,
             bool select,
+            int? hostPositionOverride = null,
             Action markDocumentMutated = null)
         {
             var target = requestedTarget.Duplicate;
-            var hostPosition = ResolveRangePosition(target, 0);
+            var hostPosition = hostPositionOverride ?? ResolveRangePosition(target, 0);
             var replacesText = target.Start != target.End;
             target.Text = string.Empty;
             if (replacesText) markDocumentMutated?.Invoke();
@@ -566,7 +589,12 @@ namespace LaTeXBlocks.Word
             var metadata = new LaTeXBlockMetadata(previous.Id, widthPt, render.DepthPt, mode,
                 render.FontSizePt, previous.Role, svgSize.WidthPt, svgSize.HeightPt, styleData);
             var previousUsesInlineWordJoinerBoundaries = UsesInlineWordJoinerBoundaries(previous);
-            var hostPosition = ResolveHostBaselinePosition(oldShape, previous);
+            // Baseline placement is derived layout, not state owned by the old
+            // drawing run. In particular, a damaged/missing w:position must be
+            // repaired by Update instead of being interpreted as an intentional
+            // raised host baseline. Resolve the surrounding text baseline before
+            // replacing the shape, then apply the new TeX depth below it.
+            var hostPosition = ResolveSurroundingTextPosition(oldShape);
             target.Collapse(WordInterop.WdCollapseDirection.wdCollapseStart);
             WordInterop.InlineShape replacement = null;
             var document = oldShape.Range.Document;
@@ -715,8 +743,8 @@ namespace LaTeXBlocks.Word
 
         /// <summary>
         /// Rebuilds a fixed Block at its exact Word frame. Styled blocks start from
-        /// the original TeX content SVG, so padding, fill, border and vertical
-        /// alignment move with the new edge instead of becoming a second frame.
+        /// the original TeX layout box, so its TeX-owned alignment and the SVG
+        /// padding/fill/border shell move together instead of becoming two frames.
         /// </summary>
         internal LaTeXBlockRender FrameFloatingRender(LaTeXBlockRender render,
             double frameWidthPt, double frameHeightPt, LaTeXBlockStyle style = null)
@@ -1229,7 +1257,9 @@ namespace LaTeXBlocks.Word
             // corresponding viewBox axis.  Consequently one SVG coordinate maps
             // to exactly the same physical length before and after framing.
             var frameViewBoxWidth = viewBoxWidth * frameWidthPt / naturalWidthPt;
-            var frameViewBoxX = viewBoxX - (frameViewBoxWidth - viewBoxWidth) / 2.0;
+            // A fixed Word Block has the same left-anchored TeX layout contract as
+            // PowerPoint. Enlarging adds room on the right; shrinking clips there.
+            var frameViewBoxX = viewBoxX;
             var frameViewBoxHeight = viewBoxHeight * frameHeightPt / naturalHeightPt;
             // Word has no block vertical-alignment UI.  Match the default
             // PowerPoint block policy: the TeX viewport begins at the top edge,
@@ -1706,13 +1736,50 @@ namespace LaTeXBlocks.Word
                 (int)Math.Round(metadata.DepthPt, MidpointRounding.AwayFromZero);
         }
 
-        internal static int ResolveHostBaselinePosition(WordInterop.InlineShape shape,
-            LaTeXBlockMetadata metadata)
+        internal static int ResolveSurroundingTextPosition(WordInterop.InlineShape shape)
         {
             if (shape == null) throw new ArgumentNullException(nameof(shape));
-            if (metadata == null) throw new ArgumentNullException(nameof(metadata));
-            var shapePosition = ResolveRangePosition(shape.Range, 0);
-            return shapePosition + (int)Math.Round(metadata.DepthPt, MidpointRounding.AwayFromZero);
+            var anchor = shape.Range;
+
+            // Prefer preceding prose because it is the typing context in which an
+            // inline formula was inserted. Skip our U+2060 boundaries and drawing
+            // characters; neither owns a text baseline. Falling back to following
+            // prose also repairs a formula at the start of a paragraph.
+            if (TryResolveAdjacentTextPosition(anchor, true, out var position))
+                return position;
+            if (TryResolveAdjacentTextPosition(anchor, false, out position))
+                return position;
+            return 0;
+        }
+
+        private static bool TryResolveAdjacentTextPosition(WordInterop.Range anchor,
+            bool before, out int position)
+        {
+            position = 0;
+            const int maximumScan = 64;
+            for (var distance = 1; distance <= maximumScan; distance++)
+            {
+                var start = before ? anchor.Start - distance : anchor.End + distance - 1;
+                if (start < 0) return false;
+                var probe = anchor.Duplicate;
+                try
+                {
+                    probe.SetRange(start, start + 1);
+                }
+                catch (COMException)
+                {
+                    return false;
+                }
+
+                var text = probe.Text;
+                if (string.IsNullOrEmpty(text)) continue;
+                var character = text[0];
+                if (character == '\u2060' || character == '\u0001') continue;
+                if (character == '\r' || character == '\a') return false;
+                position = ResolveRangePosition(probe, 0);
+                return true;
+            }
+            return false;
         }
 
         internal static int ResolveRangePosition(WordInterop.Range range, int fallback)

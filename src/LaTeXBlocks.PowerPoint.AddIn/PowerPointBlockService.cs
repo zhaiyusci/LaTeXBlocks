@@ -131,14 +131,22 @@ namespace LaTeXBlocks.PowerPoint
             // ask TeX \fbox / \colorbox to paint a full PowerPoint frame: TeX's
             // preview coordinates can lie outside dvisvgm's root viewport.
             var styleIsApplied = styleWasExplicit || !style.IsDefault;
+            var authoredFrameWidthPt = outerWidthPt ?? widthPt;
             var contentWidthPt = styleIsApplied
-                ? Math.Max(0.1, widthPt - 2 * style.OuterInsetPt)
+                ? Math.Max(0.1, authoredFrameWidthPt - 2 * style.PaddingPt)
                 : widthPt;
+            var contentHeightPt = styleIsApplied && outerHeightPt.HasValue
+                ? Math.Max(0.1, outerHeightPt.Value - 2 * style.PaddingPt)
+                : (double?)null;
             var renderSource = !styleIsApplied
                 // Styled requests reset PreviewBorder globally at TeX shipout. The
                 // next unstyled request must restore the legacy profile border.
                 ? "\\global\\PreviewBorder=1pt\n" + source
-                : style.WrapSource(source, fontSizePt, true);
+                : style.WrapSource(source, fontSizePt, true,
+                    LaTeXBlockStyle.ToTeXLengthPt(contentWidthPt),
+                    contentHeightPt.HasValue
+                        ? LaTeXBlockStyle.ToTeXLengthPt(contentHeightPt.Value)
+                        : (double?)null);
             var rendererWidthPt = !styleIsApplied ? widthPt :
                 LaTeXBlockStyle.ToTeXLengthPt(contentWidthPt);
 
@@ -153,7 +161,7 @@ namespace LaTeXBlocks.PowerPoint
             var finalSvg = !styleIsApplied
                 ? result.Bytes
                 : LaTeXBlockSvgFrame.Decorate(result.Bytes, style,
-                    outerWidthPt ?? widthPt, outerHeightPt);
+                    authoredFrameWidthPt, outerHeightPt);
             return new LaTeXBlockRender(WriteSvg(finalSvg), finalSvg, result.DepthPt,
                 fontSizePt, styleIsApplied);
         }
@@ -625,31 +633,31 @@ namespace LaTeXBlocks.PowerPoint
             // including one smaller than that extent, it is exact.
             var frameHeightPt = requestedHeight > 0
                 ? requestedHeight
-                : naturalSize.HeightPt + 2 * style.OuterInsetPt;
+                : naturalSize.HeightPt + 2 * style.PaddingPt;
 
             // The content remains at its original scale. Any extra horizontal
-            // space is symmetric; vertical extra space follows the selected
+            // space stays on the right; vertical extra space follows the selected
             // Top/Middle/Bottom policy. The border is part of the inner inset.
             // Slack deliberately remains signed. For an undersized frame that
-            // produces a centered horizontal crop; vertically it lets the selected
+            // produces a right-edge horizontal crop; vertically it lets the selected
             // Top/Middle/Bottom alignment decide which edge is preserved.
             var horizontalSlackPt = frameWidthPt -
-                naturalSize.WidthPt - 2 * style.OuterInsetPt;
-            var leftPt = style.OuterInsetPt + horizontalSlackPt / 2.0;
+                naturalSize.WidthPt - 2 * style.PaddingPt;
+            var leftPt = style.PaddingPt;
             var rightPt = frameWidthPt - naturalSize.WidthPt - leftPt;
             var verticalSlackPt = frameHeightPt -
-                naturalSize.HeightPt - 2 * style.OuterInsetPt;
+                naturalSize.HeightPt - 2 * style.PaddingPt;
             double topPt;
             switch (style.VerticalAlignment)
             {
                 case LaTeXBlockVerticalAlignment.Middle:
-                    topPt = style.OuterInsetPt + verticalSlackPt / 2.0;
+                    topPt = style.PaddingPt + verticalSlackPt / 2.0;
                     break;
                 case LaTeXBlockVerticalAlignment.Bottom:
-                    topPt = style.OuterInsetPt + verticalSlackPt;
+                    topPt = style.PaddingPt + verticalSlackPt;
                     break;
                 default:
-                    topPt = style.OuterInsetPt;
+                    topPt = style.PaddingPt;
                     break;
             }
             var bottomPt = frameHeightPt - naturalSize.HeightPt - topPt;
@@ -763,7 +771,7 @@ namespace LaTeXBlocks.PowerPoint
 
         // Reframe the root SVG without changing the TeX coordinate scale. A larger
         // target adds transparent viewport space; a smaller target selects a
-        // sub-viewport and clips overflow. Horizontal placement is centered;
+        // sub-viewport and clips overflow. Horizontal placement is left-aligned;
         // vertical placement follows the requested Top/Middle/Bottom policy. The
         // physical SVG dimensions therefore always equal the user-specified
         // PowerPoint frame.
@@ -806,7 +814,7 @@ namespace LaTeXBlocks.PowerPoint
             // blocks: `Top` means the original TeX viewport starts at the host
             // frame's top edge, including when that style is otherwise default.
             var frameViewBoxWidth = viewBoxWidth * frameWidthPt / naturalSize.WidthPt;
-            var frameViewBoxX = viewBoxX - (frameViewBoxWidth - viewBoxWidth) / 2.0;
+            var frameViewBoxX = viewBoxX;
             var frameViewBoxHeight = viewBoxHeight * frameHeightPt / naturalSize.HeightPt;
             var verticalExpansion = frameViewBoxHeight - viewBoxHeight;
             double frameViewBoxY;

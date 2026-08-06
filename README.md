@@ -53,8 +53,9 @@ formulas and numbered equations remain separate, because their Word layout scaff
 
 The Word **LaTeX Block** editor has the same block-style controls as the PowerPoint editor: **TeX font size**,
 **Line spacing**, uniform **Padding**, **Top / Middle / Bottom** vertical placement, text color, background fill,
-and border color/width. These controls apply only to fixed Content Blocks. TeX owns leading and glyph color; the SVG
-root owns padding, fill, border, clipping, and vertical placement. The style is saved with the Block, survives an
+and border color/width. These controls apply only to fixed Content Blocks. TeX owns the inner box dimensions,
+zero paragraph indentation, leading, glyph color, and vertical placement. The SVG root only adds padding, fill,
+border, and outer clipping. The style is saved with the Block, survives an
 InlineShape-to-Shape conversion, and is reapplied after every native frame resize. A new Block initially uses the
 insertion point's text color and size; subsequent fixed-Block appearance is edited in the Block editor.
 An editor-confirmed default is literal—its displayed 1.20× leading is applied in TeX—while blocks written before the
@@ -80,8 +81,9 @@ is clipped rather than enlarging that frame. Use **TeX size (pt)** when the form
 smaller.
 
 The block editor also exposes **Line spacing**, uniform **Padding**, **Top / Middle / Bottom** vertical placement,
-text color, background fill, and border color/width. StemTeX owns the typographic portion (leading and text color);
-the add-in composes padding, background, border, and vertical placement directly into the final SVG. It does not use
+text color, background fill, and border color/width. StemTeX receives the outer frame minus padding/border as its
+exact content box and owns paragraph, leading, color, and vertical-placement semantics. The add-in only paints the
+padding, background, and border shell into the final SVG and clips it to the authored frame. It does not use
 PowerPoint's Fill or Line properties, and it does not ask TeX to draw a full-size outer frame. The original author
 source remains unchanged in Alternative Text and the block's declarative style is stored separately on the shape.
 Vertical placement becomes visible when the block has a fixed frame height; an auto-height block naturally fits its
@@ -90,6 +92,9 @@ own math-row spacing. As in Word, accepting the editor's default style records a
 viewport; pre-style default blocks keep their compatible rendering until edited.
 
 PowerPoint and Word save their profile choices independently.
+
+Fixed Blocks are horizontally left-aligned inside their SVG frame in both hosts. Padding and border define the left
+inset; widening a native frame adds space on the right, while narrowing it clips the right edge.
 
 ### Search and accessibility
 

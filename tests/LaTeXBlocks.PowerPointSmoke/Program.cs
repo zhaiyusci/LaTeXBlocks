@@ -235,9 +235,15 @@ namespace LaTeXBlocks.PowerPointSmoke
                 var styledWrapper = styledStyle.WrapSource(styledSource, inheritedSize);
                 Assert(styledWrapper.IndexOf("\\global\\PreviewBorder=0pt",
                            StringComparison.Ordinal) >= 0 &&
+                       styledWrapper.StartsWith("\\ifhmode\\unskip\\fi%",
+                           StringComparison.Ordinal) &&
                        styledWrapper.IndexOf("\\renewcommand{\\baselinestretch}{1.5}",
                            StringComparison.Ordinal) >= 0 &&
                        styledWrapper.IndexOf("\\setbox\\strutbox=\\hbox", StringComparison.Ordinal) >= 0 &&
+                       styledWrapper.IndexOf("\\setlength{\\parindent}{0pt}", StringComparison.Ordinal) >= 0 &&
+                       styledWrapper.IndexOf("\\setlength{\\leftskip}{0pt}", StringComparison.Ordinal) >= 0 &&
+                       styledWrapper.IndexOf("\\parshape=0", StringComparison.Ordinal) >= 0 &&
+                       styledWrapper.IndexOf("\\everypar{}", StringComparison.Ordinal) >= 0 &&
                        styledWrapper.IndexOf("\\noindent\\strut%", StringComparison.Ordinal) >= 0 &&
                        styledWrapper.IndexOf("\\ifhmode\\strut\\fi", StringComparison.Ordinal) >= 0 &&
                        styledWrapper.IndexOf("\\fbox", StringComparison.Ordinal) < 0 &&
@@ -245,6 +251,15 @@ namespace LaTeXBlocks.PowerPointSmoke
                        styledWrapper.IndexOf("\\vbox to ", StringComparison.Ordinal) < 0 &&
                        styledWrapper.IndexOf(styledSource, StringComparison.Ordinal) >= 0,
                     "The PowerPoint TeX wrapper did not retain a typographic line box without moving frame styling into TeX.");
+                var fixedBoxWrapper = styledStyle.WrapSource(styledSource, inheritedSize,
+                    true, 200, 80);
+                Assert(fixedBoxWrapper.IndexOf("\\setlength{\\hsize}{200pt}",
+                           StringComparison.Ordinal) >= 0 &&
+                       fixedBoxWrapper.IndexOf("\\setbox2=\\vbox to 80pt", StringComparison.Ordinal) >= 0 &&
+                       fixedBoxWrapper.IndexOf("\\vss\\box0\\vss", StringComparison.Ordinal) >= 0 &&
+                       fixedBoxWrapper.IndexOf("\\hbox to 200pt{\\box2\\hss}",
+                           StringComparison.Ordinal) >= 0,
+                    "A fixed Block did not put its width and vertical alignment into TeX.");
                 // A short lowercase glyph must retain normal ascender/descender
                 // room when a Block is aligned at its top, rather than letting the
                 // SVG crop shrink to the x-height.  The same single-line box is
@@ -268,11 +283,12 @@ namespace LaTeXBlocks.PowerPointSmoke
                     "A styled fixed Block still aligns a one-line text glyph's ink instead of its final TeX line box.");
                 var displayWrapper = typographicBoxStyle.WrapSource("\\[E=mc^2\\]",
                     inheritedSize, true);
-                Assert(displayWrapper.IndexOf("\\noindent", StringComparison.Ordinal) < 0 &&
-                       displayWrapper.IndexOf("\\strut", StringComparison.Ordinal) < 0 &&
+                Assert(displayWrapper.IndexOf("\\noindent\\strut", StringComparison.Ordinal) < 0 &&
+                       displayWrapper.IndexOf("\\setbox\\strutbox", StringComparison.Ordinal) < 0 &&
                        displayWrapper.IndexOf("\\color{latexblocksforeground}", StringComparison.Ordinal) < 0 &&
-                       displayWrapper.IndexOf("\\par", StringComparison.Ordinal) < 0,
-                    "A display-style Block gained paragraph material outside its TeX display.");
+                       displayWrapper.IndexOf("\\setlength{\\parindent}{0pt}",
+                           StringComparison.Ordinal) >= 0,
+                    "A display-style Block did not remain clean inside the shared TeX layout box.");
                 var bareDisplayResult = backend.RenderQueuedAsync(profile,
                     "\\global\\PreviewBorder=0pt\n\\[E=mc^2\\]", 180, false,
                     inheritedSize).GetAwaiter().GetResult();
@@ -326,12 +342,10 @@ namespace LaTeXBlocks.PowerPointSmoke
                            150) < 0.05 &&
                        Math.Abs(PowerPointBlockService.ReadSvgHeightPt(bottomRender.SvgBytes) -
                            150) < 0.05 &&
-                       ReadSvgViewBoxY(topRender.SvgBytes) >
-                           ReadSvgViewBoxY(bottomRender.SvgBytes) + 0.1 &&
                        !string.Equals(Convert.ToBase64String(topRender.SvgBytes),
                            Convert.ToBase64String(bottomRender.SvgBytes),
                            StringComparison.Ordinal),
-                    "Top and bottom SVG vertical alignment did not produce distinct fixed-height boxes.");
+                    "Top and bottom TeX vertical alignment did not produce distinct fixed-height boxes.");
                 const string leadingSource = "A deliberately long ordinary sentence wraps over several lines " +
                     "inside this narrow TeX block so the selected line spacing is measurable.";
                 var tightLeading = service.RenderPreviewAsync(leadingSource, 110, profile,
@@ -362,6 +376,12 @@ namespace LaTeXBlocks.PowerPointSmoke
                        ReadSvgViewBoxY(defaultMiddleFrame) >
                            ReadSvgViewBoxY(defaultBottomFrame) + 0.1,
                     "Top on a default PowerPoint block did not anchor the TeX viewport to the top of its host frame.");
+                var leftAnchoredFrame = PowerPointBlockService.FrameSvg(render.SvgBytes,
+                    PowerPointBlockService.ReadSvgWidthPt(render.SvgBytes) + 42,
+                    defaultNaturalHeight, LaTeXBlockVerticalAlignment.Top);
+                Assert(Math.Abs(ReadSvgViewBoxDimension(leftAnchoredFrame, 0) -
+                                ReadSvgViewBoxDimension(render.SvgBytes, 0)) < 0.001,
+                    "A wider PowerPoint Block centered the TeX viewport instead of keeping its left edge fixed.");
                 var constrainedStyle = new LaTeXBlockStyle(1.2, 6,
                     LaTeXBlockVerticalAlignment.Bottom, Color.Black, true,
                     Color.FromArgb(250, 250, 250), 0.75, Color.Black);

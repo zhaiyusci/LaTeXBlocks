@@ -9,11 +9,9 @@ namespace LaTeXBlocks.PowerPoint
 namespace LaTeXBlocks.Word
 #endif
 {
-    // The source-facing part of a PowerPoint block style belongs to TeX: leading
-    // and foreground colour affect the actual mathematics and text. The outer
-    // shell (padding, fill, border and vertical placement) is composed into the
-    // final SVG by PowerPointBlockService. Keeping those coordinate systems
-    // separate prevents a TeX box from painting past dvisvgm's SVG viewport.
+    // The content-facing part of a block style belongs to TeX: exact inner size,
+    // paragraph indentation, leading, foreground colour, and vertical placement.
+    // The final SVG supplies only padding, fill, border, and outer clipping.
     internal enum LaTeXBlockVerticalAlignment
     {
         Top,
@@ -67,8 +65,6 @@ namespace LaTeXBlocks.Word
         // The border stroke is drawn inside the SVG viewport. Its full thickness,
         // together with the requested padding, separates the content SVG from the
         // outer edge just as \fboxsep + \fboxrule would have done in TeX.
-        internal double OuterInsetPt => PaddingPt + (HasBorder ? BorderThicknessPt : 0);
-
         // Hosts can use this to retain their legacy bare-snippet route for blocks
         // written before the style editor existed. An explicitly accepted style
         // may still apply the default typography (see WrapSource).
@@ -219,7 +215,8 @@ namespace LaTeXBlocks.Word
         }
 
         internal string WrapSource(string source, double fontSizePt,
-            bool applyDefaultTypography = false)
+            bool applyDefaultTypography = false, double? contentWidthPt = null,
+            double? contentHeightPt = null)
         {
             if (source == null) throw new ArgumentNullException(nameof(source));
             if (!(fontSizePt > 0) || double.IsNaN(fontSizePt) || double.IsInfinity(fontSizePt))
@@ -232,21 +229,46 @@ namespace LaTeXBlocks.Word
             if (IsDefault && !applyDefaultTypography) return source;
 
             var tex = new StringBuilder();
-            tex.AppendLine("\\begingroup");
+            // The host wrapper may already be in horizontal mode. Remove only a
+            // pending delimiter space; do not end the paragraph or shift the TeX
+            // box vertically. Every setup line remains space-neutral until the
+            // exact content box is inserted at the current origin.
+            tex.AppendLine("\\ifhmode\\unskip\\fi%");
+            tex.AppendLine("\\begingroup%");
             // preview reads this at shipout, after the local group ends. It must
             // therefore be global; RenderAsync restores 1pt for each plain block.
-            tex.AppendLine("\\global\\PreviewBorder=0pt");
+            tex.AppendLine("\\global\\PreviewBorder=0pt%");
             tex.AppendLine("\\definecolor{latexblocksforeground}{HTML}{" +
-                ToHex(TextColor) + "}");
+                ToHex(TextColor) + "}%");
             tex.AppendLine("\\renewcommand{\\baselinestretch}{" +
-                FormatDecimal(LineSpacing) + "}");
-            tex.AppendLine("\\selectfont");
+                FormatDecimal(LineSpacing) + "}%");
+            tex.AppendLine("\\selectfont%");
             // StemTeX has already selected the requested design size before the
             // request file is read. Set the concrete baseline distance as well as
             // baselinestretch: otherwise the existing \fontsize baseline remains
             // cached and a leading-only style change has no visible effect.
             tex.AppendLine("\\setlength{\\baselineskip}{" + FormatDecimal(
-                fontSizePt * LineSpacing) + "pt}");
+                fontSizePt * LineSpacing) + "pt}%");
+            // A styled Fixed Block is a genuine TeX layout box. Office supplies
+            // its outer dimensions; the host has already subtracted padding and
+            // border before passing these content dimensions. Keep paragraph and
+            // alignment semantics here, leaving SVG composition to paint only the
+            // shell around the resulting box.
+            var hasFixedWidth = contentWidthPt.HasValue && contentWidthPt.Value > 0;
+            var hasFixedHeight = contentHeightPt.HasValue && contentHeightPt.Value > 0;
+            if (hasFixedWidth)
+            {
+                tex.AppendLine("\\setlength{\\hsize}{" +
+                    FormatDecimal(contentWidthPt.Value) + "pt}%");
+                tex.AppendLine("\\setlength{\\linewidth}{\\hsize}%");
+            }
+            tex.AppendLine("\\setlength{\\parindent}{0pt}%");
+            tex.AppendLine("\\setlength{\\leftskip}{0pt}%");
+            tex.AppendLine("\\setlength{\\rightskip}{0pt}%");
+            tex.AppendLine("\\setlength{\\parfillskip}{0pt plus 1fil}%");
+            tex.AppendLine("\\hangindent=0pt\\hangafter=1\\parshape=0%");
+            tex.AppendLine("\\everypar{}%");
+            tex.AppendLine("\\setbox0=\\vbox{%");
             // The SVG frame must align a typographic line box, not a visible glyph
             // outline. A tight preview of just "x" otherwise starts at the x-height,
             // whereas a text box's Top edge is above it by the font's ascender space.
@@ -280,6 +302,34 @@ namespace LaTeXBlocks.Word
                 tex.AppendLine("\\ifhmode\\strut\\fi");
                 tex.AppendLine("\\par");
             }
+            tex.AppendLine("}%");
+            if (hasFixedHeight)
+            {
+                tex.AppendLine("\\setbox2=\\vbox to " +
+                    FormatDecimal(contentHeightPt.Value) + "pt{%");
+                switch (VerticalAlignment)
+                {
+                    case LaTeXBlockVerticalAlignment.Middle:
+                        tex.AppendLine("\\vss\\box0\\vss%");
+                        break;
+                    case LaTeXBlockVerticalAlignment.Bottom:
+                        tex.AppendLine("\\vss\\box0%");
+                        break;
+                    default:
+                        tex.AppendLine("\\box0\\vss%");
+                        break;
+                }
+                tex.AppendLine("}%");
+            }
+            else
+            {
+                tex.AppendLine("\\setbox2=\\box0%");
+            }
+            if (hasFixedWidth)
+                tex.AppendLine("\\noindent\\hbox to " +
+                    FormatDecimal(contentWidthPt.Value) + "pt{\\box2\\hss}\\par");
+            else
+                tex.AppendLine("\\noindent\\box2\\par");
             tex.AppendLine("\\endgroup");
             return tex.ToString();
         }

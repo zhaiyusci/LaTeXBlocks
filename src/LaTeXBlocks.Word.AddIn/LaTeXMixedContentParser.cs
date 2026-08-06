@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Text;
+using System.Text.RegularExpressions;
 
 namespace LaTeXBlocks.Word
 {
@@ -136,8 +137,11 @@ namespace LaTeXBlocks.Word
                     while (cursor < source.Length && source[cursor] != '\n') cursor++;
                     continue;
                 }
-                if (StartsWith(source, cursor, close) && !IsEscaped(source, cursor) &&
-                    (close != "$" || cursor + 1 >= source.Length || source[cursor + 1] != '$'))
+                // The delimiter that opened the current fragment determines how
+                // it closes. Inside $...$, the first unescaped $ closes that
+                // fragment even when another $ follows immediately: $a$$b$ is
+                // two adjacent inline formulas, not one malformed formula.
+                if (StartsWith(source, cursor, close) && !IsEscaped(source, cursor))
                 {
                     end = cursor + close.Length;
                     return true;
@@ -218,7 +222,10 @@ namespace LaTeXBlocks.Word
                 }
                 if (next == '\\')
                 {
-                    decoded = "\n"; end = start + 2; return true;
+                    // Keep an authored LaTeX line break distinct from physical
+                    // source newlines. Word uses vertical tab for a manual line
+                    // break inside the current paragraph.
+                    decoded = "\v"; end = start + 2; return true;
                 }
             }
             foreach (var item in new[] {
@@ -311,6 +318,19 @@ namespace LaTeXBlocks.Word
             if (text.Length == 0) return;
             segments.Add(new LaTeXContentSegment(LaTeXContentKind.Text, text.ToString()));
             text.Clear();
+        }
+
+        internal static string ToWordText(string source)
+        {
+            if (string.IsNullOrEmpty(source)) return source ?? string.Empty;
+
+            // TeX treats one physical newline as interword whitespace. A blank
+            // line starts a new paragraph, but additional blank lines do not
+            // create additional paragraphs. Permit spaces/tabs on blank lines.
+            var text = Regex.Replace(source,
+                @"[ \t]*\n(?:[ \t]*\n)+[ \t]*", "\r",
+                RegexOptions.CultureInvariant);
+            return text.Replace('\n', ' ');
         }
     }
 }

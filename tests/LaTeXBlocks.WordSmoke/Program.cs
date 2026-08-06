@@ -83,6 +83,23 @@ namespace LaTeXBlocks.WordSmoke
                 Assert(escapedOnly.Count == 1 && escapedOnly[0].Kind == LaTeXContentKind.Text &&
                        escapedOnly[0].Source == "% & # _ { } $",
                     "Escaped LaTeX text characters were incorrectly classified as formulas.");
+                var adjacentInlineMath = LaTeXMixedContentParser.Parse("$a$$b$");
+                Assert(adjacentInlineMath.Count == 2 &&
+                       adjacentInlineMath[0].Kind == LaTeXContentKind.InlineMath &&
+                       adjacentInlineMath[0].Source == "$a$" &&
+                       adjacentInlineMath[1].Kind == LaTeXContentKind.InlineMath &&
+                       adjacentInlineMath[1].Source == "$b$",
+                    "Adjacent dollar-delimited inline formulas were merged incorrectly.");
+                Assert(LaTeXMixedContentParser.ToWordText("first\nsecond\n\n\nthird") ==
+                       "first second\rthird" &&
+                       LaTeXMixedContentParser.ToWordText("first\n \t\n\n second") ==
+                       "first\rsecond",
+                    "Physical LaTeX newlines were not collapsed to TeX paragraph semantics.");
+                var explicitLineBreak = LaTeXMixedContentParser.Parse("first\\\\second");
+                Assert(explicitLineBreak.Count == 1 &&
+                       LaTeXMixedContentParser.ToWordText(explicitLineBreak[0].Source) ==
+                       "first\vsecond",
+                    "An explicit LaTeX line break was confused with a source paragraph break.");
                 var styledText = LaTeXMixedContentParser.Parse(
                     "\\textit{AB}\\textsf{AB}\\textbf{C \\texttt{D}}");
                 Assert(styledText.Count == 4 &&
@@ -260,17 +277,35 @@ namespace LaTeXBlocks.WordSmoke
                     14, true);
                 Assert(explicitDefaultSource.IndexOf("\\renewcommand{\\baselinestretch}{1.2}",
                            StringComparison.Ordinal) >= 0 &&
-                       explicitDefaultSource.IndexOf("\\noindent", StringComparison.Ordinal) < 0 &&
-                       explicitDefaultSource.IndexOf("\\strut", StringComparison.Ordinal) < 0 &&
+                       explicitDefaultSource.StartsWith("\\ifhmode\\unskip\\fi%",
+                           StringComparison.Ordinal) &&
+                       explicitDefaultSource.IndexOf("\\noindent\\strut", StringComparison.Ordinal) < 0 &&
+                       explicitDefaultSource.IndexOf("\\setbox\\strutbox", StringComparison.Ordinal) < 0 &&
+                       explicitDefaultSource.IndexOf("\\setlength{\\parindent}{0pt}",
+                           StringComparison.Ordinal) >= 0 &&
+                       explicitDefaultSource.IndexOf("\\setlength{\\leftskip}{0pt}",
+                           StringComparison.Ordinal) >= 0 &&
+                       explicitDefaultSource.IndexOf("\\parshape=0", StringComparison.Ordinal) >= 0 &&
                        explicitDefaultSource.IndexOf("\\color{latexblocksforeground}",
                            StringComparison.Ordinal) < 0,
-                    "A standalone Word display Block gained paragraph material outside its TeX display.");
+                    "A standalone Word display Block did not remain clean inside the shared TeX layout box.");
                 var styledSource = styledBlockStyle.WrapSource("\\[E=mc^2\\]", 14);
                 Assert(styledSource.IndexOf("\\colorbox", StringComparison.Ordinal) < 0 &&
                        styledSource.IndexOf("\\fbox", StringComparison.Ordinal) < 0 &&
                        styledSource.IndexOf("\\color{latexblocksforeground}",
                            StringComparison.Ordinal) < 0,
                     "The Word display Block style moved paragraph decoration into TeX.");
+                var fixedWordBoxSource = styledBlockStyle.WrapSource(
+                    "First paragraph.\\par Second paragraph.", 14, true, 160, 42);
+                Assert(fixedWordBoxSource.IndexOf("\\setlength{\\parindent}{0pt}",
+                           StringComparison.Ordinal) >= 0 &&
+                       fixedWordBoxSource.IndexOf("\\setlength{\\hsize}{160pt}",
+                           StringComparison.Ordinal) >= 0 &&
+                       fixedWordBoxSource.IndexOf("\\setbox2=\\vbox to 42pt",
+                           StringComparison.Ordinal) >= 0 &&
+                       fixedWordBoxSource.IndexOf("\\vss\\box0\\vss",
+                           StringComparison.Ordinal) >= 0,
+                    "Word did not delegate fixed-box paragraph and vertical layout to TeX.");
                 var styledSvgBytes = LaTeXBlockSvgFrame.Decorate(svg.Bytes, styledBlockStyle,
                     213.25, 89.75);
                 var styledSvgText = Encoding.UTF8.GetString(styledSvgBytes);
@@ -285,6 +320,7 @@ namespace LaTeXBlocks.WordSmoke
                 var framedSvgBytes = LaTeXBlockService.FrameSvg(svg.Bytes, 213.25, 89.75);
                 Assert(Math.Abs(LaTeXBlockService.ReadSvgWidthPt(framedSvgBytes) - 213.25) < 0.001 &&
                        Math.Abs(LaTeXBlockService.ReadSvgHeightPt(framedSvgBytes) - 89.75) < 0.001 &&
+                       Math.Abs(ReadSvgViewBoxX(framedSvgBytes) - ReadSvgViewBoxX(svg.Bytes)) < 0.001 &&
                        Encoding.UTF8.GetString(framedSvgBytes).IndexOf("overflow='hidden'",
                            StringComparison.Ordinal) >= 0,
                     "A reframed SVG did not retain the requested exact clipping viewport.");
@@ -684,6 +720,12 @@ namespace LaTeXBlocks.WordSmoke
                     "Baseline compensation did not survive save and reopen.");
                 AssertInlineWordJoinerBoundary(reopened, 2, "Reopened inline formula");
 
+                // Simulate a document whose drawing run lost w:position. Update must
+                // derive the host baseline from surrounding prose and repair the
+                // formula; the damaged old drawing position is not authoritative.
+                reopened.Range.Font.Position = 0;
+                Assert(reopened.Range.Font.Position == 0,
+                    "Could not establish the missing-baseline update fixture.");
                 var updated = service.UpdateBlock(reopened, updatedSource, 420, LaTeXBlockLayoutMode.Auto, profile, 14);
                 Assert(document.InlineShapes.Count == 2, "Update changed the document's SVG count.");
                 Assert(updated.AlternativeText == updatedSource, "Update did not replace the authoritative TeX source.");
@@ -1973,6 +2015,18 @@ namespace LaTeXBlocks.WordSmoke
             Assert((field.Code.Text ?? string.Empty).IndexOf("\\* ARABIC", StringComparison.OrdinalIgnoreCase) >= 0,
                 "The equation SEQ field does not request Arabic numbering.");
             return (field.Result.Text ?? string.Empty).Trim();
+        }
+
+        private static double ReadSvgViewBoxX(byte[] svgBytes)
+        {
+            var match = Regex.Match(Encoding.UTF8.GetString(svgBytes),
+                "<svg\\b[^>]*\\bviewBox=(?<q>['\"])(?<x>[-+0-9.eE]+)",
+                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+            if (!match.Success || !double.TryParse(match.Groups["x"].Value,
+                    System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out var value))
+                throw new InvalidOperationException("SVG root had no numeric viewBox x coordinate.");
+            return value;
         }
 
         private static WordInterop.Field FindEquationReferenceField(WordInterop.Document document,

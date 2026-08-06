@@ -147,7 +147,7 @@ The large temporary StemTeX canvas is solely a measurement surface. Its width is
 
 ### Fixed-width LaTeX block
 
-Fixed mode preserves the caller's typesetting width and supports display math, multiple lines, and paragraph-like LaTeX content. It deliberately keeps that page-width canvas. Such content does not have one meaningful surrounding-text baseline, so multiline/display blocks remain at Word position zero. Its editor exposes TeX font size, line spacing, uniform padding, vertical placement, text color, fill, and border controls. Leading and text color are scoped in TeX; all outer decoration is one SVG shell, not a Word Shape Fill/Line and not a TeX `\fbox`.
+Fixed mode preserves the caller's typesetting width and supports display math, multiple lines, and paragraph-like LaTeX content. It deliberately keeps that page-width canvas. Such content does not have one meaningful surrounding-text baseline, so multiline/display blocks remain at Word position zero. Its editor exposes TeX font size, line spacing, uniform padding, vertical placement, text color, fill, and border controls. The authored outer frame minus padding/border becomes an exact TeX box with zero paragraph indentation; TeX owns leading, text color, and vertical placement. All outer decoration remains one SVG shell, not a Word Shape Fill/Line and not a TeX `\fbox`.
 
 Objects created before the mode field existed parse as `fixed`, preserving their former behavior. An inline fixed
 Content Block can be explicitly converted between modes. A floating Block remains fixed while it owns a physical

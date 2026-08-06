@@ -383,7 +383,8 @@ namespace LaTeXBlocks.Word
                     {
                         baseTextFormat.Apply(Application.Selection);
                         var textStart = Application.Selection.Start;
-                        Application.Selection.TypeText(item.Segment.Source.Replace("\n", "\r"));
+                        Application.Selection.TypeText(
+                            LaTeXMixedContentParser.ToWordText(item.Segment.Source));
                         var textEnd = Application.Selection.Start;
                         if (textEnd > textStart &&
                             (item.Segment.Bold || item.Segment.Italic ||
@@ -410,7 +411,13 @@ namespace LaTeXBlocks.Word
                     }
                     var mode = item.Segment.Kind == LaTeXContentKind.InlineMath
                         ? LaTeXBlockLayoutMode.Auto : LaTeXBlockLayoutMode.Fixed;
-                    Blocks.InsertRendered(item.Segment.Source, item.WidthPt, mode, item.Render);
+                    // An inline formula applies its TeX-depth compensation to the
+                    // drawing run. Word can expose that run position at the caret
+                    // immediately after the object. Never let it become the host
+                    // baseline of a later formula in the same mixed paste.
+                    baseTextFormat.Apply(Application.Selection);
+                    Blocks.InsertRenderedAtHostPosition(item.Segment.Source, item.WidthPt,
+                        mode, item.Render, baseTextFormat.Position);
                 }
             });
             Application.StatusBar = "Pasted LaTeX text with " +
@@ -469,6 +476,7 @@ namespace LaTeXBlocks.Word
             private string nameFarEast;
             private int bold;
             private int italic;
+            private int position;
             private float size;
             private WordInterop.WdColor color;
 
@@ -481,6 +489,7 @@ namespace LaTeXBlocks.Word
                     nameFarEast = selection.Font.NameFarEast,
                     bold = selection.Font.Bold,
                     italic = selection.Font.Italic,
+                    position = selection.Font.Position,
                     size = selection.Font.Size,
                     color = selection.Font.Color
                 };
@@ -493,9 +502,12 @@ namespace LaTeXBlocks.Word
                 if (!string.IsNullOrEmpty(nameFarEast)) selection.Font.NameFarEast = nameFarEast;
                 selection.Font.Bold = bold;
                 selection.Font.Italic = italic;
+                selection.Font.Position = position;
                 if (size > 0) selection.Font.Size = size;
                 selection.Font.Color = color;
             }
+
+            internal int Position => position;
         }
 
         internal void ShowEditEditor()

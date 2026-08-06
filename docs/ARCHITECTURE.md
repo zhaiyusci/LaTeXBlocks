@@ -66,7 +66,8 @@ for a floating object. The same external-frame contract applies when Word expose
 A native width or height change is treated as an instruction to re-typeset and then rebuild the exact physical SVG
 viewport after the resize gesture ends. Moving, rotating, or merely changing the wrapping mode does not re-typeset.
 The viewport preserves TeX's physical coordinate scale: enlarging it adds space and shrinking it clips; neither
-operation persistently stretches mathematical glyphs. Auto-width inline formulas and numbered equations are
+operation persistently stretches mathematical glyphs. The TeX viewport is left-anchored, so added width belongs on
+the right and a narrow frame clips the right edge. Auto-width inline formulas and numbered equations are
 different layout roles and do not acquire this independent frame behavior.
 
 ## Rendering lifecycle
@@ -98,9 +99,11 @@ The visual SVG and its source are one semantic object, not an image plus a dupli
 - For Word inline and numbered formulas, the drawing run's native `Font.Color` remains the authoritative text color.
   Fixed Content Blocks instead persist a declarative block style in their Title metadata; their editor is the
   authoritative color/leading/padding UI. Neither route copies visual settings into Alternative Text.
-- Both hosts share one style model. Before a styled fixed-block preview or committed render, the service constructs a
-  scoped TeX wrapper only for leading and text color, then composes padding, background, border, and vertical
-  placement into the SVG root. It never rewrites Alternative Text or relies on Office Fill/Line formatting for a
+- Both hosts share one style model. Before a styled fixed-block preview or committed render, the service subtracts
+  padding and border from the authored outer frame and constructs a scoped TeX box with that exact content width and
+  height. TeX sets paragraph indentation to zero and owns leading, text color, and Top/Middle/Bottom placement. The
+  SVG root only paints padding, background, and border and clips the authored outer frame. It never rewrites
+  Alternative Text or relies on Office Fill/Line formatting for a
   block's visible decoration. An explicit style is meaningful even at its apparent defaults: 1.20× leading is authored
   in TeX. Legacy shapes with no Word `style=` payload or no PowerPoint explicit-style marker remain on the compatible
   bare route until edited.
