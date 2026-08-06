@@ -5,6 +5,14 @@ Word-and-PowerPoint package line.
 
 ## [Unreleased]
 
+## [0.2.72] — 2026-08-07
+
+### Word
+
+- Generalized the mixed-selection redraw batch from Font Color to renderer-backed Word formatting. Multi-formula
+  Font Size changes now render as one batch, commit under one suspended-screen-update window, and restore the range
+  selection once; combined size-and-colour fallback changes use the same path.
+
 ## [0.2.71] — 2026-08-07
 
 ### Word
