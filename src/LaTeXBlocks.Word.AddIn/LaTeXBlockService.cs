@@ -601,7 +601,6 @@ namespace LaTeXBlocks.Word
             // Baseline placement is derived layout, not state owned by either the
             // old drawing run or neighboring text. Word supplies the current line
             // baseline; the new TeX depth is the only required offset.
-            target.Collapse(WordInterop.WdCollapseDirection.wdCollapseStart);
             WordInterop.InlineShape replacement = null;
             WordInlineRunFormatSnapshot hostRunFormat = null;
             var document = oldShape.Range.Document;
@@ -617,45 +616,35 @@ namespace LaTeXBlocks.Word
                 application.UndoRecord.StartCustomRecord("Update LaTeX Block");
                 undoStarted = true;
 
-                // Establish or remove the old formula's joiner boundaries while the
-                // old shape is still present. Once Word has deleted it, every remaining
-                // document mutation must already be complete so a late caret/COM error
-                // can never turn a failed update into a missing formula.
-                if (previousUsesInlineWordJoinerBoundaries)
+                // Establish the final boundary state while the old formula still
+                // identifies the exact character being replaced.
+                if (previousUsesInlineWordJoinerBoundaries ||
+                    UsesInlineWordJoinerBoundaries(metadata))
                 {
                     documentMutated = true;
                     if (UsesInlineWordJoinerBoundaries(metadata))
-                        EnsureInlineWordJoinerBoundaries(oldShape, previous);
+                        EnsureInlineWordJoinerBoundaries(oldShape, metadata);
                     else
                         RemoveInlineWordJoinerBoundaries(oldShape);
                 }
-                // Inserting/removing a boundary immediately before the old drawing can
-                // shift a live Word Range. Reacquire the insertion point from the old
-                // shape after that preparation instead of trusting the stale collapse.
-                target = oldShape.Range.Duplicate;
-                target.Collapse(WordInterop.WdCollapseDirection.wdCollapseStart);
+                // Word does not actually replace an existing InlineShape when its
+                // one-character Range is supplied to AddPicture; it inserts beside
+                // the drawing. Delete the old character first, retain its exact start,
+                // and let the custom undo record restore it if any later step fails.
+                // This avoids both a temporary duplicate and a surviving old copy.
+                var replacementStart = oldShape.Range.Start;
                 if (numbered)
                 {
                     documentMutated = true;
                     ConfigureNumberedEquationTabs(oldShape.Range.Paragraphs[1], numberedLayout);
                 }
                 var insertionPath = PrepareInsertionSvg(render, mode);
-                replacement = target.InlineShapes.AddPicture(insertionPath, LinkToFile: false, SaveWithDocument: true, Range: target);
                 documentMutated = true;
+                oldShape.Delete();
+                target = document.Range(replacementStart, replacementStart);
+                replacement = target.InlineShapes.AddPicture(insertionPath, LinkToFile: false, SaveWithDocument: true, Range: target);
                 ApplyContract(replacement, source, metadata, render.TextColor);
                 replacement = NormalizeWordInlineDrawing(replacement, svgSize);
-
-                // A fixed block has no owned boundary characters. If it becomes an
-                // auto-width formula, install the new boundaries before deleting the
-                // old shape. A joiner already after the old shape will naturally become
-                // the replacement's trailing boundary after that deletion.
-                if (!previousUsesInlineWordJoinerBoundaries && UsesInlineWordJoinerBoundaries(metadata))
-                {
-                    documentMutated = true;
-                    EnsureInlineWordJoiner(replacement, true);
-                    if (!IsWordJoiner(AdjacentCharacter(oldShape.Range, false)))
-                        EnsureInlineWordJoiner(replacement, false);
-                }
                 hostRunFormat.Apply(replacement.Range);
                 ApplyHostRunFormat(replacement, metadata, render.TextColor);
                 // ApplyContract and NormalizeWordInlineDrawing rebuild the drawing run,
@@ -664,7 +653,6 @@ namespace LaTeXBlocks.Word
                 // live theme slot+tint rather than being silently downgraded to RGB.
                 if (preserveNativeTextColor)
                     nativeTextColor.ApplyTo(replacement.Range);
-                oldShape.Delete();
                 if (selectReplacement)
                 {
                     try
@@ -2250,10 +2238,8 @@ namespace LaTeXBlocks.Word
         {
             if (!UsesInlineWordJoinerBoundaries(metadata)) return;
 
-            // The order matters during an update: when the old image is deleted its
-            // trailing joiner can become the new image's trailing joiner. Check each
-            // immediate neighbor before inserting anything, and never coalesce joiners
-            // that were already present in the user's document.
+            // Check each immediate neighbor before inserting anything, and never
+            // coalesce joiners that were already present in the user's document.
             EnsureInlineWordJoiner(shape, false);
             EnsureInlineWordJoiner(shape, true);
         }

@@ -34,6 +34,10 @@ namespace LaTeXBlocks.Word
             new Dictionary<long, PendingFormatRefresh>();
         private readonly HashSet<long> formatRefreshesInFlight = new HashSet<long>();
         private long formatRefreshSequence;
+        private readonly Dictionary<long, PendingTextColorBatchTarget>
+            pendingTextColorBatchTargets =
+                new Dictionary<long, PendingTextColorBatchTarget>();
+        private long textColorBatchSequence;
         // A metadata id is intentionally not a scheduling key: Word retains Title
         // metadata when a user copies a Block, while the two COM picture objects
         // must still be allowed to render independently.
@@ -67,6 +71,7 @@ namespace LaTeXBlocks.Word
                 // waiting on event sinks.  Clean up at the earlier boundary too.
                 applicationEvents = (WordInterop.ApplicationEvents4_Event)Application;
                 applicationEvents.Quit += Application_Quit;
+                Application.DocumentBeforeClose += Application_DocumentBeforeClose;
                 Application.WindowBeforeDoubleClick += Application_WindowBeforeDoubleClick;
                 Application.WindowSelectionChange += Application_WindowSelectionChange;
                 AttachNativeFontSizeControl();
@@ -125,6 +130,8 @@ namespace LaTeXBlocks.Word
             Interlocked.Increment(ref formatRefreshSequence);
             pendingFormatRefreshes.Clear();
             formatRefreshesInFlight.Clear();
+            Interlocked.Increment(ref textColorBatchSequence);
+            pendingTextColorBatchTargets.Clear();
             Interlocked.Increment(ref blockFrameReflowSequence);
             pendingBlockFrameReflows.Clear();
             blockFrameReflowsInFlight.Clear();
@@ -144,6 +151,8 @@ namespace LaTeXBlocks.Word
                 applicationEvents = null;
                 if (events != null)
                     RunBestEffortCleanup(() => events.Quit -= Application_Quit);
+                RunBestEffortCleanup(() => Application.DocumentBeforeClose -=
+                    Application_DocumentBeforeClose);
                 RunBestEffortCleanup(() => Application.WindowBeforeDoubleClick -=
                     Application_WindowBeforeDoubleClick);
                 RunBestEffortCleanup(() => Application.WindowSelectionChange -=
@@ -175,6 +184,26 @@ namespace LaTeXBlocks.Word
                 // Startup rollback and VSTO shutdown can both race Word COM teardown.
                 // Cleanup is best-effort, but every independently owned step still runs.
             }
+        }
+
+        private void Application_DocumentBeforeClose(WordInterop.Document document,
+            ref bool cancel)
+        {
+            if (shuttingDown) return;
+
+            // Discard formula Shape snapshots and pending work while the document is
+            // still valid. Selection leases themselves contain scalar coordinates
+            // only; no close-time COM release or global GC is required.
+            pendingFontColorInteraction = null;
+            Interlocked.Increment(ref formatRefreshSequence);
+            pendingFormatRefreshes.Clear();
+            formatRefreshesInFlight.Clear();
+            Interlocked.Increment(ref textColorBatchSequence);
+            pendingTextColorBatchTargets.Clear();
+            Interlocked.Increment(ref blockFrameReflowSequence);
+            pendingBlockFrameReflows.Clear();
+            blockFrameReflowsInFlight.Clear();
+            ClearPreviousSelectionSnapshot();
         }
 
         private void AttachWordMouseCaptureMonitor()
@@ -355,7 +384,140 @@ namespace LaTeXBlocks.Word
             var requests = CaptureTextColorRefreshes(interaction.Formulas,
                 interaction.SelectionLease);
             RememberSelection(Application.Selection);
-            QueueFormatRefresh(requests);
+            QueueTextColorBatch(requests, interaction.SelectionLease);
+        }
+
+        private void QueueTextColorBatch(IList<FormatRefreshRequest> requests,
+            SelectionRangeLease selectionLease)
+        {
+            if (shuttingDown || requests == null || requests.Count == 0) return;
+            var sequence = Interlocked.Increment(ref textColorBatchSequence);
+            pendingTextColorBatchTargets.Clear();
+            var profile = currentProfile ?? Renderers.DefaultAvailableProfile;
+            var batch = new PendingTextColorBatch(sequence, profile, selectionLease,
+                new List<FormatRefreshRequest>(requests));
+            foreach (var request in batch.Requests)
+            {
+                pendingFormatRefreshes.Remove(request.ShapeKey);
+                pendingTextColorBatchTargets[request.ShapeKey] =
+                    new PendingTextColorBatchTarget(sequence, request.TextColor,
+                        request.FontSizePt);
+            }
+            _ = RefreshTextColorBatchAsync(Blocks, batch);
+        }
+
+        private async Task RefreshTextColorBatchAsync(LaTeXBlockService service,
+            PendingTextColorBatch batch)
+        {
+            try
+            {
+                var tasks = new List<Task<LaTeXBlockRender>>(batch.Requests.Count);
+                foreach (var request in batch.Requests)
+                    tasks.Add(service.RenderCommittedAsync(request.Source,
+                        request.Metadata.WidthPt, request.Metadata.Mode, batch.Profile,
+                        request.FontSizePt,
+                        request.Metadata.Role == LaTeXBlockRole.NumberedEquation,
+                        request.TextColor));
+                var renders = await Task.WhenAll(tasks).ConfigureAwait(false);
+                await InvokeOnWordUiAsync(() => CompleteTextColorBatch(service, batch,
+                    renders)).ConfigureAwait(false);
+            }
+            catch (TaskCanceledException)
+            {
+                await AbandonTextColorBatchAsync(batch, null).ConfigureAwait(false);
+            }
+            catch (ObjectDisposedException)
+            {
+                await AbandonTextColorBatchAsync(batch, null).ConfigureAwait(false);
+            }
+            catch (Exception exception)
+            {
+                await AbandonTextColorBatchAsync(batch, exception).ConfigureAwait(false);
+            }
+        }
+
+        private void CompleteTextColorBatch(LaTeXBlockService service,
+            PendingTextColorBatch batch, LaTeXBlockRender[] renders)
+        {
+            if (shuttingDown || batch.Sequence != textColorBatchSequence) return;
+            var restoreSelection = batch.SelectionLease != null &&
+                batch.SelectionLease.Matches(Application.Selection);
+            Exception firstFailure = null;
+            var screenUpdating = true;
+            try { screenUpdating = Application.ScreenUpdating; }
+            catch (COMException) { }
+            try
+            {
+                try { Application.ScreenUpdating = false; }
+                catch (COMException) { }
+                RunProgrammaticMutation(() =>
+                {
+                    for (var index = 0; index < batch.Requests.Count; index++)
+                    {
+                        var request = batch.Requests[index];
+                        try
+                        {
+                            var shape = request.Shape;
+                            if (shape == null ||
+                                !LaTeXBlockService.TryReadContract(shape,
+                                    out var currentMetadata, out var currentSource) ||
+                                currentSource != request.Source ||
+                                !SameMetadataState(currentMetadata, request.Metadata) ||
+                                !string.Equals(batch.Profile, currentProfile,
+                                    StringComparison.OrdinalIgnoreCase))
+                                continue;
+                            var liveColor = LaTeXBlockService.ResolveTextColor(shape.Range);
+                            var liveSize = (double)shape.Range.Font.Size;
+                            if (!LaTeXBlockService.TextColorsEqual(liveColor,
+                                    request.TextColor) || liveSize < 1 || liveSize > 200 ||
+                                Math.Abs(liveSize - request.FontSizePt) >= 0.001)
+                                continue;
+                            service.UpdateRendered(shape, request.Source,
+                                request.Metadata.WidthPt, request.Metadata.Mode,
+                                renders[index], false);
+                        }
+                        catch (Exception exception)
+                        {
+                            if (firstFailure == null) firstFailure = exception;
+                        }
+                    }
+                    if (restoreSelection) batch.SelectionLease.TryRestore(Application);
+                }, restoreSelection);
+            }
+            finally
+            {
+                try { Application.ScreenUpdating = screenUpdating; }
+                catch (COMException) { }
+            }
+            ClearTextColorBatchTargets(batch);
+            ribbon?.InvalidateWidthControl();
+            if (firstFailure != null)
+                MessageBox.Show(new LaTeXBlocksRibbon.WordWindow(Application),
+                    firstFailure.GetBaseException().Message, "LaTeX Blocks",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+
+        private Task AbandonTextColorBatchAsync(PendingTextColorBatch batch,
+            Exception exception)
+        {
+            if (shuttingDown) return Task.FromResult(false);
+            return InvokeOnWordUiAsync(() =>
+            {
+                if (batch.Sequence != textColorBatchSequence) return;
+                ClearTextColorBatchTargets(batch);
+                if (exception != null)
+                    MessageBox.Show(new LaTeXBlocksRibbon.WordWindow(Application),
+                        exception.GetBaseException().Message, "LaTeX Blocks",
+                        MessageBoxButtons.OK, MessageBoxIcon.Error);
+            });
+        }
+
+        private void ClearTextColorBatchTargets(PendingTextColorBatch batch)
+        {
+            foreach (var request in batch.Requests)
+                if (pendingTextColorBatchTargets.TryGetValue(request.ShapeKey,
+                        out var target) && target.Sequence == batch.Sequence)
+                    pendingTextColorBatchTargets.Remove(request.ShapeKey);
         }
 
         private void CommitExactlySelectedFormulaColor(long targetKey)
@@ -1193,6 +1355,27 @@ namespace LaTeXBlocks.Word
         private void QueueFormatRefresh(List<FormatRefreshRequest> requests)
         {
             if (shuttingDown || requests == null || requests.Count == 0) return;
+            var colorOnly = true;
+            var selectionLease = requests[0].SelectionLease;
+            foreach (var request in requests)
+            {
+                if (!request.ChangesTextColor || request.ChangesFontSize ||
+                    request.ChangesWidth)
+                {
+                    colorOnly = false;
+                    break;
+                }
+                if (!ReferenceEquals(selectionLease, request.SelectionLease))
+                    selectionLease = null;
+            }
+            // Every event source, including WindowSelectionChange fallback, must
+            // converge here. Keeping batching only in the Ribbon-monitor callback
+            // left the fallback path doing N independent replacements and N repaints.
+            if (colorOnly)
+            {
+                QueueTextColorBatch(requests, selectionLease);
+                return;
+            }
             foreach (var request in requests) QueueFormatRefresh(request);
         }
 
@@ -1617,7 +1800,7 @@ namespace LaTeXBlocks.Word
                         var replacement = service.UpdateRendered(shape, pending.Source,
                             pending.TargetWidthPt, pending.BaseMetadata.Mode, render, false);
                         if (restoreRangeSelection)
-                            pending.SelectionLease.TryRestore();
+                            pending.SelectionLease.TryRestore(Application);
                         else if (restoreExactSelection)
                             replacement.Range.Select();
                     }, restoreRangeSelection || restoreExactSelection);
@@ -1707,17 +1890,26 @@ namespace LaTeXBlocks.Word
         private bool HasPendingFormatTarget(WordInterop.InlineShape shape, double fontSizePt,
             int textColor)
         {
-            return shape != null && pendingFormatRefreshes.TryGetValue(
-                       GetComIdentity(shape), out var pending) &&
-                   (Math.Abs(pending.TargetFontSizePt - fontSizePt) > 0.001 ||
-                    !LaTeXBlockService.TextColorsEqual(pending.TargetTextColor, textColor));
+            if (shape == null) return false;
+            var shapeKey = GetComIdentity(shape);
+            if (pendingFormatRefreshes.TryGetValue(shapeKey, out var pending) &&
+                (Math.Abs(pending.TargetFontSizePt - fontSizePt) > 0.001 ||
+                 !LaTeXBlockService.TextColorsEqual(pending.TargetTextColor, textColor)))
+                return true;
+            return pendingTextColorBatchTargets.TryGetValue(shapeKey, out var batch) &&
+                   (Math.Abs(batch.FontSizePt - fontSizePt) > 0.001 ||
+                    !LaTeXBlockService.TextColorsEqual(batch.TextColor, textColor));
         }
 
         private bool HasPendingTextColorTarget(WordInterop.InlineShape shape, int textColor)
         {
-            return shape != null && pendingFormatRefreshes.TryGetValue(
-                       GetComIdentity(shape), out var pending) &&
-                   !LaTeXBlockService.TextColorsEqual(pending.TargetTextColor, textColor);
+            if (shape == null) return false;
+            var shapeKey = GetComIdentity(shape);
+            if (pendingFormatRefreshes.TryGetValue(shapeKey, out var pending) &&
+                !LaTeXBlockService.TextColorsEqual(pending.TargetTextColor, textColor))
+                return true;
+            return pendingTextColorBatchTargets.TryGetValue(shapeKey, out var batch) &&
+                   !LaTeXBlockService.TextColorsEqual(batch.TextColor, textColor);
         }
 
         private static bool SameBaseState(PendingFormatRefresh pending,
@@ -1822,13 +2014,10 @@ namespace LaTeXBlocks.Word
 
         private sealed class SelectionRangeLease
         {
-            private readonly WordInterop.Range range;
-
-            private SelectionRangeLease(WordInterop.Range range, long documentKey,
+            private SelectionRangeLease(long documentKey,
                 WordInterop.WdStoryType storyType, int start, int end,
                 WordInterop.WdSelectionType selectionType)
             {
-                this.range = range;
                 DocumentKey = documentKey;
                 StoryType = storyType;
                 Start = start;
@@ -1847,8 +2036,8 @@ namespace LaTeXBlocks.Word
                 if (selection == null) return null;
                 try
                 {
-                    var selectedRange = selection.Range.Duplicate;
-                    return new SelectionRangeLease(selectedRange,
+                    var selectedRange = selection.Range;
+                    return new SelectionRangeLease(
                         GetComIdentity(selectedRange.Document), selectedRange.StoryType,
                         selectedRange.Start, selectedRange.End, selection.Type);
                 }
@@ -1857,12 +2046,8 @@ namespace LaTeXBlocks.Word
 
             internal SelectionRangeLease Clone()
             {
-                try
-                {
-                    return new SelectionRangeLease(range.Duplicate, DocumentKey,
-                        StoryType, Start, End, SelectionType);
-                }
-                catch (COMException) { return null; }
+                return new SelectionRangeLease(DocumentKey, StoryType, Start, End,
+                    SelectionType);
             }
 
             internal bool Matches(WordInterop.Selection selection)
@@ -1878,13 +2063,17 @@ namespace LaTeXBlocks.Word
                 catch (COMException) { return false; }
             }
 
-            internal bool TryRestore()
+            internal bool TryRestore(WordInterop.Application application)
             {
+                if (application == null) return false;
                 try
                 {
                     // InlineShape replacement is a one-character-for-one-character
-                    // edit. Reset the duplicate to the original endpoints so Word's
-                    // temporary selection collapse cannot shrink the user's range.
+                    // edit. Recreate the range from scalar coordinates so a lease
+                    // never roots a Word Range COM object across document close.
+                    var document = application.ActiveDocument;
+                    if (GetComIdentity(document) != DocumentKey) return false;
+                    var range = document.StoryRanges[StoryType].Duplicate;
                     range.SetRange(Start, End);
                     range.Select();
                     return true;
@@ -2044,6 +2233,39 @@ namespace LaTeXBlocks.Word
             internal SelectionRangeLease SelectionLease { get; }
         }
 
+        private sealed class PendingTextColorBatch
+        {
+            internal PendingTextColorBatch(long sequence, string profile,
+                SelectionRangeLease selectionLease,
+                List<FormatRefreshRequest> requests)
+            {
+                Sequence = sequence;
+                Profile = profile;
+                SelectionLease = selectionLease;
+                Requests = requests ?? new List<FormatRefreshRequest>();
+            }
+
+            internal long Sequence { get; }
+            internal string Profile { get; }
+            internal SelectionRangeLease SelectionLease { get; }
+            internal List<FormatRefreshRequest> Requests { get; }
+        }
+
+        private sealed class PendingTextColorBatchTarget
+        {
+            internal PendingTextColorBatchTarget(long sequence, int textColor,
+                double fontSizePt)
+            {
+                Sequence = sequence;
+                TextColor = LaTeXBlockService.NormalizeTextColor(textColor);
+                FontSizePt = fontSizePt;
+            }
+
+            internal long Sequence { get; }
+            internal int TextColor { get; }
+            internal double FontSizePt { get; }
+        }
+
         private sealed class PendingFormatRefresh
         {
             internal PendingFormatRefresh(long shapeKey, WordInterop.InlineShape shape,
@@ -2184,6 +2406,8 @@ namespace LaTeXBlocks.Word
             currentProfile = profile;
             pendingFormatRefreshes.Clear();
             Interlocked.Increment(ref formatRefreshSequence);
+            pendingTextColorBatchTargets.Clear();
+            Interlocked.Increment(ref textColorBatchSequence);
             pendingBlockFrameReflows.Clear();
             Interlocked.Increment(ref blockFrameReflowSequence);
         }

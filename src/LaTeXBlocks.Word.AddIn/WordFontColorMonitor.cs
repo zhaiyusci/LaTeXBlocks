@@ -401,15 +401,11 @@ namespace LaTeXBlocks.Word
             automationRoot = root;
             try
             {
-                Automation.AddAutomationEventHandler(InvokePattern.InvokedEvent, root,
-                    TreeScope.Subtree, automationHandler);
-                Automation.AddAutomationEventHandler(WindowPattern.WindowClosedEvent, root,
-                    TreeScope.Subtree, automationHandler);
-                Automation.AddAutomationEventHandler(WindowPattern.WindowOpenedEvent, root,
-                    TreeScope.Subtree, automationHandler);
-                Automation.AddAutomationPropertyChangedEventHandler(root,
-                    TreeScope.Subtree, propertyChangedHandler,
-                    ExpandCollapsePattern.ExpandCollapseStateProperty);
+                // Never subscribe an in-process Office add-in to desktop-root UIA
+                // events. UIAutomationCore creates callback infrastructure that can
+                // keep WINWORD hot for minutes after its windows and add-in have
+                // closed. Native WinEvent/MSAA hooks below provide the event stream;
+                // UIA remains a short-lived, on-demand classifier only.
                 hideHook = RegisterWinEvent(EventObjectHide);
                 focusHook = RegisterWinEvent(EventObjectFocus);
                 selectionHook = RegisterWinEvent(EventObjectSelection);
@@ -476,6 +472,18 @@ namespace LaTeXBlocks.Word
                     {
                         Observe(WordFontColorSignal.PaletteItemCommitted,
                             paletteInteractionId);
+                        return;
+                    }
+                    if (TryCapturePointerOrFocusSnapshot(out var invokedSnapshot))
+                    {
+                        if (invokedSnapshot.IsMoreColorsMenuItem &&
+                            IsPaletteSessionActive())
+                            Observe(WordFontColorSignal.MoreColorsOpened);
+                        else if (invokedSnapshot.IsInsideFontColorPicker &&
+                                 !invokedSnapshot.IsFontColorDropDown &&
+                                 invokedSnapshot.IsMainButton &&
+                                 !TryConsumeProgrammaticInvocationSuppression())
+                            Observe(WordFontColorSignal.MainButtonInvoked);
                     }
                     return;
                 }
@@ -1367,15 +1375,15 @@ namespace LaTeXBlocks.Word
 
         public void Dispose()
         {
-            DisposeCore(false);
+            DisposeCore();
         }
 
         internal void DisposeForHostShutdown()
         {
-            DisposeCore(true);
+            DisposeCore();
         }
 
-        private void DisposeCore(bool hostIsExiting)
+        private void DisposeCore()
         {
             if (disposed) return;
             disposed = true;
@@ -1389,16 +1397,10 @@ namespace LaTeXBlocks.Word
                 pendingPaletteCommitInteractionId = 0;
                 ClearPaletteCandidateLocked();
             }
-            // Removing desktop-root UIA handlers can synchronously wait on providers
-            // whose windows Word is destroying. Moving that call to a worker is not
-            // sufficient: VSTO can then wait for the worker while unloading the add-in
-            // AppDomain. During an actual process exit, mark callbacks inert and let
-            // process teardown reclaim UIA registrations. A startup rollback or an
-            // ordinary Dispose still unregisters them normally.
-            RemoveAutomationHandlers(hostIsExiting);
+            RemoveAutomationHandlers();
         }
 
-        private void RemoveAutomationHandlers(bool skipUiaRemoval = false)
+        private void RemoveAutomationHandlers()
         {
             RemoveDialogMessageHook();
             var mouseHook = Interlocked.Exchange(ref lowLevelMouseHook, IntPtr.Zero);
@@ -1408,44 +1410,28 @@ namespace LaTeXBlocks.Word
             Unhook(ref selectionHook);
             Unhook(ref focusHook);
             Unhook(ref hideHook);
-            var root = automationRoot;
             automationRoot = null;
-            if (root == null)
-            {
-                started = false;
-                return;
-            }
             started = false;
-            if (skipUiaRemoval) return;
-            RemoveUiaHandlers(root);
+            // No global UIA handlers are registered. Clearing the root reference is
+            // sufficient and, unlike RemoveAutomationEventHandler, cannot start a
+            // provider/RPC teardown during Word exit.
         }
 
-        private void RemoveUiaHandlers(AutomationElement root)
+        private bool TryCapturePointerOrFocusSnapshot(out ElementSnapshot snapshot)
         {
+            snapshot = null;
             try
             {
-                Automation.RemoveAutomationEventHandler(InvokePattern.InvokedEvent,
-                    root, automationHandler);
+                var cursor = Cursor.Position;
+                var element = AutomationElement.FromPoint(
+                    new System.Windows.Point(cursor.X, cursor.Y)) ??
+                    AutomationElement.FocusedElement;
+                if (element == null) return false;
+                snapshot = ElementSnapshot.Capture(element, wordProcessId);
+                return snapshot.IsWordProcess;
             }
-            catch { }
-            try
-            {
-                Automation.RemoveAutomationEventHandler(WindowPattern.WindowClosedEvent,
-                    root, automationHandler);
-            }
-            catch { }
-            try
-            {
-                Automation.RemoveAutomationEventHandler(WindowPattern.WindowOpenedEvent,
-                    root, automationHandler);
-            }
-            catch { }
-            try
-            {
-                Automation.RemoveAutomationPropertyChangedEventHandler(root,
-                    propertyChangedHandler);
-            }
-            catch { }
+            catch (ElementNotAvailableException) { return false; }
+            catch (InvalidOperationException) { return false; }
         }
 
         private static void Unhook(ref IntPtr hook)

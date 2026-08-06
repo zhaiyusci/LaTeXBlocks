@@ -5,6 +5,87 @@ Word-and-PowerPoint package line.
 
 ## [Unreleased]
 
+## [0.2.71] — 2026-08-07
+
+### Word
+
+- Routed pure text-colour refresh lists through the same batch writer regardless of whether they originated from the
+  Ribbon colour monitor or the selection-change fallback. The fallback no longer bypasses batching and repainting
+  formulas one by one.
+
+## [0.2.70] — 2026-08-07
+
+### Word
+
+- Batch formula redraws produced by one mixed-selection Font Color command. All renders finish before Word replaces
+  any drawing, the whole batch is committed with screen updating suspended, and the original selection is restored
+  once. Selection-change fallback recognizes the batch as pending and no longer queues duplicate redraws.
+
+## [0.2.69] — 2026-08-07
+
+### Word
+
+- Removed the cross-callback custom undo transaction introduced in 0.2.68. Word cannot safely keep that global
+  transaction open while asynchronous formula renders complete; doing so could repeatedly retrigger selection-format
+  reconciliation after Select All. Restored the stable asynchronous colour-refresh behavior.
+
+## [0.2.68] — 2026-08-07
+
+### Word
+
+- Grouped a native Font Color change and all resulting LaTeX formula redraws into one custom Word undo record, so
+  changing a mixed text-and-formula selection is reverted as one semantic operation.
+
+## [0.2.67] — 2026-08-07
+
+### Word
+
+- Removed all desktop-root UI Automation event subscriptions from the in-process add-in. Font Color detection now
+  uses the existing WinEvent/MSAA/mouse-confirmation stream and short-lived UIA classification queries only, avoiding
+  both slow UIA unregistration and the post-Quit callback drain that could leave WINWORD hot for minutes.
+
+## [0.2.66] — 2026-08-07
+
+### Word
+
+- Moved Font Color UI Automation unregistration to the final document's `DocumentBeforeClose`, while Word's Ribbon
+  provider is still live. This prevents the windowless WINWORD/VSTO teardown path from spending minutes in a hot UIA
+  callback drain after real colour/formula interactions.
+
+## [0.2.65] — 2026-08-07
+
+### Word
+
+- Replaced selection range leases with scalar document/story/start/end descriptors. Restoring a selection now creates
+  a short-lived Range only at the moment it is needed; document close performs neither `FinalReleaseComObject` nor a
+  global GC. This removes the COM reentrancy wait reproduced inside `Document.Close()` on an otherwise blank document.
+
+## [0.2.64] — 2026-08-07
+
+### Word
+
+- Removed the two full-heap collections and global finalizer wait from final-document close. LaTeX Blocks now releases
+  only the persistent Range/Shape RCWs held by its selection and rerender state, preserving prompt process teardown
+  without pausing for unrelated WebBrowser, UIA, or Office finalizers.
+
+## [0.2.63] — 2026-08-07
+
+### Word
+
+- Corrected formula replacement after confirming that `InlineShapes.AddPicture` inserts beside an existing drawing
+  even when given that drawing's one-character Range. Update now deletes the old character inside the custom undo
+  transaction and inserts the new SVG at the saved position, so neither a transient nor surviving duplicate remains.
+- Released persistent selection and rerender `Range`/`Shape` RCWs at `DocumentBeforeClose`. These references previously
+  kept a windowless WINWORD process and its RenderHost/StemTeX process tree alive before Word could raise `Quit`.
+
+## [0.2.62] — 2026-08-07
+
+### Word
+
+- Changed formula Update from insert-then-delete to Word's single-operation range replacement. The existing formula's
+  non-collapsed drawing range is passed directly to `InlineShapes.AddPicture`, eliminating the temporary duplicate
+  formula and its extra paragraph reflow while retaining custom-record rollback on failure.
+
 ## [0.2.61] — 2026-08-06
 
 ### Word
