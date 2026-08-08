@@ -6,6 +6,7 @@ using System.Text.RegularExpressions;
 using System.Diagnostics;
 using System.Threading;
 using System.Collections.Generic;
+using System.Linq;
 using System.Windows.Automation;
 using System.Windows.Forms;
 using LaTeXBlocks.Word;
@@ -18,6 +19,7 @@ namespace LaTeXBlocks.WordSmoke
         private const string StartupShutdownProbeChild = "LATEXBLOCKS_STARTUP_SHUTDOWN_PROBE_CHILD";
         private const string UiaFontColorSmoke = "LATEXBLOCKS_UIA_FONT_COLOR_SMOKE";
         private const string UiaFontColorOnly = "LATEXBLOCKS_UIA_FONT_COLOR_ONLY";
+        private const string BaselineColorOnly = "LATEXBLOCKS_BASELINE_COLOR_ONLY";
         private const string WordJoiner = "\u2060";
         private const uint MouseEventLeftDown = 0x0002;
         private const uint MouseEventLeftUp = 0x0004;
@@ -69,6 +71,19 @@ namespace LaTeXBlocks.WordSmoke
                 if (profile.IndexOf("cjk", StringComparison.OrdinalIgnoreCase) < 0)
                     foreach (var candidate in renderer.Profiles)
                         if (candidate.IndexOf("cjk", StringComparison.OrdinalIgnoreCase) >= 0) { cjkProfile = candidate; break; }
+                if (string.Equals(Environment.GetEnvironmentVariable(BaselineColorOnly),
+                        "1", StringComparison.Ordinal))
+                {
+                    renderer.WarmUp(profile);
+                    word = new WordInterop.Application();
+                    ownsWord = true;
+                    word.Visible = false;
+                    word.DisplayAlerts = WordInterop.WdAlertLevel.wdAlertsNone;
+                    document = word.Documents.Add();
+                    RunColorOnlyBaselineProbe(word, document, renderer, profile);
+                    Console.WriteLine("Word colour-only baseline probe passed.");
+                    return 0;
+                }
                 RunRenderHostClientSmoke(profile);
                 Console.WriteLine("StemTeX: warming the default profile...");
                 renderer.WarmUp(profile);
@@ -1304,6 +1319,88 @@ namespace LaTeXBlocks.WordSmoke
             }
         }
 
+        private static void RunColorOnlyBaselineProbe(WordInterop.Application word,
+            WordInterop.Document document, StemTeXBackend renderer, string profile)
+        {
+            const string source = "$\\int x\\,dx=\\frac12x^2+C$";
+            const int previousColor = 0x000000ff;
+            const int targetColor = 0x00ff0000;
+            document.Range(0, 0).Text = "before XX after\r";
+            document.Content.Font.Size = 18;
+            document.Content.Font.Color = (WordInterop.WdColor)previousColor;
+            document.Range(7, 9).Select();
+            var service = new LaTeXBlockService(word, renderer);
+            var render = service.RenderPreview(source, 360,
+                LaTeXBlockLayoutMode.Auto, profile, 18, false, previousColor);
+            var shape = service.InsertRendered(source, 360,
+                LaTeXBlockLayoutMode.Auto, render);
+            Assert(LaTeXBlockService.TryReadContract(shape, out var metadata,
+                       out var storedSource) && storedSource == source,
+                "The baseline probe did not create a valid formula contract.");
+            var expectedPosition = -(int)Math.Round(metadata.DepthPt,
+                MidpointRounding.AwayFromZero);
+            Assert(expectedPosition < 0 && shape.Range.Font.Position == expectedPosition,
+                "The baseline probe formula did not begin on its TeX baseline.");
+            shape.Range.HighlightColorIndex = WordInterop.WdColorIndex.wdYellow;
+            Console.WriteLine("Stored SVG before native colour: " +
+                DescribeStoredSvgPaint(shape.Range.WordOpenXML));
+            shape.Range.Font.Color = (WordInterop.WdColor)targetColor;
+            Console.WriteLine("Stored SVG after native colour: " +
+                DescribeStoredSvgPaint(shape.Range.WordOpenXML));
+            var paragraph = shape.Range.Paragraphs[1].Range;
+            var textBefore = document.Content.Text;
+            var updates = new List<LaTeXBlockColorUpdate>
+            {
+                new LaTeXBlockColorUpdate(shape, shape.Range, metadata, source,
+                    previousColor, targetColor, paragraph.Start, paragraph.End)
+            };
+            Assert(service.TryApplyGraphicFillsBatch(updates),
+                "The colour-only baseline probe did not use Graphics Fill.");
+            WordInterop.InlineShape restored = null;
+            foreach (WordInterop.InlineShape candidate in document.InlineShapes)
+                if (LaTeXBlockService.TryReadContract(candidate, out var candidateMetadata,
+                        out _) && candidateMetadata.Id == metadata.Id)
+                {
+                    restored = candidate;
+                    break;
+                }
+            var positionPreserved = restored != null &&
+                restored.Range.Font.Position == expectedPosition;
+            var highlightPreserved = restored != null &&
+                restored.Range.HighlightColorIndex == WordInterop.WdColorIndex.wdYellow;
+            var textPreserved = document.Content.Text == textBefore;
+            var graphicFillColor = restored != null
+                ? restored.Fill.ForeColor.RGB
+                : -1;
+            Console.WriteLine("Unset colour probe: position=" + positionPreserved +
+                ", highlight=" + highlightPreserved + ", text=" + textPreserved +
+                ", graphicFill=" + graphicFillColor.ToString("X6"));
+            Assert(restored != null && positionPreserved && highlightPreserved &&
+                   textPreserved && graphicFillColor == targetColor,
+                "Graphics Fill did not recolour the formula while preserving baseline, highlight, and text.");
+        }
+
+        private static string DescribeStoredSvgPaint(string flatOpc)
+        {
+            var xml = new System.Xml.XmlDocument { XmlResolver = null };
+            xml.LoadXml(flatOpc);
+            var manager = new System.Xml.XmlNamespaceManager(xml.NameTable);
+            manager.AddNamespace("pkg",
+                "http://schemas.microsoft.com/office/2006/xmlPackage");
+            var part = xml.SelectSingleNode(
+                "//pkg:part[contains(@pkg:contentType,'image/svg+xml')]", manager);
+            var binary = part?.SelectSingleNode("pkg:binaryData", manager);
+            var data = binary != null
+                ? Encoding.UTF8.GetString(Convert.FromBase64String(binary.InnerText))
+                : part?.SelectSingleNode("pkg:xmlData", manager)?.InnerXml;
+            if (string.IsNullOrEmpty(data)) return "missing";
+            var paints = Regex.Matches(data,
+                    "(?:data-latexblocks-host-color|color|fill|stroke)\\s*=\\s*['\"][^'\"]*['\"]",
+                    RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)
+                .Cast<Match>().Select(match => match.Value).Distinct().ToArray();
+            return paints.Length == 0 ? "unset" : string.Join(", ", paints);
+        }
+
         private static void RunRenderHostClientSmoke(string profile)
         {
             Console.WriteLine("RenderHost: testing isolated SVG rendering...");
@@ -1527,9 +1624,9 @@ namespace LaTeXBlocks.WordSmoke
                     "An inline formula did not preserve its raw TeX source and native Word text color.");
                 var inlineRedSvg = service.RenderPreview(inlineSource, 360,
                     LaTeXBlockLayoutMode.Auto, profile, initialFontSizePt, false, wordRed);
-                Assert(Convert.ToBase64String(automaticRender.SvgBytes) !=
+                Assert(Convert.ToBase64String(automaticRender.SvgBytes) ==
                        Convert.ToBase64String(inlineRedSvg.SvgBytes),
-                    "The SVG generated for an explicit Word text color is identical to automatic text color.");
+                    "A host text color polluted the formula SVG instead of remaining an Office Graphic fill.");
                 Assert(Math.Abs(LaTeXBlockService.ReadSvgWidthPt(automaticRender.SvgBytes) -
                                  LaTeXBlockService.ReadSvgWidthPt(inlineRedSvg.SvgBytes)) < 0.01,
                     "Applying Word Font.Color changed the inline formula's TeX box width.");
@@ -1538,60 +1635,27 @@ namespace LaTeXBlocks.WordSmoke
                         StringComparison.Ordinal))
                     RunFontColorAccessibilitySignalSmoke(word, document);
 
-                // Word enables Font Color for an exact InlineShape selection but the
-                // built-in command is a host no-op. Verify that premise, then exercise
-                // the production collapsed-caret proxy. The transaction must restore
-                // the exact picture selection and never include the two U+2060
-                // placement boundaries in the user's semantic selection.
-                Assert(word.CommandBars.GetEnabledMso("FontColorPicker"),
-                    "Word's built-in Font Color command is disabled in the smoke fixture.");
-                var pickerProbe = document.Range(0, 1);
-                pickerProbe.Select();
-                word.CommandBars.ExecuteMso("FontColorPicker");
-                var pickerTextColor = LaTeXBlockService.ResolveTextColor(pickerProbe);
-                pickerProbe.Font.Color = (WordInterop.WdColor)wordRed;
-                var colorDifferentFromPicker =
-                    LaTeXBlockService.TextColorsEqual(pickerTextColor, wordRed)
-                        ? wordBlue
-                        : wordRed;
-                inline.Range.Font.Color = (WordInterop.WdColor)colorDifferentFromPicker;
+                // An exact formula is an Office Graphic. Its native colour operation
+                // is Graphics Fill; it must not use a collapsed-caret Font Color
+                // proxy or replace the drawing.
                 inline.Range.Select();
                 Assert(IsExactlySelectedInlineShape(word, inline),
-                    "The native Font Color host-contract fixture did not begin with an exact InlineShape selection.");
-                word.CommandBars.ExecuteMso("FontColorPicker");
+                    "The Graphics Fill fixture did not begin with an exact InlineShape selection.");
+                var graphicStart = inline.Range.Start;
+                var graphicEnd = inline.Range.End;
+                var graphicPosition = (double)inline.Range.Font.Position;
+                LaTeXBlockService.ApplyGraphicFill(inline, wordBlue);
                 Assert(IsExactlySelectedInlineShape(word, inline) &&
-                       LaTeXBlockService.TextColorsEqual(
-                           LaTeXBlockService.ResolveTextColor(inline.Range),
-                           colorDifferentFromPicker),
-                    "Word unexpectedly applied Font Color to an exact InlineShape selection; " +
-                    "the semantic-selection contract must be revalidated.");
-
-                Assert(service.TryApplyCurrentFontColorToSelectedInlineFormula(
-                           out var nativeTextFormula, out var previousPickerColor,
-                           out var appliedPickerColor, out var pickerDescriptor) &&
-                        nativeTextFormula.Range.Start == inline.Range.Start &&
-                        nativeTextFormula.Range.End == inline.Range.End,
-                    "The selected inline formula did not accept the current Font Color value through the caret proxy.");
-                Assert(IsExactlySelectedInlineShape(word, inline) &&
-                       LaTeXBlockService.TextColorsEqual(previousPickerColor,
-                           colorDifferentFromPicker) &&
-                       LaTeXBlockService.TextColorsEqual(appliedPickerColor,
-                           pickerTextColor) &&
-                       (pickerDescriptor.Kind !=
-                            LaTeXBlockService.NativeTextColorKind.Theme ||
-                        pickerDescriptor.ThemeColor !=
-                            WordInterop.WdThemeColorIndex.wdNotThemeColor),
-                    "The caret proxy did not preserve an exact formula selection or capture the current picker colour.");
+                       inline.Range.Start == graphicStart &&
+                       inline.Range.End == graphicEnd &&
+                       (int)inline.Fill.ForeColor.RGB == wordBlue &&
+                       Math.Abs((double)inline.Range.Font.Position -
+                                graphicPosition) < 0.01,
+                    "Graphics Fill changed selection, drawing boundaries, or baseline.");
                 Assert(
                         document.Range(inline.Range.Start - 1, inline.Range.Start).Text == WordJoiner &&
                         document.Range(inline.Range.End, inline.Range.End + 1).Text == WordJoiner,
-                    "The Font Color proxy damaged an inline formula's U+2060 boundaries.");
-                Assert(LaTeXBlockService.TextColorsEqual(
-                           LaTeXBlockService.ResolveTextColor(inline.Range), pickerTextColor) &&
-                       LaTeXBlockService.TextColorsEqual(
-                           LaTeXBlockService.ResolveTextColor(
-                               document.Range(0, hostText.Length)), wordRed),
-                    "The Font Color proxy did not apply the picker colour exclusively to the formula run.");
+                    "Graphics Fill damaged an inline formula's U+2060 boundaries.");
 
                 // Theme colours are negative encoded values in Font.Color and even in
                 // TextColor.RGB. The complete formula scaffold's Flat OPC contains
@@ -1698,9 +1762,9 @@ namespace LaTeXBlocks.WordSmoke
                     WordInterop.WdUnderline.wdUnderlineSingle, customNoProofing,
                     customHighlight,
                     "Automatic Font Color refresh");
-                Assert(Convert.ToBase64String(blueRefreshRender.SvgBytes) !=
+                Assert(Convert.ToBase64String(blueRefreshRender.SvgBytes) ==
                            Convert.ToBase64String(inlineRedSvg.SvgBytes),
-                    "The automatic Font Color refresh did not replace the red SVG with a blue render.");
+                    "The automatic Font Color refresh embedded host colour into the SVG.");
                 Assert(!LaTeXBlockService.TryClassifyHostFormatChange(
                         LaTeXBlockLayoutMode.Auto,
                         (double)recoloredInline.Range.Font.Size,
@@ -2679,6 +2743,7 @@ namespace LaTeXBlocks.WordSmoke
                 dispatcher.CreateControl();
                 monitor = new WordFontColorMonitor(dispatcher,
                     unchecked((int)wordProcessId));
+                monitor.SetInteractionContext(true);
                 var commits = 0;
                 var interactionGate = new object();
                 var begunInteractions = new HashSet<long>();

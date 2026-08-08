@@ -5,6 +5,54 @@ Word-and-PowerPoint package line.
 
 ## [Unreleased]
 
+## [0.2.83] — 2026-08-08
+
+### Word
+
+- Changed whole-formula colour to Word's native Office Graphic operation
+  (`InlineShape.Fill.ForeColor.RGB`). Colour-only updates no longer render TeX,
+  replace SVG drawings, move selections, or touch formula baselines and run
+  highlighting.
+- Exact formula selections are now owned exclusively by Word's **Graphics Fill**
+  command. Removed the collapsed-caret `FontColorPicker` proxy.
+- Restricted the native formatting monitor's UI Automation hit testing to Office
+  Ribbon/gallery `NetUI` windows. Ordinary document clicks no longer enqueue
+  accessibility provider calls, preventing colour-menu backlogs and delayed Word
+  shutdown; the monitor is also disabled before host teardown.
+
+## [0.2.82] — 2026-08-08
+
+### Word
+
+- Corrected the colour architecture for automatic formulas: default SVG paint now remains genuinely unset, so Word's
+  native `Font.Color` is the complete operation. The common path performs no StemTeX render, media rewrite, drawing
+  replacement, selection restore, or `ScreenUpdating` toggle; baseline and highlight therefore remain untouched.
+- Existing SVGs with the concrete host-colour wrapper introduced by 0.2.80/0.2.81 are detached from that wrapper on
+  their first colour change. Subsequent changes use the zero-write native path.
+
+## [0.2.81] — 2026-08-08
+
+### Word
+
+- Fixed colour-only SVG refreshes accepting a transient zero `w:position` after Word applied Font Color to an exact
+  formula selection. The same atomic OpenXML transaction now restores the formula character's derived baseline from
+  its existing TeX depth without rerendering or resetting highlight and other run properties.
+
+## [0.2.80] — 2026-08-08
+
+### Word
+
+- Removed the remaining per-formula contract reads, range lookups, deletion calls, and final identity checks from
+  same-paragraph format batches. New SVGs are imported beside the old drawings, then the old drawing runs are removed
+  together in the single OpenXML transaction. A 10-formula Word write profile fell from 1189 ms to 592 ms while
+  preserving text and every formula contract.
+- Moved host text colour out of TeX and into a marked, inherited SVG paint layer for new automatic formulas and styled
+  Blocks. Whole-formula colour changes now preserve explicit source colours, geometry, and baseline while skipping
+  StemTeX and AddPicture entirely. The embedded PNG compatibility fallback is updated selectively in the same Flat OPC
+  transaction; a 10-formula local profile completed in 259 ms.
+- Colour-only batches may span multiple paragraphs. They are prepared per paragraph, written back in reverse document
+  order, and remain one Word undo operation without changing paragraph marks or surrounding text.
+
 ## [0.2.78] — 2026-08-07
 
 ### Word

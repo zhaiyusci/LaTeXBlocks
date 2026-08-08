@@ -88,6 +88,8 @@ namespace LaTeXBlocks.Word
             // important for a standalone display: injecting \color before \[...\]
             // would create a paragraph and alter the display's tight geometry.
             var foreground = SvgColor(style.TextColor);
+            rootTag = ReplaceAttribute(rootTag,
+                "data-latexblocks-host-color", foreground);
             rootTag = ReplaceAttribute(rootTag, "color", foreground);
             rootTag = ReplaceAttribute(rootTag, "fill", foreground);
 

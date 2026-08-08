@@ -293,6 +293,7 @@ namespace LaTeXBlocks.Word
         private System.Threading.Timer paletteCommitTimer;
         private readonly WordFontColorInteractionState interactionState =
             new WordFontColorInteractionState();
+        private int interactionContextEnabled;
         private readonly WordFormatTransactionState formatTransactionState =
             new WordFormatTransactionState();
         private readonly object stateGate = new object();
@@ -399,6 +400,22 @@ namespace LaTeXBlocks.Word
                 DateTime.UtcNow.AddMilliseconds(100).Ticks);
         }
 
+        internal void SetInteractionContext(bool enabled)
+        {
+            Interlocked.Exchange(ref interactionContextEnabled, enabled ? 1 : 0);
+            if (enabled) return;
+            StopPaletteCommitTimer();
+            lock (stateGate)
+            {
+                pendingFormatSignals.Clear();
+                formatSignalDrainScheduled = false;
+                pendingPaletteCommitInteractionId = 0;
+                paletteCancellationInteractionId = 0;
+                ClearPaletteCandidateLocked();
+                Interlocked.Exchange(ref paletteSessionUntilUtcTicks, 0);
+            }
+        }
+
         public void Start()
         {
             ThrowIfDisposed();
@@ -443,7 +460,8 @@ namespace LaTeXBlocks.Word
         private void OnWinEvent(IntPtr hookHandle, uint eventType, IntPtr hwnd,
             int objectId, int childId, uint eventThread, uint eventTime)
         {
-            if (disposed) return;
+            if (disposed || Volatile.Read(ref interactionContextEnabled) == 0)
+                return;
             try
             {
                 if (eventType == EventObjectSelection)
@@ -1330,7 +1348,8 @@ namespace LaTeXBlocks.Word
         private IntPtr OnLowLevelMouse(int hookCode, IntPtr wParam, IntPtr lParam)
         {
             var message = unchecked((uint)wParam.ToInt64());
-            if (!disposed && hookCode >= HookCodeAction && lParam != IntPtr.Zero &&
+            if (!disposed && Volatile.Read(ref interactionContextEnabled) != 0 &&
+                hookCode >= HookCodeAction && lParam != IntPtr.Zero &&
                 (message == WindowMessageLeftButtonDown ||
                  message == WindowMessageLeftButtonUp))
             {
@@ -1399,7 +1418,8 @@ namespace LaTeXBlocks.Word
                     if (interactionId != 0)
                         SchedulePaletteCommit(interactionId);
                     else if (message == WindowMessageLeftButtonUp &&
-                             processId == unchecked((uint)wordProcessId))
+                             processId == unchecked((uint)wordProcessId) &&
+                             IsOfficeFormattingWindow(window))
                         QueueFormattingControlHitTest(mouse.Point);
                 }
                 catch
@@ -1444,6 +1464,20 @@ namespace LaTeXBlocks.Word
                 catch (ElementNotAvailableException) { }
                 catch (InvalidOperationException) { }
             });
+        }
+
+        private static bool IsOfficeFormattingWindow(IntPtr window)
+        {
+            if (window == IntPtr.Zero) return false;
+            var className = new StringBuilder(128);
+            if (GetClassName(window, className, className.Capacity) <= 0)
+                return false;
+            // Ribbon controls and their galleries use NetUI windows. In particular,
+            // never start UI Automation for clicks in Word's document canvas: one
+            // provider call per ordinary click can build a backlog that delays both
+            // later colour menus and WINWORD process exit.
+            return className.ToString().StartsWith("NetUI",
+                StringComparison.OrdinalIgnoreCase);
         }
 
         private static bool IsSameWindowTree(IntPtr first, IntPtr second)

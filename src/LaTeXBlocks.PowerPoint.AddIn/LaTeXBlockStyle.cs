@@ -9,9 +9,9 @@ namespace LaTeXBlocks.PowerPoint
 namespace LaTeXBlocks.Word
 #endif
 {
-    // The content-facing part of a block style belongs to TeX: exact inner size,
-    // paragraph indentation, leading, foreground colour, and vertical placement.
-    // The final SVG supplies only padding, fill, border, and outer clipping.
+    // The layout-facing part of a block style belongs to TeX: exact inner size,
+    // paragraph indentation, leading, and vertical placement. The final SVG owns
+    // inherited host foreground paint as well as padding, fill, border, and clipping.
     internal enum LaTeXBlockVerticalAlignment
     {
         Top,
@@ -238,8 +238,6 @@ namespace LaTeXBlocks.Word
             // preview reads this at shipout, after the local group ends. It must
             // therefore be global; RenderAsync restores 1pt for each plain block.
             tex.AppendLine("\\global\\PreviewBorder=0pt%");
-            tex.AppendLine("\\definecolor{latexblocksforeground}{HTML}{" +
-                ToHex(TextColor) + "}%");
             tex.AppendLine("\\renewcommand{\\baselinestretch}{" +
                 FormatDecimal(LineSpacing) + "}%");
             tex.AppendLine("\\selectfont%");
@@ -276,9 +274,8 @@ namespace LaTeXBlocks.Word
                 StemTeXRenderer.StartsWithFullDisplayOrPageWidthEnvironment(source);
             if (standaloneDisplay)
             {
-                // The SVG shell supplies the inherited foreground colour for this
-                // branch. It leaves explicit colours authored in the TeX source
-                // untouched while keeping the display's own vertical spacing exact.
+                // The SVG shell supplies inherited foreground paint. Explicit
+                // colours authored in the TeX source remain child-level overrides.
                 tex.AppendLine(source);
             }
             else
@@ -292,7 +289,6 @@ namespace LaTeXBlocks.Word
                 // shell does not infer or add any vertical offset.
                 tex.AppendLine("\\setbox\\strutbox=\\hbox{\\vrule height .7\\baselineskip depth .3\\baselineskip width 0pt}%");
                 tex.AppendLine("\\noindent\\strut%");
-                tex.AppendLine("\\color{latexblocksforeground}%");
                 // A wrapper newline must not become a trailing TeX space. Preserve
                 // every author-entered space, trimming only terminal line endings.
                 tex.Append(source.TrimEnd('\r', '\n'));
