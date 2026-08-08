@@ -420,8 +420,8 @@ namespace LaTeXBlocks.WordSmoke
                        styledSvgText.IndexOf("data-latexblocks-border='1'", StringComparison.Ordinal) >= 0 &&
                        styledSvgText.IndexOf("#F0EED0", StringComparison.Ordinal) >= 0 &&
                        styledSvgText.IndexOf("#654321", StringComparison.Ordinal) >= 0 &&
-                       styledSvgText.IndexOf("fill='#123456'", StringComparison.OrdinalIgnoreCase) >= 0,
-                    "The shared styled SVG frame did not preserve Word's exact frame or paint all shell layers.");
+                       styledSvgText.IndexOf("fill='#123456'", StringComparison.OrdinalIgnoreCase) < 0,
+                    "The shared styled SVG frame did not preserve Word's shell while leaving foreground to Graphics Fill.");
                 Assert(string.Equals(Encoding.UTF8.GetString(topShell),
                            Encoding.UTF8.GetString(bottomShell), StringComparison.Ordinal),
                     "The SVG shell performed a second vertical-alignment calculation after TeX.");
@@ -1347,12 +1347,10 @@ namespace LaTeXBlocks.WordSmoke
             shape.Range.Font.Color = (WordInterop.WdColor)targetColor;
             Console.WriteLine("Stored SVG after native colour: " +
                 DescribeStoredSvgPaint(shape.Range.WordOpenXML));
-            var paragraph = shape.Range.Paragraphs[1].Range;
             var textBefore = document.Content.Text;
             var updates = new List<LaTeXBlockColorUpdate>
             {
-                new LaTeXBlockColorUpdate(shape, shape.Range, metadata, source,
-                    previousColor, targetColor, paragraph.Start, paragraph.End)
+                new LaTeXBlockColorUpdate(shape, targetColor)
             };
             Assert(service.TryApplyGraphicFillsBatch(updates),
                 "The colour-only baseline probe did not use Graphics Fill.");
@@ -1395,7 +1393,7 @@ namespace LaTeXBlocks.WordSmoke
                 : part?.SelectSingleNode("pkg:xmlData", manager)?.InnerXml;
             if (string.IsNullOrEmpty(data)) return "missing";
             var paints = Regex.Matches(data,
-                    "(?:data-latexblocks-host-color|color|fill|stroke)\\s*=\\s*['\"][^'\"]*['\"]",
+                    "(?:color|fill|stroke)\\s*=\\s*['\"][^'\"]*['\"]",
                     RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)
                 .Cast<Match>().Select(match => match.Value).Distinct().ToArray();
             return paints.Length == 0 ? "unset" : string.Join(", ", paints);
@@ -1491,8 +1489,10 @@ namespace LaTeXBlocks.WordSmoke
                     LaTeXBlockLayoutMode.Fixed, render, style);
                 Assert(LaTeXBlockService.TryReadContract(shape, out var metadata, out var source) &&
                        source == "\\[E=mc^2\\]" && metadata.HasExplicitStyle &&
-                       metadata.Style.Equals(style) && shape.Range.Font.Position == 0,
-                    "Inserting a styled Word Block lost its TeX source or persistent style.");
+                       metadata.Style.Equals(style) && shape.Range.Font.Position == 0 &&
+                       shape.Fill.ForeColor.RGB ==
+                           LaTeXBlockService.ToWordColor(style.TextColor),
+                    "Inserting a styled Word Block lost its source, style, or Graphics Fill.");
                 // Fixed Content has no surrounding-text baseline. Damage the old
                 // character position so Update must restore the mode-owned zero.
                 shape.Range.Font.Position = 9;
@@ -1510,6 +1510,8 @@ namespace LaTeXBlocks.WordSmoke
                        Math.Abs(shape.Width - resizedWidth) < 0.05 &&
                        Math.Abs(shape.Height - resizedHeight) < 0.05 &&
                        shape.Range.Font.Position == 0 &&
+                       shape.Fill.ForeColor.RGB ==
+                           LaTeXBlockService.ToWordColor(style.TextColor) &&
                        CountOccurrences(decoratedText, "data-latexblocks-frame='1'") == 1 &&
                        CountOccurrences(decoratedText, "data-latexblocks-border='1'") == 1,
                     "A Word fixed-Block resize did not repaint exactly one persistent SVG style shell.");

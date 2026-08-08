@@ -533,13 +533,10 @@ namespace LaTeXBlocks.Word
                         request.TextColor) || liveSize < 1 || liveSize > 200 ||
                     Math.Abs(liveSize - request.FontSizePt) >= 0.001)
                     return false;
-                var paragraph = range.Paragraphs[1].Range;
                 if (metadata.Mode != LaTeXBlockLayoutMode.Auto ||
                     metadata.Role != LaTeXBlockRole.Content)
                     return false;
-                updates.Add(new LaTeXBlockColorUpdate(shape, range, metadata,
-                    source, request.PreviousTextColor.Value, request.TextColor,
-                    paragraph.Start, paragraph.End));
+                updates.Add(new LaTeXBlockColorUpdate(shape, request.TextColor));
             }
 
             var applied = false;
@@ -1506,7 +1503,7 @@ namespace LaTeXBlocks.Word
         private void QueueFormatRefresh(List<FormatRefreshRequest> requests)
         {
             if (shuttingDown || requests == null || requests.Count == 0) return;
-            var batchable = requests.Count > 1;
+            var batchable = requests.Count > 0;
             var selectionLease = requests[0].SelectionLease;
             foreach (var request in requests)
             {

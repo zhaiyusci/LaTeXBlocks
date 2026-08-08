@@ -3,7 +3,18 @@
 All notable product-facing changes are recorded here. Version history begins with the first self-contained
 Word-and-PowerPoint package line.
 
-## [Unreleased]
+## [0.2.84] — 2026-08-09
+
+### Word
+
+- Unified single- and multi-formula colour reconciliation on the native Office
+  Graphic Fill path, so selection-change fallbacks no longer rerender a lone SVG.
+- Removed the superseded OpenXML/SVG colour-migration pipeline, obsolete host-colour
+  markers, collapsed-caret invocation suppression, and unregistered UI Automation
+  callbacks. The active path retains its live host-state validation and atomic undo.
+- Unified styled Block foregrounds with formulas: Word and PowerPoint now leave the
+  default SVG ink unset and apply the Block text colour through native Office Graphics
+  Fill. SVG background, border, clipping, and explicit TeX colours remain independent.
 
 ## [0.2.83] — 2026-08-08
 

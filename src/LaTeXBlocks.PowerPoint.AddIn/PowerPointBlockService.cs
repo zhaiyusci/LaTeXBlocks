@@ -126,10 +126,10 @@ namespace LaTeXBlocks.PowerPoint
                 throw new ArgumentOutOfRangeException(nameof(fontSizePt));
 
             style = style ?? LaTeXBlockStyle.Default;
-            // TeX owns the contents (glyphs, paragraph layout, leading, vertical
-            // placement and text colour). The final SVG owns the outer shell. Do not
-            // ask TeX \fbox / \colorbox to paint a full PowerPoint frame: TeX's
-            // preview coordinates can lie outside dvisvgm's root viewport.
+            // TeX owns glyph and paragraph layout, leading, and vertical placement.
+            // The final SVG owns the outer shell; Office Graphics Fill owns the
+            // inherited default foreground. Do not ask TeX \fbox / \colorbox to
+            // paint a full frame: preview coordinates can lie outside the viewport.
             var styleIsApplied = styleWasExplicit || !style.IsDefault;
             var authoredFrameWidthPt = outerWidthPt ?? widthPt;
             var contentWidthPt = styleIsApplied
@@ -792,7 +792,30 @@ namespace LaTeXBlocks.PowerPoint
                 svgWidthPt.ToString("R", CultureInfo.InvariantCulture));
             shape.Tags.Add(SvgHeightTag,
                 svgHeightPt.ToString("R", CultureInfo.InvariantCulture));
+            if (styleIsApplied)
+                ApplyGraphicFill(shape, (style ?? LaTeXBlockStyle.Default).TextColor);
             shape.Name = name;
+        }
+
+        private static void ApplyGraphicFill(PowerPointInterop.Shape shape,
+            System.Drawing.Color color)
+        {
+            if (shape == null) throw new ArgumentNullException(nameof(shape));
+            PowerPointInterop.FillFormat fill = null;
+            PowerPointInterop.ColorFormat foreground = null;
+            try
+            {
+                fill = shape.Fill;
+                fill.Visible = Office.MsoTriState.msoTrue;
+                fill.Solid();
+                foreground = fill.ForeColor;
+                foreground.RGB = color.R | (color.G << 8) | (color.B << 16);
+            }
+            finally
+            {
+                if (foreground != null) Marshal.ReleaseComObject(foreground);
+                if (fill != null) Marshal.ReleaseComObject(fill);
+            }
         }
 
         internal static double ReadPositiveTag(PowerPointInterop.Shape shape, string name,

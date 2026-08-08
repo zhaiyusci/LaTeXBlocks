@@ -11,7 +11,7 @@ namespace LaTeXBlocks.Word
 {
     // The layout-facing part of a block style belongs to TeX: exact inner size,
     // paragraph indentation, leading, and vertical placement. The final SVG owns
-    // inherited host foreground paint as well as padding, fill, border, and clipping.
+    // padding, background, border, and clipping; Office owns default foreground paint.
     internal enum LaTeXBlockVerticalAlignment
     {
         Top,
@@ -274,8 +274,8 @@ namespace LaTeXBlocks.Word
                 StemTeXRenderer.StartsWithFullDisplayOrPageWidthEnvironment(source);
             if (standaloneDisplay)
             {
-                // The SVG shell supplies inherited foreground paint. Explicit
-                // colours authored in the TeX source remain child-level overrides.
+                // Office Graphics Fill supplies the inherited default foreground.
+                // Explicit colours authored in TeX remain child-level overrides.
                 tex.AppendLine(source);
             }
             else

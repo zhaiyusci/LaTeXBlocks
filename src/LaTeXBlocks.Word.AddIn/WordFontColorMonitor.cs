@@ -61,7 +61,6 @@ namespace LaTeXBlocks.Word
     {
         event EventHandler<WordFormatInteractionEventArgs> FormatInteraction;
         void Start();
-        void SuppressProgrammaticInvocations();
     }
 
     /// <summary>
@@ -278,18 +277,14 @@ namespace LaTeXBlocks.Word
         private const uint WindowMessageCommand = 0x0111;
         private const int DialogResultOk = 1;
         private const int DialogResultCancel = 2;
-        private const int PaletteCloseGraceMilliseconds = 1500;
         private const int PaletteCommitDelayMilliseconds = 100;
         private const uint PaletteEventPairWindowMilliseconds = 3000;
 
         private readonly Control dispatcher;
         private readonly int wordProcessId;
-        private readonly AutomationEventHandler automationHandler;
-        private readonly AutomationPropertyChangedEventHandler propertyChangedHandler;
         private readonly WinEventDelegate winEventHandler;
         private readonly CallWndProcDelegate callWndProcHandler;
         private readonly LowLevelMouseDelegate lowLevelMouseHandler;
-        private readonly System.Threading.Timer paletteCancelTimer;
         private System.Threading.Timer paletteCommitTimer;
         private readonly WordFontColorInteractionState interactionState =
             new WordFontColorInteractionState();
@@ -300,8 +295,6 @@ namespace LaTeXBlocks.Word
         private readonly Queue<WordFormatInteractionEventArgs> pendingFormatSignals =
             new Queue<WordFormatInteractionEventArgs>();
         private AutomationElement automationRoot;
-        private long suppressInvocationsUntilUtcTicks;
-        private int suppressNextPickerInvocation;
         private long mainButtonCommitDedupUntilUtcTicks;
         private long fontSizeCommitDedupUntilUtcTicks;
         private long fontSizeSessionUntilUtcTicks;
@@ -332,8 +325,6 @@ namespace LaTeXBlocks.Word
         private IntPtr moreColorsDialogHwnd;
         private IntPtr pendingMoreColorsDialogHwnd;
         private long moreColorsInteractionId;
-        private long paletteCancellationInteractionId;
-        private int palettePropertyChangesForTest;
         private int paletteSelectionsForTest;
         private int paletteCandidatesForTest;
         private int paletteInvocationsForTest;
@@ -360,21 +351,16 @@ namespace LaTeXBlocks.Word
             this.dispatcher = dispatcher ?? throw new ArgumentNullException(nameof(dispatcher));
             if (targetProcessId <= 0) throw new ArgumentOutOfRangeException(nameof(targetProcessId));
             wordProcessId = targetProcessId;
-            automationHandler = OnAutomationEvent;
-            propertyChangedHandler = OnAutomationPropertyChanged;
             winEventHandler = OnWinEvent;
             callWndProcHandler = OnCallWndProc;
             lowLevelMouseHandler = OnLowLevelMouse;
-            paletteCancelTimer = new System.Threading.Timer(
-                PaletteCancelTimerElapsed, null, Timeout.Infinite, Timeout.Infinite);
         }
 
         public event EventHandler<WordFormatInteractionEventArgs> FormatInteraction;
 
         internal bool IsRunning => started && !disposed;
         internal string DiagnosticStateForTest =>
-            "property=" + Volatile.Read(ref palettePropertyChangesForTest) +
-            ", selection=" + Volatile.Read(ref paletteSelectionsForTest) +
+            "selection=" + Volatile.Read(ref paletteSelectionsForTest) +
             ", candidate=" + Volatile.Read(ref paletteCandidatesForTest) +
             ", invoked=" + Volatile.Read(ref paletteInvocationsForTest) +
             ", matched=" + Volatile.Read(ref paletteMatchesForTest) +
@@ -389,17 +375,6 @@ namespace LaTeXBlocks.Word
             ", pointerClass=" + lastPalettePointerClassForTest +
             ", session=" + IsPaletteSessionActive();
 
-        public void SuppressProgrammaticInvocations()
-        {
-            // ExecuteMso used by the collapsed-caret probe is normally silent in UIA,
-            // but Office builds are allowed to surface an Invoke event. Consume only
-            // that immediate echo; the expiry prevents a missing echo from swallowing
-            // the user's next real command.
-            Interlocked.Exchange(ref suppressNextPickerInvocation, 1);
-            Interlocked.Exchange(ref suppressInvocationsUntilUtcTicks,
-                DateTime.UtcNow.AddMilliseconds(100).Ticks);
-        }
-
         internal void SetInteractionContext(bool enabled)
         {
             Interlocked.Exchange(ref interactionContextEnabled, enabled ? 1 : 0);
@@ -410,7 +385,6 @@ namespace LaTeXBlocks.Word
                 pendingFormatSignals.Clear();
                 formatSignalDrainScheduled = false;
                 pendingPaletteCommitInteractionId = 0;
-                paletteCancellationInteractionId = 0;
                 ClearPaletteCandidateLocked();
                 Interlocked.Exchange(ref paletteSessionUntilUtcTicks, 0);
             }
@@ -505,8 +479,7 @@ namespace LaTeXBlocks.Word
                             Observe(WordFontColorSignal.MoreColorsOpened);
                         else if (invokedSnapshot.IsInsideFontColorPicker &&
                                  !invokedSnapshot.IsFontColorDropDown &&
-                                 invokedSnapshot.IsMainButton &&
-                                 !TryConsumeProgrammaticInvocationSuppression())
+                                 invokedSnapshot.IsMainButton)
                             ObserveMainButtonCommit();
                     }
                     return;
@@ -536,132 +509,6 @@ namespace LaTeXBlocks.Word
             }
         }
 
-        private void OnAutomationPropertyChanged(object sender,
-            AutomationPropertyChangedEventArgs eventArgs)
-        {
-            if (disposed || eventArgs == null ||
-                eventArgs.Property != ExpandCollapsePattern.ExpandCollapseStateProperty ||
-                !(sender is AutomationElement element))
-                return;
-            ElementSnapshot snapshot;
-            try { snapshot = ElementSnapshot.Capture(element, wordProcessId); }
-            catch (ElementNotAvailableException) { return; }
-            catch (InvalidOperationException) { return; }
-            if (!snapshot.IsWordProcess ||
-                (snapshot.AutomationId != FontColorPickerId &&
-                 snapshot.AutomationId != FontColorDropDownId))
-                return;
-            Interlocked.Increment(ref palettePropertyChangesForTest);
-            int expandState;
-            try { expandState = Convert.ToInt32(eventArgs.NewValue); }
-            catch (FormatException) { return; }
-            catch (InvalidCastException) { return; }
-            // UIA property callbacks are asynchronous and can arrive after the same
-            // control has already moved to a later state. Re-read the live picker so
-            // a stale Expanded cannot create a phantom transaction after commit, and
-            // a stale Collapsed cannot shorten a newly reopened session.
-            if (TryGetCurrentExpandCollapseState(element, out var currentState) &&
-                currentState != (ExpandCollapseState)expandState)
-                return;
-            if (expandState == (int)ExpandCollapseState.Expanded)
-            {
-                var previousSession = Interlocked.Exchange(
-                    ref paletteSessionUntilUtcTicks, long.MaxValue);
-                if (previousSession != long.MaxValue)
-                    BeginPaletteInteraction();
-                return;
-            }
-            // Office collapses the popup just before it reports the selected swatch
-            // or More Colors invocation. Keep the hovered candidate alive during the
-            // short close-ordering grace: some builds publish Collapsed before the
-            // low-level mouse-up that confirms the actual click.
-            if (Interlocked.Read(ref paletteSessionUntilUtcTicks) != 0)
-            {
-                var closeDeadline = DateTime.UtcNow.AddMilliseconds(
-                    PaletteCloseGraceMilliseconds).Ticks;
-                lock (stateGate)
-                {
-                    if (paletteCandidateInteractionId != 0)
-                        Interlocked.Exchange(ref paletteCandidateUntilUtcTicks,
-                            closeDeadline);
-                }
-                Interlocked.Exchange(ref paletteSessionUntilUtcTicks, closeDeadline);
-                SchedulePaletteCancellation();
-            }
-        }
-
-        private void OnAutomationEvent(object sender, AutomationEventArgs eventArgs)
-        {
-            if (disposed || !(sender is AutomationElement element) || eventArgs == null)
-                return;
-
-            ElementSnapshot snapshot;
-            try
-            {
-                snapshot = ElementSnapshot.Capture(element, wordProcessId);
-            }
-            catch (ElementNotAvailableException)
-            {
-                // The native OBJECT_HIDE hook owns dialog close because UIA commonly
-                // invalidates a WindowClosed sender before its properties can be read.
-                return;
-            }
-            catch (InvalidOperationException)
-            {
-                return;
-            }
-            if (!snapshot.IsWordProcess) return;
-
-            if (eventArgs.EventId == WindowPattern.WindowOpenedEvent)
-            {
-                if (string.Equals(snapshot.ClassName, "bosa_sdm_msword",
-                        StringComparison.OrdinalIgnoreCase) &&
-                    snapshot.NativeWindowHandle != IntPtr.Zero)
-                    TrackOrRememberMoreColorsDialog(snapshot.NativeWindowHandle);
-                return;
-            }
-
-            if (eventArgs.EventId == WindowPattern.WindowClosedEvent)
-            {
-                if (string.Equals(snapshot.ClassName, "bosa_sdm_msword",
-                        StringComparison.OrdinalIgnoreCase) &&
-                    moreColorsDialogHwnd != IntPtr.Zero &&
-                    snapshot.NativeWindowHandle == moreColorsDialogHwnd)
-                    Observe(WordFontColorSignal.MoreColorsClosed,
-                        GetMoreColorsInteractionId());
-                return;
-            }
-
-            if (eventArgs.EventId != InvokePattern.InvokedEvent) return;
-            if (snapshot.IsInsideFontColorPicker &&
-                TryConsumeProgrammaticInvocationSuppression())
-                return;
-            if (snapshot.IsMoreColorsMenuItem && IsPaletteSessionActive())
-            {
-                Observe(WordFontColorSignal.MoreColorsOpened);
-                return;
-            }
-            // Fluent gallery popups live in a separate NetUIToolWindow and are not
-            // descendants of the Ribbon's FontColorPicker element. The active
-            // transaction is the scope boundary for those external popup items;
-            // requiring IsInsideFontColorPicker here would discard the actual swatch
-            // Invoke while still observing its hover-only MSAA selection event.
-            if (snapshot.IsPaletteItem && IsPaletteSessionActive())
-            {
-                ObserveCurrentPaletteCommit();
-                return;
-            }
-            if (!snapshot.IsInsideFontColorPicker || snapshot.IsFontColorDropDown)
-                return;
-
-            // Current Office builds expose the split-button anchor as
-            // AutomationId=FontColorPicker but put InvokePattern on its empty-id
-            // NetUIRibbonButton child. Palette swatches are NetUIGalleryButton
-            // ListItems. More Colors is an empty-id NetUITWBtnMenuItem rather than
-            // exposing its idMso through UIA, so classify by control type/class too.
-            if (snapshot.IsMainButton)
-                ObserveMainButtonCommit();
-        }
 
         private void ObserveMainButtonCommit()
         {
@@ -709,25 +556,6 @@ namespace LaTeXBlocks.Word
             return deadline != 0 && DateTime.UtcNow.Ticks <= deadline;
         }
 
-        private void ObserveCurrentPaletteCommit()
-        {
-            long interactionId = 0;
-            lock (stateGate)
-            {
-                var activeInteractionId =
-                    formatTransactionState.ActiveInteractionId;
-                if (activeInteractionId != 0 &&
-                    formatTransactionState.ActiveOrigin ==
-                        WordFormatInteractionOrigin.FontColorPalette)
-                {
-                    interactionId = activeInteractionId;
-                    pendingPaletteCommitInteractionId = interactionId;
-                }
-            }
-            if (interactionId != 0)
-                Observe(WordFontColorSignal.PaletteItemCommitted, interactionId);
-        }
-
         private long GetMoreColorsInteractionId()
         {
             lock (stateGate) return moreColorsInteractionId;
@@ -738,7 +566,6 @@ namespace LaTeXBlocks.Word
             bool committed;
             var closeDialog = false;
             var beginDialog = false;
-            var stopPaletteCancellation = false;
             var stopPaletteCommit = false;
             var pendingDialog = IntPtr.Zero;
             lock (stateGate)
@@ -778,7 +605,6 @@ namespace LaTeXBlocks.Word
                             formatTransactionState.Commit(mainInteractionId,
                                 WordFormatProperty.TextColor,
                                 WordFormatInteractionOrigin.FontColorMainButton));
-                        stopPaletteCancellation = true;
                         stopPaletteCommit = true;
                         pendingPaletteCommitInteractionId = 0;
                         ClearPaletteCandidateLocked();
@@ -792,7 +618,6 @@ namespace LaTeXBlocks.Word
                             formatTransactionState.Commit(interactionId,
                                 WordFormatProperty.TextColor,
                                 WordFormatInteractionOrigin.FontColorPalette));
-                        stopPaletteCancellation = true;
                         stopPaletteCommit = true;
                         pendingPaletteCommitInteractionId = 0;
                         ClearPaletteCandidateLocked();
@@ -804,7 +629,6 @@ namespace LaTeXBlocks.Word
                         formatTransactionState.UpdateOrigin(interactionId,
                             WordFormatInteractionOrigin.FontColorMoreColorsDialog);
                         moreColorsInteractionId = interactionId;
-                        stopPaletteCancellation = true;
                         stopPaletteCommit = true;
                         pendingPaletteCommitInteractionId = 0;
                         ClearPaletteCandidateLocked();
@@ -815,7 +639,6 @@ namespace LaTeXBlocks.Word
                                 WordFormatProperty.TextColor,
                                 WordFormatInteractionOrigin.
                                     FontColorMoreColorsDialog));
-                        stopPaletteCancellation = true;
                         stopPaletteCommit = true;
                         break;
                     case WordFontColorSignal.MoreColorsClosed:
@@ -828,7 +651,6 @@ namespace LaTeXBlocks.Word
                                 WordFormatProperty.TextColor,
                                     WordFormatInteractionOrigin.
                                     FontColorMoreColorsDialog));
-                        stopPaletteCancellation = true;
                         stopPaletteCommit = true;
                         break;
                 }
@@ -851,7 +673,6 @@ namespace LaTeXBlocks.Word
                     TrackMoreColorsDialog(pendingDialog);
             }
             if (closeDialog) RemoveDialogMessageHook();
-            if (stopPaletteCancellation) StopPaletteCancellationTimer();
             if (stopPaletteCommit) StopPaletteCommitTimer();
         }
 
@@ -859,11 +680,9 @@ namespace LaTeXBlocks.Word
         {
             lock (stateGate)
             {
-                // UIA may report a late duplicate Expanded after the popup has
-                // already collapsed for a real click. Once that click has started or
-                // been confirmed, rotating the token would discard its mouse-up or
-                // generation-bound commit ticket. Treat only that window as a
-                // duplicate; a genuine reopen after Escape has neither marker.
+                // Native accessibility events can arrive out of order. Once a click
+                // has started or been confirmed, rotating the token would discard
+                // its mouse-up or generation-bound commit ticket.
                 if (formatTransactionState.ActiveInteractionId != 0 &&
                     formatTransactionState.ActiveOrigin ==
                         WordFormatInteractionOrigin.FontColorPalette &&
@@ -873,7 +692,6 @@ namespace LaTeXBlocks.Word
                 BeginFormatTransactionLocked(
                     WordFormatInteractionOrigin.FontColorPalette);
             }
-            StopPaletteCancellationTimer();
         }
 
         private long BeginFormatTransactionLocked(
@@ -883,7 +701,6 @@ namespace LaTeXBlocks.Word
                 origin, out var canceledPrevious);
             QueueFormatSignalLocked(canceledPrevious);
             QueueFormatSignalLocked(began);
-            paletteCancellationInteractionId = 0;
             return began.InteractionId;
         }
 
@@ -923,30 +740,6 @@ namespace LaTeXBlocks.Word
             {
                 formatSignalDrainScheduled = false;
             }
-        }
-
-        private void SchedulePaletteCancellation()
-        {
-            lock (stateGate)
-            {
-                if (disposed || formatTransactionState.ActiveInteractionId == 0 ||
-                    interactionState.IsMoreColorsOpen)
-                    return;
-                paletteCancellationInteractionId =
-                    formatTransactionState.ActiveInteractionId;
-            }
-            try
-            {
-                paletteCancelTimer.Change(PaletteCloseGraceMilliseconds,
-                    Timeout.Infinite);
-            }
-            catch (ObjectDisposedException) { }
-        }
-
-        private void StopPaletteCancellationTimer()
-        {
-            try { paletteCancelTimer.Change(Timeout.Infinite, Timeout.Infinite); }
-            catch (ObjectDisposedException) { }
         }
 
         private void SchedulePaletteCommit(long interactionId)
@@ -1017,43 +810,6 @@ namespace LaTeXBlocks.Word
             catch (ObjectDisposedException) { }
         }
 
-        private void PaletteCancelTimerElapsed(object state)
-        {
-            if (disposed) return;
-            var sessionDeadline = Interlocked.Read(ref paletteSessionUntilUtcTicks);
-            var remainingTicks = sessionDeadline == long.MaxValue
-                ? long.MaxValue
-                : sessionDeadline - DateTime.UtcNow.Ticks;
-            if (remainingTicks > 0)
-            {
-                if (remainingTicks == long.MaxValue) return;
-                var remainingMilliseconds = Math.Max(1,
-                    (int)Math.Min(int.MaxValue, remainingTicks / TimeSpan.TicksPerMillisecond + 1));
-                try { paletteCancelTimer.Change(remainingMilliseconds, Timeout.Infinite); }
-                catch (ObjectDisposedException) { }
-                return;
-            }
-
-            lock (stateGate)
-            {
-                if (disposed || paletteCancellationInteractionId == 0 ||
-                    formatTransactionState.ActiveInteractionId !=
-                        paletteCancellationInteractionId ||
-                    interactionState.IsMoreColorsOpen)
-                    return;
-                QueueFormatSignalLocked(
-                    formatTransactionState.Cancel(
-                        paletteCancellationInteractionId,
-                        WordFormatProperty.TextColor,
-                        WordFormatInteractionOrigin.FontColorPalette));
-                paletteCancellationInteractionId = 0;
-                pendingPaletteCommitInteractionId = 0;
-                ClearPaletteCandidateLocked();
-                Interlocked.Exchange(ref paletteSessionUntilUtcTicks, 0);
-            }
-            StopPaletteCommitTimer();
-        }
-
         private void DrainFormatSignals()
         {
             while (true)
@@ -1082,32 +838,6 @@ namespace LaTeXBlocks.Word
         {
             return DateTime.UtcNow.Ticks <=
                    Interlocked.Read(ref paletteSessionUntilUtcTicks);
-        }
-
-        private static bool TryGetCurrentExpandCollapseState(
-            AutomationElement element, out ExpandCollapseState state)
-        {
-            state = ExpandCollapseState.Collapsed;
-            var current = element;
-            for (var depth = 0;
-                 depth < MaximumAncestorDepth && current != null;
-                 depth++)
-            {
-                try
-                {
-                    if (current.TryGetCurrentPattern(
-                            ExpandCollapsePattern.Pattern, out var pattern))
-                    {
-                        state = ((ExpandCollapsePattern)pattern).Current.
-                            ExpandCollapseState;
-                        return true;
-                    }
-                    current = TreeWalker.RawViewWalker.GetParent(current);
-                }
-                catch (ElementNotAvailableException) { return false; }
-                catch (InvalidOperationException) { return false; }
-            }
-            return false;
         }
 
         private bool TryBeginVisiblyExpandedPaletteInteraction()
@@ -1150,17 +880,6 @@ namespace LaTeXBlocks.Word
             // swatch has been observed as ROLE_SYSTEM_LISTITEM and MENUITEM. UIA still
             // identifies the popup as NetUIGalleryButton/category in both cases.
             return role == RoleSystemListItem || role == RoleSystemMenuItem;
-        }
-
-        private bool TryConsumeProgrammaticInvocationSuppression()
-        {
-            if (DateTime.UtcNow.Ticks >
-                Interlocked.Read(ref suppressInvocationsUntilUtcTicks))
-            {
-                Interlocked.Exchange(ref suppressNextPickerInvocation, 0);
-                return false;
-            }
-            return Interlocked.Exchange(ref suppressNextPickerInvocation, 0) == 1;
         }
 
         private void SetPaletteCandidate(IntPtr hwnd, int objectId, int childId,
@@ -1447,8 +1166,7 @@ namespace LaTeXBlocks.Word
                     if (element == null) return;
                     var snapshot = ElementSnapshot.Capture(element, wordProcessId);
                     if (snapshot.IsInsideFontColorPicker &&
-                        !snapshot.IsFontColorDropDown && snapshot.IsMainButton &&
-                        !TryConsumeProgrammaticInvocationSuppression())
+                        !snapshot.IsFontColorDropDown && snapshot.IsMainButton)
                         ObserveMainButtonCommit();
                     else if (snapshot.IsInsideFontSize &&
                              !snapshot.IsPopupChoice)
@@ -1510,8 +1228,6 @@ namespace LaTeXBlocks.Word
         {
             if (disposed) return;
             disposed = true;
-            try { paletteCancelTimer.Dispose(); }
-            catch (ObjectDisposedException) { }
             StopPaletteCommitTimer();
             lock (stateGate)
             {
@@ -1688,38 +1404,30 @@ namespace LaTeXBlocks.Word
 
         private sealed class ElementSnapshot
         {
-            private ElementSnapshot(bool isWordProcess, string automationId,
+            private ElementSnapshot(bool isWordProcess,
                 bool isInsideFontColorPicker, bool isFontColorDropDown,
                 bool isMoreColorsButton, bool isInsideFontSize, string className,
-                int controlTypeId, IntPtr nativeWindowHandle)
+                int controlTypeId)
             {
                 IsWordProcess = isWordProcess;
-                AutomationId = automationId;
                 IsInsideFontColorPicker = isInsideFontColorPicker;
                 IsFontColorDropDown = isFontColorDropDown;
                 IsMoreColorsButton = isMoreColorsButton;
                 IsInsideFontSize = isInsideFontSize;
                 ClassName = className;
                 ControlTypeId = controlTypeId;
-                NativeWindowHandle = nativeWindowHandle;
             }
 
             internal bool IsWordProcess { get; }
-            internal string AutomationId { get; }
             internal bool IsInsideFontColorPicker { get; }
             internal bool IsFontColorDropDown { get; }
             internal bool IsMoreColorsButton { get; }
             internal bool IsInsideFontSize { get; }
             internal string ClassName { get; }
             internal int ControlTypeId { get; }
-            internal IntPtr NativeWindowHandle { get; }
             internal bool IsMainButton =>
                 ControlTypeId == ControlType.Button.Id &&
                 string.Equals(ClassName, "NetUIRibbonButton",
-                    StringComparison.OrdinalIgnoreCase);
-            internal bool IsPaletteItem =>
-                ControlTypeId == ControlType.ListItem.Id ||
-                string.Equals(ClassName, "NetUIGalleryButton",
                     StringComparison.OrdinalIgnoreCase);
             internal bool IsPopupChoice =>
                 ControlTypeId == ControlType.ListItem.Id ||
@@ -1737,11 +1445,9 @@ namespace LaTeXBlocks.Word
                 var className = element.Current.ClassName ?? string.Empty;
                 var controlType = element.Current.ControlType;
                 var controlTypeId = controlType == null ? 0 : controlType.Id;
-                var nativeWindowHandle = new IntPtr(
-                    element.Current.NativeWindowHandle);
                 if (processId != wordProcessId)
-                    return new ElementSnapshot(false, automationId, false, false,
-                        false, false, className, controlTypeId, nativeWindowHandle);
+                    return new ElementSnapshot(false, false, false, false, false,
+                        className, controlTypeId);
 
                 var insidePicker = automationId == FontColorPickerId;
                 var isDropDown = automationId == FontColorDropDownId;
@@ -1760,9 +1466,8 @@ namespace LaTeXBlocks.Word
                     try { current = TreeWalker.RawViewWalker.GetParent(current); }
                     catch (ElementNotAvailableException) { break; }
                 }
-                return new ElementSnapshot(true, automationId, insidePicker,
-                    isDropDown, isMoreColors, isFontSize, className, controlTypeId,
-                    nativeWindowHandle);
+                return new ElementSnapshot(true, insidePicker, isDropDown,
+                    isMoreColors, isFontSize, className, controlTypeId);
             }
         }
 

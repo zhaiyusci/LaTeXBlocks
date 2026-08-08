@@ -333,8 +333,8 @@ namespace LaTeXBlocks.PowerPointSmoke
                     "A display-style Block changed size merely because typographic text-line metrics were enabled.");
                 var displayRoot = Regex.Match(Encoding.UTF8.GetString(styledDisplayRender.SvgBytes),
                     "<svg\\b[^>]*>", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant).Value;
-                Assert(displayRoot.IndexOf("fill='#000000'", StringComparison.OrdinalIgnoreCase) >= 0,
-                    "A standalone display did not receive its SVG-inherited text colour.");
+                Assert(displayRoot.IndexOf("fill='#000000'", StringComparison.OrdinalIgnoreCase) < 0,
+                    "A standalone display embedded its host foreground in the SVG.");
                 var styledRender = service.RenderPreviewAsync(styledSource, 288, profile,
                     inheritedSize, styledStyle, 126).GetAwaiter().GetResult();
                 Assert(styledRender.SvgBytes.Length > 0,
@@ -346,9 +346,9 @@ namespace LaTeXBlocks.PowerPointSmoke
                     "A styled SVG block did not make its requested PowerPoint frame.");
                 var styledSvg = Encoding.UTF8.GetString(styledRender.SvgBytes);
                 Assert(styledSvg.IndexOf("#f1f5ff", StringComparison.OrdinalIgnoreCase) >= 0 &&
-                       styledSvg.IndexOf("#183766", StringComparison.OrdinalIgnoreCase) >= 0 &&
+                       styledSvg.IndexOf("#183766", StringComparison.OrdinalIgnoreCase) < 0 &&
                        styledSvg.IndexOf("#3362a2", StringComparison.OrdinalIgnoreCase) >= 0,
-                    "The styled SVG did not contain its text, fill, and border colors.");
+                    "The styled SVG did not keep foreground external while retaining fill and border colors.");
                 Assert(styledSvg.IndexOf("data-latexblocks-frame='1'",
                            StringComparison.Ordinal) >= 0 &&
                        styledSvg.IndexOf("data-latexblocks-border='1'",
@@ -430,15 +430,21 @@ namespace LaTeXBlocks.PowerPointSmoke
                            out var storedStyledSource) && storedStyledSource == styledSource &&
                        PowerPointBlockService.ReadStyle(styledBlock).Equals(styledStyle) &&
                        string.Equals(styledBlock.Tags[LaTeXBlockStyle.TagName],
-                           styledStyle.ToString(), StringComparison.Ordinal),
-                    "A TeX-styled PowerPoint block did not retain its raw source and style metadata.");
+                           styledStyle.ToString(), StringComparison.Ordinal) &&
+                       styledBlock.Fill.ForeColor.RGB ==
+                           (styledStyle.TextColor.R | styledStyle.TextColor.G << 8 |
+                            styledStyle.TextColor.B << 16),
+                    "A TeX-styled PowerPoint block did not retain its source/style or apply Graphics Fill.");
                 var styledUpdatedRender = service.RenderPreviewAsync(styledSource, 288,
                     profile, inheritedSize, styledStyle, 150, 330).GetAwaiter().GetResult();
                 styledBlock = service.UpdateRendered(styledBlock, styledSource, 288,
                     styledUpdatedRender, false, 150, 330, styledStyle);
                 Assert(PowerPointBlockService.ReadStyle(styledBlock).Equals(styledStyle) &&
-                       styledBlock.AlternativeText == styledSource,
-                    "An SVG-styled PowerPoint block lost its style or raw source during a re-render.");
+                       styledBlock.AlternativeText == styledSource &&
+                       styledBlock.Fill.ForeColor.RGB ==
+                           (styledStyle.TextColor.R | styledStyle.TextColor.G << 8 |
+                            styledStyle.TextColor.B << 16),
+                    "An SVG-styled PowerPoint block lost its style, source, or Graphics Fill during a re-render.");
                 AssertHostFrameGeometry(styledBlock, 330, 150,
                     "A styled PowerPoint host-frame update");
                 var styledBlockId = Guid.Empty;
