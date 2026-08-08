@@ -515,6 +515,10 @@ namespace LaTeXBlocks.Word
                 catch (COMException) { }
                 RunProgrammaticMutation(() =>
                 {
+                    var liveUpdates = new List<LaTeXBlockBatchUpdate>();
+                    var canUseOpenXmlBatch = batch.Requests.Count > 1;
+                    int? batchParagraphStart = null;
+                    int? batchParagraphEnd = null;
                     for (var index = 0; index < batch.Requests.Count; index++)
                     {
                         var request = batch.Requests[index];
@@ -535,14 +539,45 @@ namespace LaTeXBlocks.Word
                                     request.TextColor) || liveSize < 1 || liveSize > 200 ||
                                 Math.Abs(liveSize - request.FontSizePt) >= 0.001)
                                 continue;
-                            service.UpdateRendered(shape, request.Source,
-                                request.Metadata.WidthPt, request.Metadata.Mode,
-                                renders[index], false);
+                            var paragraph = shape.Range.Paragraphs[1].Range;
+                            if (currentMetadata.Mode != LaTeXBlockLayoutMode.Auto ||
+                                currentMetadata.Role != LaTeXBlockRole.Content ||
+                                (batchParagraphStart.HasValue &&
+                                 (batchParagraphStart.Value != paragraph.Start ||
+                                  batchParagraphEnd.Value != paragraph.End)))
+                                canUseOpenXmlBatch = false;
+                            else if (!batchParagraphStart.HasValue)
+                            {
+                                batchParagraphStart = paragraph.Start;
+                                batchParagraphEnd = paragraph.End;
+                            }
+                            liveUpdates.Add(new LaTeXBlockBatchUpdate(shape,
+                                request.Source, request.Metadata.WidthPt,
+                                renders[index]));
                         }
                         catch (Exception exception)
                         {
                             if (firstFailure == null) firstFailure = exception;
                         }
+                    }
+                    if (liveUpdates.Count != batch.Requests.Count)
+                        canUseOpenXmlBatch = false;
+                    try
+                    {
+                        if (canUseOpenXmlBatch)
+                            service.UpdateRenderedBatch(liveUpdates);
+                        else
+                            for (var index = 0; index < liveUpdates.Count; index++)
+                            {
+                                var update = liveUpdates[index];
+                                service.UpdateRendered(update.Shape, update.Source,
+                                    update.WidthPt, LaTeXBlockLayoutMode.Auto,
+                                    update.Render, false);
+                            }
+                    }
+                    catch (Exception exception)
+                    {
+                        if (firstFailure == null) firstFailure = exception;
                     }
                     if (restoreSelection) batch.SelectionLease.TryRestore(Application);
                 }, restoreSelection);

@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Net;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -682,6 +683,147 @@ namespace LaTeXBlocks.Word
             finally
             {
                 hostRunFormat?.Dispose();
+                if (undoStarted)
+                    try { application.UndoRecord.EndCustomRecord(); } catch { }
+            }
+        }
+
+        internal void UpdateRenderedBatch(IList<LaTeXBlockBatchUpdate> updates)
+        {
+            if (updates == null) throw new ArgumentNullException(nameof(updates));
+            if (updates.Count < 2)
+                throw new ArgumentException("A batch update requires at least two formulas.",
+                    nameof(updates));
+
+            var states = new List<BatchInlineUpdateState>(updates.Count);
+            WordInterop.Document document = null;
+            var undoStarted = false;
+            var documentMutated = false;
+            try
+            {
+                foreach (var update in updates)
+                {
+                    if (update == null || update.Shape == null || update.Render == null)
+                        throw new ArgumentException("A batch update contains an empty item.",
+                            nameof(updates));
+                    if (!TryReadContract(update.Shape, out var previous, out _) ||
+                        previous.Mode != LaTeXBlockLayoutMode.Auto ||
+                        previous.Role != LaTeXBlockRole.Content)
+                        throw new InvalidOperationException(
+                            "Only ordinary Auto inline formulas can share a batch replacement.");
+
+                    var range = update.Shape.Range;
+                    if (document == null) document = range.Document;
+                    var paragraph = range.Paragraphs[1].Range;
+                    var svgSize = ReadSvgPhysicalSize(update.Render.SvgBytes);
+                    var metadata = new LaTeXBlockMetadata(previous.Id, update.WidthPt,
+                        update.Render.DepthPt, LaTeXBlockLayoutMode.Auto,
+                        update.Render.FontSizePt, previous.Role, svgSize.WidthPt,
+                        svgSize.HeightPt, null);
+                    states.Add(new BatchInlineUpdateState(update, range.Start,
+                        range.StoryType, paragraph.Start, paragraph.End, metadata, svgSize,
+                        PrepareInsertionSvg(update.Render, LaTeXBlockLayoutMode.Auto)));
+                }
+
+                states.Sort((left, right) => left.Start.CompareTo(right.Start));
+                var storyType = states[0].StoryType;
+                var paragraphStart = states[0].ParagraphStart;
+                var paragraphEnd = states[0].ParagraphEnd;
+                for (var index = 0; index < states.Count; index++)
+                {
+                    if (states[index].StoryType != storyType ||
+                        states[index].ParagraphStart != paragraphStart ||
+                        states[index].ParagraphEnd != paragraphEnd ||
+                        (index > 0 && states[index - 1].Start >= states[index].Start))
+                        throw new InvalidOperationException(
+                            "A formula batch must contain distinct shapes in one Word paragraph.");
+                }
+
+                // Read the original drawing runs once. Their rPr elements contain all
+                // host-owned character formatting (highlight, language, emphasis,
+                // spacing, scaling, theme colour, and so on). Moving those elements
+                // in OpenXML is both more complete and substantially cheaper than
+                // round-tripping a Word Font object for every formula.
+                var originalFirst = states[0].Update.Shape.Range;
+                var originalLast = states[states.Count - 1].Update.Shape.Range;
+                var originalEnvelope = originalFirst.Duplicate;
+                originalEnvelope.SetRange(originalFirst.Start, originalLast.End);
+                var formats = CaptureWordInlineFormatsXml(originalEnvelope.WordOpenXML,
+                    states);
+
+                var following = states[states.Count - 1].Update.Shape.Range.Duplicate;
+                following.Collapse(WordInterop.WdCollapseDirection.wdCollapseEnd);
+                var hadParagraphMarkAfter =
+                    following.MoveEnd(WordInterop.WdUnits.wdCharacter, 1) == 1 &&
+                    following.Text == "\r";
+
+                application.UndoRecord.StartCustomRecord("Update LaTeX Blocks");
+                undoStarted = true;
+                for (var index = states.Count - 1; index >= 0; index--)
+                {
+                    var state = states[index];
+                    var insertion = state.Update.Shape.Range.Duplicate;
+                    insertion.Collapse(WordInterop.WdCollapseDirection.wdCollapseStart);
+                    documentMutated = true;
+                    state.Update.Shape.Delete();
+                    state.ImportedShape = insertion.InlineShapes.AddPicture(
+                        state.InsertionPath, LinkToFile: false,
+                        SaveWithDocument: true, Range: insertion);
+                    ApplyContractMetadata(state.ImportedShape, state.Update.Source,
+                        state.Metadata);
+                }
+
+                var first = states[0].ImportedShape.Range;
+                var last = states[states.Count - 1].ImportedShape.Range;
+                var envelope = first.Duplicate;
+                envelope.SetRange(first.Start, last.End);
+                var normalized = NormalizeWordInlineDrawingsXml(envelope.WordOpenXML,
+                    formats, out var normalizedCount);
+                if (normalizedCount != states.Count)
+                    throw new InvalidDataException("Word batch XML did not contain every target formula.");
+
+                var envelopeStart = envelope.Start;
+                var envelopeEnd = envelope.End;
+                var insertionRange = envelope.Duplicate;
+                insertionRange.Collapse(WordInterop.WdCollapseDirection.wdCollapseStart);
+                envelope.Delete();
+                insertionRange.InsertXML(normalized);
+
+                if (!hadParagraphMarkAfter)
+                {
+                    var separator = insertionRange.Duplicate;
+                    separator.SetRange(envelopeEnd, envelopeEnd + 1);
+                    if (separator.Text == "\r") separator.Delete();
+                }
+
+                foreach (var state in states)
+                {
+                    var replacementRange = insertionRange.Duplicate;
+                    replacementRange.SetRange(state.Start, state.Start + 1);
+                    if (replacementRange.InlineShapes.Count != 1)
+                        throw new InvalidDataException(
+                            "Word did not preserve a formula position during batch replacement.");
+                    var replacement = replacementRange.InlineShapes[1];
+                    if (!TryReadContract(replacement, out var current, out _) ||
+                        current.Id != state.Metadata.Id)
+                        throw new InvalidDataException(
+                            "Word batch replacement changed a formula identity.");
+                }
+            }
+            catch (Exception exception)
+            {
+                var rollbackFailure = document == null
+                    ? null
+                    : TryRollbackCustomRecord(document, ref undoStarted,
+                        documentMutated);
+                if (rollbackFailure != null)
+                    throw new InvalidOperationException(
+                        "Word could not complete or roll back the batched LaTeX Block update.",
+                        new AggregateException(exception, rollbackFailure));
+                throw;
+            }
+            finally
+            {
                 if (undoStarted)
                     try { application.UndoRecord.EndCustomRecord(); } catch { }
             }
@@ -2443,6 +2585,184 @@ namespace LaTeXBlocks.Word
             return replacement;
         }
 
+        private static Dictionary<Guid, BatchInlineXmlFormat> CaptureWordInlineFormatsXml(
+            string flatOpc, IList<BatchInlineUpdateState> states)
+        {
+            if (flatOpc == null) throw new ArgumentNullException(nameof(flatOpc));
+            if (states == null) throw new ArgumentNullException(nameof(states));
+            var targets = new Dictionary<Guid, BatchInlineUpdateState>();
+            foreach (var state in states) targets[state.Metadata.Id] = state;
+            var formats = new Dictionary<Guid, BatchInlineXmlFormat>();
+            foreach (Match run in Regex.Matches(flatOpc,
+                "<w:r\\b[^>]*>[\\s\\S]*?</w:r>", RegexOptions.CultureInvariant,
+                TimeSpan.FromSeconds(2)))
+            {
+                if (!TryReadWordInlineMetadata(run.Value, out var metadata) ||
+                    !targets.TryGetValue(metadata.Id, out var state))
+                    continue;
+                var properties = Regex.Match(run.Value,
+                    "<w:rPr\\b(?:[^>]*/>|[^>]*>[\\s\\S]*?</w:rPr>)",
+                    RegexOptions.CultureInvariant);
+                formats[metadata.Id] = new BatchInlineXmlFormat(state.SvgSize,
+                    state.Metadata.FontSizePt, state.Metadata.DepthPt,
+                    properties.Success ? properties.Value : "<w:rPr></w:rPr>");
+            }
+            if (formats.Count != states.Count)
+                throw new InvalidDataException(
+                    "Word batch XML did not contain every original formula run.");
+            return formats;
+        }
+
+        private static bool TryReadWordInlineMetadata(string xml,
+            out LaTeXBlockMetadata metadata)
+        {
+            metadata = null;
+            var title = Regex.Match(xml,
+                "<wp:docPr\\b[^>]*\\btitle=\"(?<title>[^\"]*)\"[^>]*/>",
+                RegexOptions.CultureInvariant);
+            return title.Success && LaTeXBlockMetadata.TryParse(
+                WebUtility.HtmlDecode(title.Groups["title"].Value), out metadata);
+        }
+
+        private static string NormalizeWordInlineDrawingsXml(string flatOpc,
+            IDictionary<Guid, BatchInlineXmlFormat> formats,
+            out int normalizedCount)
+        {
+            if (flatOpc == null) throw new ArgumentNullException(nameof(flatOpc));
+            if (formats == null) throw new ArgumentNullException(nameof(formats));
+            var count = 0;
+            var normalized = Regex.Replace(flatOpc,
+                "<w:r\\b[^>]*>[\\s\\S]*?</w:r>", match =>
+                {
+                    if (!TryReadWordInlineMetadata(match.Value, out var metadata) ||
+                        !formats.TryGetValue(metadata.Id, out var format))
+                        return match.Value;
+                    var inline = Regex.Match(match.Value,
+                        "<wp:inline\\b[\\s\\S]*?</wp:inline>",
+                        RegexOptions.CultureInvariant);
+                    if (!inline.Success)
+                        throw new InvalidDataException(
+                            "Word formula run has no inline drawing.");
+                    var normalizedInline = NormalizeWordInlineXml(inline.Value,
+                        format.SvgSize);
+                    var patched = match.Value.Remove(inline.Index, inline.Length)
+                        .Insert(inline.Index, normalizedInline);
+                    var runProperties = NormalizeWordFormulaRunProperties(
+                        format.RunPropertiesXml, format.FontSizePt, format.DepthPt);
+                    var currentProperties = Regex.Match(patched,
+                        "<w:rPr\\b(?:[^>]*/>|[^>]*>[\\s\\S]*?</w:rPr>)",
+                        RegexOptions.CultureInvariant);
+                    if (currentProperties.Success)
+                        patched = patched.Remove(currentProperties.Index,
+                                currentProperties.Length)
+                            .Insert(currentProperties.Index, runProperties);
+                    else
+                    {
+                        var openingEnd = patched.IndexOf('>') + 1;
+                        if (openingEnd <= 0)
+                            throw new InvalidDataException("Word formula run is malformed.");
+                        patched = patched.Insert(openingEnd, runProperties);
+                    }
+                    count++;
+                    return patched;
+                }, RegexOptions.CultureInvariant,
+                TimeSpan.FromSeconds(2));
+            normalizedCount = count;
+            return normalized;
+        }
+
+        private static string NormalizeWordFormulaRunProperties(string runProperties,
+            double fontSizePt, double depthPt)
+        {
+            var normalized = Regex.Replace(runProperties,
+                "^<w:rPr\\b(?<attributes>[^>]*)/>$",
+                "<w:rPr${attributes}></w:rPr>",
+                RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
+            normalized = Regex.Replace(normalized,
+                "<w:vertAlign\\b[^>]*/>", string.Empty,
+                RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
+            var halfPoints = checked((long)Math.Round(fontSizePt * 2,
+                MidpointRounding.AwayFromZero));
+            var baselineHalfPoints = checked((long)(-2 * Math.Round(depthPt,
+                MidpointRounding.AwayFromZero)));
+            normalized = SetWordRunProperty(normalized, "sz", halfPoints);
+            normalized = SetWordRunProperty(normalized, "szCs", halfPoints);
+            return SetWordRunProperty(normalized, "position", baselineHalfPoints);
+        }
+
+        private static string SetWordRunProperty(string runProperties,
+            string property, long value)
+        {
+            var pattern = "<w:" + Regex.Escape(property) + "\\b[^>]*/>";
+            var replacement = "<w:" + property + " w:val=\"" +
+                value.ToString(CultureInfo.InvariantCulture) + "\"/>";
+            var existing = Regex.Match(runProperties, pattern,
+                RegexOptions.CultureInvariant);
+            if (existing.Success)
+                return runProperties.Remove(existing.Index, existing.Length)
+                    .Insert(existing.Index, replacement);
+            var closing = runProperties.LastIndexOf("</w:rPr>",
+                StringComparison.Ordinal);
+            if (closing < 0)
+                throw new InvalidDataException("Word formula run properties are malformed.");
+            return runProperties.Insert(closing, replacement);
+        }
+
+        private static string NormalizeWordInlineXml(string inline,
+            SvgPhysicalSize size)
+        {
+            var effect = Regex.Match(inline,
+                "<wp:effectExtent\\b[^>]*/>", RegexOptions.CultureInvariant);
+            if (!effect.Success)
+                throw new InvalidDataException("Word inline SVG has no wp:effectExtent element.");
+            var normalizedEffect = SetXmlAttribute(effect.Value, "l", 0);
+            normalizedEffect = SetXmlAttribute(normalizedEffect, "t", 0);
+            normalizedEffect = SetXmlAttribute(normalizedEffect, "r", 0);
+            normalizedEffect = SetXmlAttribute(normalizedEffect, "b", 0);
+            var patched = inline.Remove(effect.Index, effect.Length)
+                .Insert(effect.Index, normalizedEffect);
+
+            var inlineExtent = Regex.Match(patched,
+                "<wp:extent\\b[^>]*/>", RegexOptions.CultureInvariant);
+            if (!inlineExtent.Success)
+                throw new InvalidDataException("Word inline SVG has no wp:extent element.");
+            var normalizedInlineExtent = SetXmlAttribute(inlineExtent.Value,
+                "cx", size.WidthEmu);
+            normalizedInlineExtent = SetXmlAttribute(normalizedInlineExtent,
+                "cy", size.HeightEmu);
+            patched = patched.Remove(inlineExtent.Index, inlineExtent.Length)
+                .Insert(inlineExtent.Index, normalizedInlineExtent);
+
+            var pictureProperties = Regex.Match(patched,
+                "<pic:spPr\\b[^>]*>.*?</pic:spPr>",
+                RegexOptions.CultureInvariant | RegexOptions.Singleline);
+            if (!pictureProperties.Success)
+                throw new InvalidDataException("Word inline SVG has no pic:spPr element.");
+            var transform = Regex.Match(pictureProperties.Value,
+                "<a:xfrm\\b[^>]*>.*?</a:xfrm>",
+                RegexOptions.CultureInvariant | RegexOptions.Singleline);
+            if (!transform.Success)
+                throw new InvalidDataException("Word inline SVG has no picture transform.");
+            var transformExtent = Regex.Match(transform.Value,
+                "<a:ext\\b(?=[^>]*\\bcx=\"[-+0-9]+\")(?=[^>]*\\bcy=\"[-+0-9]+\")[^>]*/>",
+                RegexOptions.CultureInvariant);
+            if (!transformExtent.Success)
+                throw new InvalidDataException(
+                    "Word inline SVG has no picture transform extent.");
+            var normalizedTransformExtent = SetXmlAttribute(transformExtent.Value,
+                "cx", size.WidthEmu);
+            normalizedTransformExtent = SetXmlAttribute(normalizedTransformExtent,
+                "cy", size.HeightEmu);
+            var normalizedTransform = transform.Value.Remove(transformExtent.Index,
+                    transformExtent.Length)
+                .Insert(transformExtent.Index, normalizedTransformExtent);
+            var normalizedPictureProperties = pictureProperties.Value.Remove(
+                    transform.Index, transform.Length)
+                .Insert(transform.Index, normalizedTransform);
+            return patched.Remove(pictureProperties.Index, pictureProperties.Length)
+                .Insert(pictureProperties.Index, normalizedPictureProperties);
+        }
+
         private static string SetXmlAttribute(string element, string attribute, long value)
         {
             var pattern = "(\\b" + Regex.Escape(attribute) + "=\")[^\"]*(\")";
@@ -2642,11 +2962,74 @@ namespace LaTeXBlocks.Word
             return path;
         }
 
+        private sealed class BatchInlineXmlFormat
+        {
+            internal BatchInlineXmlFormat(SvgPhysicalSize svgSize,
+                double fontSizePt, double depthPt, string runPropertiesXml)
+            {
+                SvgSize = svgSize;
+                FontSizePt = fontSizePt;
+                DepthPt = depthPt;
+                RunPropertiesXml = runPropertiesXml;
+            }
+
+            internal SvgPhysicalSize SvgSize { get; }
+            internal double FontSizePt { get; }
+            internal double DepthPt { get; }
+            internal string RunPropertiesXml { get; }
+        }
+
+        private sealed class BatchInlineUpdateState
+        {
+            internal BatchInlineUpdateState(LaTeXBlockBatchUpdate update, int start,
+                WordInterop.WdStoryType storyType, int paragraphStart,
+                int paragraphEnd, LaTeXBlockMetadata metadata,
+                SvgPhysicalSize svgSize, string insertionPath)
+            {
+                Update = update;
+                Start = start;
+                StoryType = storyType;
+                ParagraphStart = paragraphStart;
+                ParagraphEnd = paragraphEnd;
+                Metadata = metadata;
+                SvgSize = svgSize;
+                InsertionPath = insertionPath;
+            }
+
+            internal LaTeXBlockBatchUpdate Update { get; }
+            internal int Start { get; }
+            internal WordInterop.WdStoryType StoryType { get; }
+            internal int ParagraphStart { get; }
+            internal int ParagraphEnd { get; }
+            internal LaTeXBlockMetadata Metadata { get; }
+            internal SvgPhysicalSize SvgSize { get; }
+            internal string InsertionPath { get; }
+            internal WordInterop.InlineShape ImportedShape { get; set; }
+        }
+
         private void EnsureDocument()
         {
             if (application.Documents.Count == 0)
                 throw new InvalidOperationException("Open a Word document before inserting a LaTeX Block.");
         }
+    }
+
+    internal sealed class LaTeXBlockBatchUpdate
+    {
+        internal LaTeXBlockBatchUpdate(WordInterop.InlineShape shape, string source,
+            double widthPt, LaTeXBlockRender render)
+        {
+            Shape = shape ?? throw new ArgumentNullException(nameof(shape));
+            Source = LaTeXBlockService.NormalizeSourceText(source) ??
+                throw new ArgumentNullException(nameof(source));
+            WidthPt = widthPt;
+            Render = render ?? throw new ArgumentNullException(nameof(render));
+        }
+
+        internal WordInterop.InlineShape Shape { get; }
+        internal string Source { get; }
+        internal double WidthPt { get; }
+        internal LaTeXBlockRender Render { get; }
     }
 
     internal sealed class LaTeXBlockRender

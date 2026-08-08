@@ -5,6 +5,15 @@ Word-and-PowerPoint package line.
 
 ## [Unreleased]
 
+## [0.2.78] — 2026-08-07
+
+### Word
+
+- Batched same-paragraph font-size and font-colour refreshes now import their SVGs first and normalize all formula
+  drawings in one OpenXML transaction. The original drawing-run properties are transplanted verbatim, while formula
+  size and baseline are recalculated. A 10-formula local profile reduced Word replacement time from 3566 ms to
+  1189 ms without losing highlight, language, emphasis, spacing, scaling, colour, or surrounding text.
+
 ## [0.2.77] — 2026-08-07
 
 ### Word
