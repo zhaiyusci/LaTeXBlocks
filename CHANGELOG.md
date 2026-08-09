@@ -3,6 +3,28 @@
 All notable product-facing changes are recorded here. Version history begins with the first self-contained
 Word-and-PowerPoint package line.
 
+## [Unreleased]
+
+### Word
+
+- Font-size-only refreshes of automatic inline formulas now replace SVG media
+  directly in one Flat OPC transaction, avoiding the preliminary `AddPicture` and
+  its redundant PNG generation for every formula. Word still regenerates its PNG
+  compatibility fallback during the final `InsertXML`; unsupported package layouts
+  fall back to the normal picture-import path. The direct transaction may span
+  multiple paragraphs in one Word story while preserving their text and paragraph
+  marks; the old same-paragraph restriction applies only to the `AddPicture` path.
+  Because Word does not serialize an Office Graphic's current Graphics Fill into
+  `Range.WordOpenXML`, the direct path explicitly captures each old drawing's fill
+  colour and replays it after import instead of incorrectly inferring it from the
+  separate run `Font.Color` property.
+- Font Color palette tracking now identifies the dropdown once on its click. Swatch
+  hover events only record the native event tuple and make no UI Automation or MSAA
+  provider calls; accessibility classification is deferred until an actual click.
+- Mixed text/formula colour reconciliation now suppresses intermediate Word repaints
+  while applying native Graphics Fill to the formulas, then repaints once after the
+  atomic undo transaction.
+
 ## [0.2.84] — 2026-08-09
 
 ### Word

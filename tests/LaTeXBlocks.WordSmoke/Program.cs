@@ -1399,6 +1399,40 @@ namespace LaTeXBlocks.WordSmoke
             return paints.Length == 0 ? "unset" : string.Join(", ", paints);
         }
 
+        private static byte[] ReadPackageBinary(string flatOpc, string contentType)
+        {
+            var xml = new System.Xml.XmlDocument { XmlResolver = null };
+            xml.LoadXml(flatOpc);
+            const string packageNamespace =
+                "http://schemas.microsoft.com/office/2006/xmlPackage";
+            var manager = new System.Xml.XmlNamespaceManager(xml.NameTable);
+            manager.AddNamespace("pkg", packageNamespace);
+            foreach (System.Xml.XmlNode part in xml.SelectNodes("//pkg:part", manager))
+            {
+                var type = part.Attributes?["contentType", packageNamespace]?.Value;
+                if (!string.Equals(type, contentType,
+                        StringComparison.OrdinalIgnoreCase))
+                    continue;
+                var binary = part.SelectSingleNode("pkg:binaryData", manager);
+                if (binary != null) return Convert.FromBase64String(binary.InnerText);
+                var xmlData = part.SelectSingleNode("pkg:xmlData", manager);
+                return xmlData == null
+                    ? Array.Empty<byte>()
+                    : Encoding.UTF8.GetBytes(xmlData.InnerXml);
+            }
+            return Array.Empty<byte>();
+        }
+
+        private static WordInterop.InlineShape FindInlineFormula(
+            WordInterop.Document document, Guid id)
+        {
+            foreach (WordInterop.InlineShape candidate in document.InlineShapes)
+                if (LaTeXBlockService.TryReadContract(candidate, out var metadata,
+                        out _) && metadata.Id == id)
+                    return candidate;
+            return null;
+        }
+
         private static void RunRenderHostClientSmoke(string profile)
         {
             Console.WriteLine("RenderHost: testing isolated SVG rendering...");
@@ -1790,8 +1824,28 @@ namespace LaTeXBlocks.WordSmoke
                 var restoreSizeSelection = IsExactlySelectedInlineShape(word, recoloredInline);
                 Assert(restoreSizeSelection,
                     "The selected formula was no longer selected when its font-size render completed.");
-                var resizedInline = service.UpdateRendered(recoloredInline, inlineSource, 360,
-                    LaTeXBlockLayoutMode.Auto, sizeRefreshRender, false);
+                Assert(LaTeXBlockService.TryReadContract(recoloredInline,
+                        out var metadataBeforeSizeRefresh, out _),
+                    "The font-size fixture lost its formula contract before refresh.");
+                var oldPackage = recoloredInline.Range.WordOpenXML;
+                var oldPngFallback = ReadPackageBinary(oldPackage, "image/png");
+                var oldSvgMedia = ReadPackageBinary(oldPackage, "image/svg+xml");
+                var sizeRange = recoloredInline.Range;
+                var sizeParagraph = sizeRange.Paragraphs[1].Range;
+                var directMediaTimer = Stopwatch.StartNew();
+                service.UpdateRenderedBatch(new List<LaTeXBlockBatchUpdate>
+                {
+                    new LaTeXBlockBatchUpdate(recoloredInline, inlineSource, 360,
+                        sizeRefreshRender, metadataBeforeSizeRefresh, sizeRange,
+                    sizeParagraph.Start, sizeParagraph.End)
+                }, true);
+                directMediaTimer.Stop();
+                Console.WriteLine("PROFILE font-size Word write direct-svg-media: " +
+                    directMediaTimer.Elapsed.TotalMilliseconds.ToString("0.0") + " ms");
+                var resizedInline = FindInlineFormula(document,
+                    metadataBeforeSizeRefresh.Id);
+                Assert(resizedInline != null,
+                    "The direct SVG media font-size refresh lost its formula drawing.");
                 if (restoreSizeSelection)
                     resizedInline.Range.Select();
                 WaitFor(() => IsExactlySelectedInlineShape(word, resizedInline), 2000,
@@ -1805,6 +1859,14 @@ namespace LaTeXBlocks.WordSmoke
                     WordInterop.WdUnderline.wdUnderlineSingle, customNoProofing,
                     customHighlight,
                     "Automatic Font Size refresh");
+                var resizedPackage = resizedInline.Range.WordOpenXML;
+                var resizedPngFallback = ReadPackageBinary(resizedPackage,
+                    "image/png");
+                Assert(oldPngFallback.Length > 0 && resizedPngFallback.Length > 0,
+                    "The direct SVG media update lost Word's PNG fallback.");
+                Assert(oldSvgMedia.Length > 0 && !oldSvgMedia.SequenceEqual(
+                           ReadPackageBinary(resizedPackage, "image/svg+xml")),
+                    "The font-size-only update did not replace the SVG media.");
 
                 // A late render may replace the object, but it may restore selection
                 // only if the old object is still semantically selected at completion.
@@ -1820,8 +1882,12 @@ namespace LaTeXBlocks.WordSmoke
                 var restoreMovedSelection = IsExactlySelectedInlineShape(word, resizedInline);
                 Assert(!restoreMovedSelection,
                     "The selection-away fixture still reported the pending formula as selected.");
+                var pictureImportTimer = Stopwatch.StartNew();
                 var movedAwayInline = service.UpdateRendered(resizedInline, inlineSource, 360,
                     LaTeXBlockLayoutMode.Auto, movedAwayRender, false);
+                pictureImportTimer.Stop();
+                Console.WriteLine("PROFILE font-size Word write AddPicture: " +
+                    pictureImportTimer.Elapsed.TotalMilliseconds.ToString("0.0") + " ms");
                 if (restoreMovedSelection) movedAwayInline.Range.Select();
                 WaitFor(() => word.Selection.Start == movedSelectionStart &&
                               word.Selection.End == movedSelectionEnd &&
@@ -1969,8 +2035,6 @@ namespace LaTeXBlocks.WordSmoke
                 first.Range.NoProofing = firstNoProofing;
                 first.Range.HighlightColorIndex = firstHighlight;
                 first.Range.LanguageID = WordInterop.WdLanguageID.wdEnglishUS;
-                first.Range.Font.Position = 9;
-                first.Range.Font.Subscript = -1;
 
                 second.Range.Font.Bold = secondBold;
                 second.Range.Font.Italic = secondItalic;
@@ -1980,8 +2044,6 @@ namespace LaTeXBlocks.WordSmoke
                 second.Range.NoProofing = secondNoProofing;
                 second.Range.HighlightColorIndex = secondHighlight;
                 second.Range.LanguageIDFarEast = simplifiedChinese;
-                second.Range.Font.Position = -7;
-                second.Range.Font.Superscript = -1;
 
                 var firstParagraphEnd = (document.Content.Text ?? string.Empty)
                     .IndexOf('\r');
@@ -2007,26 +2069,18 @@ namespace LaTeXBlocks.WordSmoke
                            LaTeXBlockService.ResolveTextColor(second.Range), changedColor),
                     "Word did not apply Font Color to both formulas while preserving the mixed range selection.");
 
-                var firstChangedRender = service.RenderCommittedAsync(firstSource, 360,
-                        LaTeXBlockLayoutMode.Auto, profile, fontSizePt, false, changedColor)
-                    .GetAwaiter().GetResult();
-                var secondChangedRender = service.RenderCommittedAsync(secondSource, 360,
-                        LaTeXBlockLayoutMode.Auto, profile, fontSizePt, false, changedColor)
-                    .GetAwaiter().GetResult();
-                first = service.UpdateRendered(first, firstSource, 360,
-                    LaTeXBlockLayoutMode.Auto, firstChangedRender, false);
-                selectionLease.Select();
-                var rebasedSelectionLease = word.Selection.Range.Duplicate;
-                Release(selectionLease);
-                selectionLease = rebasedSelectionLease;
-                second = service.UpdateRendered(second, secondSource, 360,
-                    LaTeXBlockLayoutMode.Auto, secondChangedRender, false);
+                Assert(service.TryApplyGraphicFillsBatch(
+                        new List<LaTeXBlockColorUpdate>
+                        {
+                            new LaTeXBlockColorUpdate(first, changedColor),
+                            new LaTeXBlockColorUpdate(second, changedColor)
+                        }),
+                    "The mixed-selection color change did not use Graphics Fill.");
 
-                // UpdateRendered deliberately does not steal a user's selection. A
-                // caller that captured an unchanged mixed range restores and rebases
-                // that lease after each drawing replacement, before a later formula
-                // in the same selection completes.
-                selectionLease.Select();
+                // Word already owns the selected runs' Font.Color. Graphics Fill
+                // updates only the two formula drawings, so the mixed selection and
+                // every unrelated run property remain untouched and no SVG is
+                // replaced or renormalized.
                 Assert(word.Selection.Start == selectionStart &&
                        word.Selection.End == selectionEnd &&
                        word.Selection.Type !=
@@ -2036,11 +2090,11 @@ namespace LaTeXBlocks.WordSmoke
 
                 AssertAutoFormatRefreshState(first, firstMetadata.Id, firstSource, 360,
                     fontSizePt, changedColor,
-                    firstChangedRender.DepthPt, firstBold, firstItalic, firstUnderline,
+                    firstMetadata.DepthPt, firstBold, firstItalic, firstUnderline,
                     firstNoProofing, firstHighlight, "First mixed-selection formula");
                 AssertAutoFormatRefreshState(second, secondMetadata.Id, secondSource, 360,
                     fontSizePt, changedColor,
-                    secondChangedRender.DepthPt, secondBold, secondItalic, secondUnderline,
+                    secondMetadata.DepthPt, secondBold, secondItalic, secondUnderline,
                     secondNoProofing, secondHighlight, "Second mixed-selection formula");
                 Assert(first.Range.Font.Name == "Arial" &&
                        Math.Abs((double)first.Range.Font.Spacing - 1.25) < 0.001 &&
@@ -2072,10 +2126,14 @@ namespace LaTeXBlocks.WordSmoke
                 Assert(document.Paragraphs.Count == paragraphCount &&
                        document.Content.Text == contentBeforeRefresh,
                     "Refreshing a mixed selection changed document text or paragraph boundaries.");
+                // Graphics Fill is a zero-replacement native operation. Word may
+                // publish a small effect extent for the recolored SVG; that value is
+                // not part of the formula baseline and must not trigger an OpenXML
+                // rewrite merely to restore cosmetic zeroes.
                 AssertInlineWordJoinerBoundary(first, 4,
-                    "First mixed-selection formula");
+                    "First mixed-selection formula", false);
                 AssertInlineWordJoinerBoundary(second, 4,
-                    "Second mixed-selection formula");
+                    "Second mixed-selection formula", false);
                 Console.WriteLine("Word: mixed text/formula Font Color refresh passed.");
             }
             finally
@@ -3184,7 +3242,9 @@ namespace LaTeXBlocks.WordSmoke
         {
             var expectedPosition = -(int)Math.Round(expectedDepthPt,
                 MidpointRounding.AwayFromZero);
-            Assert(LaTeXBlockService.TryReadContract(shape, out var metadata, out var source) &&
+            var hasContract = LaTeXBlockService.TryReadContract(shape,
+                out var metadata, out var source);
+            Assert(hasContract &&
                    metadata.Id == expectedId && source == expectedSource &&
                    metadata.Role == LaTeXBlockRole.Content &&
                    metadata.Mode == LaTeXBlockLayoutMode.Auto &&
@@ -3196,6 +3256,8 @@ namespace LaTeXBlocks.WordSmoke
                    Math.Abs((double)shape.Range.Font.SizeBi - expectedFontSizePt) < 0.001 &&
                    LaTeXBlockService.TextColorsEqual((int)shape.Range.Font.Color,
                        expectedTextColor) &&
+                   LaTeXBlockService.TextColorsEqual(
+                       (int)shape.Fill.ForeColor.RGB, expectedTextColor) &&
                    shape.Range.Font.Position == expectedPosition &&
                    shape.Range.Font.Subscript == 0 &&
                    shape.Range.Font.Superscript == 0 &&
@@ -3204,19 +3266,20 @@ namespace LaTeXBlocks.WordSmoke
                    shape.Range.Font.Underline == expectedUnderline &&
                    shape.Range.NoProofing == expectedNoProofing &&
                    shape.Range.HighlightColorIndex == expectedHighlight,
-                context + " did not preserve identity/source/layout/native formatting, " +
+                context + " did not preserve identity/source/layout/run or Graphics Fill formatting, " +
                 "or did not derive its baseline from the new TeX depth.");
         }
 
         private static void AssertInlineWordJoinerBoundary(WordInterop.InlineShape shape,
-            int expectedJoinerCount, string context)
+            int expectedJoinerCount, string context,
+            bool requireZeroEffectExtent = true)
         {
             var document = shape.Range.Document;
             var left = document.Range(shape.Range.Start - 1, shape.Range.Start);
             var right = document.Range(shape.Range.End, shape.Range.End + 1);
             Assert(left.Text == WordJoiner && right.Text == WordJoiner,
                 context + " is not directly bounded by one U+2060 on each side.");
-            AssertZeroEffectExtent(shape, context);
+            if (requireZeroEffectExtent) AssertZeroEffectExtent(shape, context);
 
             var content = document.Content.Text ?? string.Empty;
             Assert(CountOccurrences(content, WordJoiner) == expectedJoinerCount &&

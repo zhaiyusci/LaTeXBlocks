@@ -540,10 +540,23 @@ namespace LaTeXBlocks.Word
             }
 
             var applied = false;
-            RunProgrammaticMutation(() =>
+            var screenUpdating = true;
+            try { screenUpdating = Application.ScreenUpdating; }
+            catch (COMException) { }
+            try
             {
-                applied = service.TryApplyGraphicFillsBatch(updates);
-            });
+                try { Application.ScreenUpdating = false; }
+                catch (COMException) { }
+                RunProgrammaticMutation(() =>
+                {
+                    applied = service.TryApplyGraphicFillsBatch(updates);
+                });
+            }
+            finally
+            {
+                try { Application.ScreenUpdating = screenUpdating; }
+                catch (COMException) { }
+            }
             if (!applied) return false;
             ClearFormatBatchTargets(batch);
             ribbon?.InvalidateWidthControl();
@@ -568,6 +581,7 @@ namespace LaTeXBlocks.Word
                 {
                     var liveUpdates = new List<LaTeXBlockBatchUpdate>();
                     var canUseOpenXmlBatch = batch.Requests.Count > 1;
+                    var canReplaceSvgMediaDirectly = batch.Requests.Count > 0;
                     int? batchParagraphStart = null;
                     int? batchParagraphEnd = null;
                     for (var index = 0; index < batch.Requests.Count; index++)
@@ -607,6 +621,9 @@ namespace LaTeXBlocks.Word
                                 request.Source, request.Metadata.WidthPt,
                                 renders[index], currentMetadata, shapeRange,
                                 paragraph.Start, paragraph.End));
+                            if (!request.ChangesFontSize || request.ChangesTextColor ||
+                                request.ChangesWidth)
+                                canReplaceSvgMediaDirectly = false;
                         }
                         catch (Exception exception)
                         {
@@ -614,11 +631,16 @@ namespace LaTeXBlocks.Word
                         }
                     }
                     if (liveUpdates.Count != batch.Requests.Count)
+                    {
                         canUseOpenXmlBatch = false;
+                        canReplaceSvgMediaDirectly = false;
+                    }
+                    if (canReplaceSvgMediaDirectly) canUseOpenXmlBatch = true;
                     try
                     {
                         if (canUseOpenXmlBatch)
-                            service.UpdateRenderedBatch(liveUpdates);
+                            service.UpdateRenderedBatch(liveUpdates,
+                                canReplaceSvgMediaDirectly);
                         else
                             for (var index = 0; index < liveUpdates.Count; index++)
                             {

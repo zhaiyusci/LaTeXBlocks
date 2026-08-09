@@ -29,6 +29,8 @@ namespace LaTeXBlocks.Word
         private const double EmusPerPoint = 12700.0;
         private const string WordJoiner = "\u2060";
         private const string BatchMetadataTitlePrefix = "LaTeXBlocksBatch/";
+        private const string WordprocessingNamespace =
+            "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
         // Current Word exposes a floating SVG as an Office Graphic (28), but the
         // Office 15 PIA bundled with this project predates that enum member.
         private const int WordSvgFloatingShapeType = 28;
@@ -449,9 +451,12 @@ namespace LaTeXBlocks.Word
             var shape = target.InlineShapes.AddPicture(insertionPath, LinkToFile: false, SaveWithDocument: true, Range: target);
             markDocumentMutated?.Invoke();
             ApplyContractMetadata(shape, source, metadata);
-            shape = NormalizeWordInlineDrawing(shape, svgSize);
             EnsureInlineWordJoinerBoundaries(shape, metadata);
             ApplyHostRunFormat(shape, metadata, render.TextColor);
+            // Graphics Fill can make Word recalculate effect extents for some SVG
+            // geometries. Normalize only after every host-owned format is final.
+            shape = NormalizeWordInlineDrawing(shape, svgSize);
+            ApplyHostRunTextFormat(shape, metadata, render.TextColor);
             if (select) MoveCaretAfterInlineFormula(shape, metadata);
             return shape;
         }
@@ -649,13 +654,19 @@ namespace LaTeXBlocks.Word
                 target = document.Range(replacementStart, replacementStart);
                 replacement = target.InlineShapes.AddPicture(insertionPath, LinkToFile: false, SaveWithDocument: true, Range: target);
                 ApplyContractMetadata(replacement, source, metadata);
-                replacement = NormalizeWordInlineDrawing(replacement, svgSize);
                 hostRunFormat.Apply(replacement.Range);
                 ApplyHostRunFormat(replacement, metadata, render.TextColor);
                 // ApplyContract and NormalizeWordInlineDrawing rebuild the drawing run,
                 // and ApplyHostRunFormat deliberately writes the resolved render RGB.
                 // Restore Word's richer native value last so a theme colour remains a
                 // live theme slot+tint rather than being silently downgraded to RGB.
+                if (preserveNativeTextColor)
+                    nativeTextColor.ApplyTo(replacement.Range);
+                // Make exact SVG geometry the last drawing mutation. Word may
+                // otherwise recreate non-zero effect extents while applying fill.
+                replacement = NormalizeWordInlineDrawing(replacement, svgSize);
+                hostRunFormat.Apply(replacement.Range);
+                ApplyHostRunTextFormat(replacement, metadata, render.TextColor);
                 if (preserveNativeTextColor)
                     nativeTextColor.ApplyTo(replacement.Range);
                 if (selectReplacement)
@@ -692,11 +703,12 @@ namespace LaTeXBlocks.Word
             }
         }
 
-        internal void UpdateRenderedBatch(IList<LaTeXBlockBatchUpdate> updates)
+        internal void UpdateRenderedBatch(IList<LaTeXBlockBatchUpdate> updates,
+            bool replaceSvgMediaDirectly = false)
         {
             if (updates == null) throw new ArgumentNullException(nameof(updates));
-            if (updates.Count < 2)
-                throw new ArgumentException("A batch update requires at least two formulas.",
+            if (updates.Count == 0)
+                throw new ArgumentException("A batch update requires at least one formula.",
                     nameof(updates));
 
             var states = new List<BatchInlineUpdateState>(updates.Count);
@@ -726,8 +738,7 @@ namespace LaTeXBlocks.Word
                         svgSize.HeightPt, null);
                     states.Add(new BatchInlineUpdateState(update, range.Start,
                         range.StoryType, update.ParagraphStart, update.ParagraphEnd,
-                        metadata, svgSize,
-                        PrepareInsertionSvg(update.Render, LaTeXBlockLayoutMode.Auto)));
+                        metadata, svgSize));
                 }
 
                 states.Sort((left, right) => left.Start.CompareTo(right.Start));
@@ -737,11 +748,14 @@ namespace LaTeXBlocks.Word
                 for (var index = 0; index < states.Count; index++)
                 {
                     if (states[index].StoryType != storyType ||
-                        states[index].ParagraphStart != paragraphStart ||
-                        states[index].ParagraphEnd != paragraphEnd ||
+                        (!replaceSvgMediaDirectly &&
+                         (states[index].ParagraphStart != paragraphStart ||
+                          states[index].ParagraphEnd != paragraphEnd)) ||
                         (index > 0 && states[index - 1].Start >= states[index].Start))
                         throw new InvalidOperationException(
-                            "A formula batch must contain distinct shapes in one Word paragraph.");
+                            replaceSvgMediaDirectly
+                                ? "A direct formula-media batch must contain distinct shapes in one Word story."
+                                : "A formula batch must contain distinct shapes in one Word paragraph.");
                 }
 
                 // Read the original drawing runs once. Their rPr elements contain all
@@ -756,8 +770,8 @@ namespace LaTeXBlocks.Word
                 var envelopeStart = originalEnvelope.Start;
                 var finalEnvelopeEnd = originalEnvelope.End;
                 var expectedInlineShapeCount = originalEnvelope.InlineShapes.Count;
-                var formats = CaptureWordInlineFormatsXml(originalEnvelope.WordOpenXML,
-                    states);
+                var originalXml = originalEnvelope.WordOpenXML;
+                var formats = CaptureWordInlineFormatsXml(originalXml, states);
 
                 var following = states[states.Count - 1].Update.Range.Duplicate;
                 following.Collapse(WordInterop.WdCollapseDirection.wdCollapseEnd);
@@ -767,6 +781,66 @@ namespace LaTeXBlocks.Word
 
                 application.UndoRecord.StartCustomRecord("Update LaTeX Blocks");
                 undoStarted = true;
+                if (replaceSvgMediaDirectly && TryReplaceWordInlineSvgMediaXml(
+                        originalXml, states, formats, out var directMediaXml))
+                {
+                    foreach (var state in states)
+                        state.CaptureHostFormat();
+                    documentMutated = true;
+                    var mediaInsertion = originalEnvelope.Duplicate;
+                    mediaInsertion.Collapse(
+                        WordInterop.WdCollapseDirection.wdCollapseStart);
+                    originalEnvelope.Delete();
+                    // The package still carries the original PNG fallback, but Word
+                    // regenerates it while importing changed SVG media. The saving is
+                    // skipping the preliminary AddPicture import for every formula;
+                    // this single InsertXML is the only unavoidable fallback pass.
+                    mediaInsertion.InsertXML(directMediaXml);
+                    if (!hadParagraphMarkAfter)
+                    {
+                        var separator = mediaInsertion.Duplicate;
+                        separator.SetRange(finalEnvelopeEnd, finalEnvelopeEnd + 1);
+                        if (separator.Text == "\r") separator.Delete();
+                    }
+                    var mediaEnvelope = mediaInsertion.Duplicate;
+                    mediaEnvelope.SetRange(envelopeStart, finalEnvelopeEnd);
+                    if (mediaEnvelope.InlineShapes.Count !=
+                        expectedInlineShapeCount)
+                        throw new InvalidDataException(
+                            "Word did not preserve every drawing during SVG media replacement.");
+                    var restoredTargets = 0;
+                    var statesById = new Dictionary<Guid, BatchInlineUpdateState>();
+                    foreach (var state in states)
+                        statesById[state.Metadata.Id] = state;
+                    foreach (WordInterop.InlineShape candidate in
+                        mediaEnvelope.InlineShapes)
+                    {
+                        if (!TryReadContract(candidate, out var candidateMetadata,
+                                out _) ||
+                            !statesById.TryGetValue(candidateMetadata.Id,
+                                out var state))
+                            continue;
+                        state.HostRunFormat.Apply(candidate.Range);
+                        candidate.Range.Font.Size =
+                            (float)state.Metadata.FontSizePt;
+                        candidate.Range.Font.SizeBi =
+                            (float)state.Metadata.FontSizePt;
+                        ApplyBaselinePosition(candidate, state.Metadata);
+                        if (state.PreserveNativeTextColor)
+                            state.NativeTextColor.ApplyTo(candidate.Range);
+                        // Office Graphics Fill is host object state: WordOpenXML does
+                        // not serialize its current RGB anywhere in pic:pic, so an
+                        // InsertXML reconstruction resets it to black even though the
+                        // drawing XML and w:rPr colour are preserved. Replay the value
+                        // captured from the old object; never infer it from Font.Color.
+                        ApplyGraphicFill(candidate, state.GraphicFillColor);
+                        restoredTargets++;
+                    }
+                    if (restoredTargets != states.Count)
+                        throw new InvalidDataException(
+                            "Word did not restore every formula after SVG media replacement.");
+                    return;
+                }
                 for (var index = states.Count - 1; index >= 0; index--)
                 {
                     var state = states[index];
@@ -774,7 +848,8 @@ namespace LaTeXBlocks.Word
                     insertion.Collapse(WordInterop.WdCollapseDirection.wdCollapseStart);
                     documentMutated = true;
                     state.ImportedShape = insertion.InlineShapes.AddPicture(
-                        state.InsertionPath, LinkToFile: false,
+                        PrepareInsertionSvg(state.Update.Render,
+                            LaTeXBlockLayoutMode.Auto), LinkToFile: false,
                         SaveWithDocument: true, Range: insertion);
                     state.ImportedShape.Title = BatchMetadataTitlePrefix +
                         state.Metadata.Id.ToString("D");
@@ -823,6 +898,8 @@ namespace LaTeXBlocks.Word
             }
             finally
             {
+                foreach (var state in states)
+                    state.HostRunFormat?.Dispose();
                 if (undoStarted)
                     try { application.UndoRecord.EndCustomRecord(); } catch { }
             }
@@ -1798,6 +1875,15 @@ namespace LaTeXBlocks.Word
         private static void ApplyHostRunFormat(WordInterop.InlineShape shape,
             LaTeXBlockMetadata metadata, int textColor)
         {
+            ApplyHostRunTextFormat(shape, metadata, textColor);
+            if (metadata.Mode == LaTeXBlockLayoutMode.Auto ||
+                metadata.HasExplicitStyle)
+                ApplyGraphicFill(shape, textColor);
+        }
+
+        private static void ApplyHostRunTextFormat(WordInterop.InlineShape shape,
+            LaTeXBlockMetadata metadata, int textColor)
+        {
             // Script placement belongs to the TeX source. Word's Subscript and
             // Superscript flags are a second size/baseline transform, so they must
             // never survive onto either a newly inserted or a replacement formula.
@@ -1816,9 +1902,6 @@ namespace LaTeXBlocks.Word
             // Font Color for Auto/legacy objects, or durable style colour for a styled
             // Fixed Block. Alternative Text remains exactly the author-written source.
             shape.Range.Font.Color = (WordInterop.WdColor)NormalizeTextColor(textColor);
-            if (metadata.Mode == LaTeXBlockLayoutMode.Auto ||
-                metadata.HasExplicitStyle)
-                ApplyGraphicFill(shape, textColor);
             ApplyBaselinePosition(shape, metadata);
             // InsertXML used by NormalizeWordInlineDrawing rebuilds the DrawingML
             // object and may restore Word's default aspect lock. Fixed Content Blocks
@@ -2374,6 +2457,18 @@ namespace LaTeXBlocks.Word
             var caret = range.Duplicate;
             caret.Collapse(WordInterop.WdCollapseDirection.wdCollapseEnd);
             caret.Select();
+
+            // Font.Position and NoProofing belong to the picture run, not to text
+            // subsequently typed at the collapsed insertion point. Word can carry
+            // those two properties across an inline drawing (and its zero-width
+            // boundary character), especially after InsertXML has rebuilt the run.
+            // Clear only picture-specific placement/proofing here; ordinary host
+            // formatting such as font family, size and colour must keep flowing.
+            var selection = range.Application.Selection;
+            selection.Font.Position = 0;
+            selection.Font.Subscript = 0;
+            selection.Font.Superscript = 0;
+            selection.NoProofing = 0;
         }
 
         private static bool UsesInlineWordJoinerBoundaries(LaTeXBlockMetadata metadata)
@@ -2621,6 +2716,217 @@ namespace LaTeXBlocks.Word
                     "Word batch XML did not contain every original formula run.");
             return formats;
         }
+
+        private static bool TryReplaceWordInlineSvgMediaXml(string flatOpc,
+            IList<BatchInlineUpdateState> states,
+            IDictionary<Guid, BatchInlineXmlFormat> formats,
+            out string patchedXml)
+        {
+            patchedXml = null;
+            try
+            {
+                var document = new XmlDocument
+                {
+                    XmlResolver = null,
+                    PreserveWhitespace = true
+                };
+                document.LoadXml(flatOpc);
+                const string packageNamespace =
+                    "http://schemas.microsoft.com/office/2006/xmlPackage";
+                const string drawingWordNamespace =
+                    "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing";
+                const string drawingNamespace =
+                    "http://schemas.openxmlformats.org/drawingml/2006/main";
+                const string pictureNamespace =
+                    "http://schemas.openxmlformats.org/drawingml/2006/picture";
+                const string officeRelationshipNamespace =
+                    "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+                const string svgNamespace =
+                    "http://schemas.microsoft.com/office/drawing/2016/SVG/main";
+                const string packageRelationshipNamespace =
+                    "http://schemas.openxmlformats.org/package/2006/relationships";
+                var namespaces = new XmlNamespaceManager(document.NameTable);
+                namespaces.AddNamespace("pkg", packageNamespace);
+                namespaces.AddNamespace("w", WordprocessingNamespace);
+                namespaces.AddNamespace("wp", drawingWordNamespace);
+                namespaces.AddNamespace("a", drawingNamespace);
+                namespaces.AddNamespace("pic", pictureNamespace);
+                namespaces.AddNamespace("r", officeRelationshipNamespace);
+                namespaces.AddNamespace("asvg", svgNamespace);
+                namespaces.AddNamespace("pr", packageRelationshipNamespace);
+
+                var mainPart = document.SelectSingleNode(
+                    "//pkg:part[@pkg:name='/word/document.xml']/pkg:xmlData",
+                    namespaces);
+                var relationshipPart = document.SelectSingleNode(
+                    "//pkg:part[@pkg:name='/word/_rels/document.xml.rels']/pkg:xmlData",
+                    namespaces);
+                if (mainPart == null || relationshipPart == null) return false;
+
+                var relationshipTargets = new Dictionary<string, string>(
+                    StringComparer.Ordinal);
+                foreach (XmlNode relationship in relationshipPart.SelectNodes(
+                    ".//pr:Relationship", namespaces))
+                {
+                    var id = relationship.Attributes?["Id"]?.Value;
+                    var target = relationship.Attributes?["Target"]?.Value;
+                    if (!string.IsNullOrWhiteSpace(id) &&
+                        !string.IsNullOrWhiteSpace(target) && !target.Contains(":"))
+                        relationshipTargets[id] = "/word/" +
+                            target.Replace('\\', '/').TrimStart('/');
+                }
+                var packageParts = new Dictionary<string, XmlNode>(
+                    StringComparer.OrdinalIgnoreCase);
+                foreach (XmlNode part in document.SelectNodes("//pkg:part", namespaces))
+                {
+                    var name = part.Attributes?["name", packageNamespace]?.Value;
+                    if (!string.IsNullOrWhiteSpace(name)) packageParts[name] = part;
+                }
+
+                var targets = new Dictionary<Guid, BatchInlineUpdateState>();
+                foreach (var state in states) targets[state.Metadata.Id] = state;
+                var found = new HashSet<Guid>();
+                var replacedParts = new Dictionary<string, string>(
+                    StringComparer.OrdinalIgnoreCase);
+                foreach (XmlNode run in mainPart.SelectNodes(".//w:r[w:drawing]",
+                    namespaces))
+                {
+                    var documentProperties = run.SelectSingleNode(".//wp:docPr",
+                        namespaces) as XmlElement;
+                    var title = documentProperties?.GetAttribute("title");
+                    if (!LaTeXBlockMetadata.TryParse(title, out var oldMetadata) ||
+                        !targets.TryGetValue(oldMetadata.Id, out var state) ||
+                        !formats.TryGetValue(oldMetadata.Id, out var format))
+                        continue;
+
+                    var svgBlip = run.SelectSingleNode(".//asvg:svgBlip[@r:embed]",
+                        namespaces);
+                    var svgId = svgBlip?.Attributes?["embed",
+                        officeRelationshipNamespace]?.Value;
+                    if (string.IsNullOrWhiteSpace(svgId) ||
+                        !relationshipTargets.TryGetValue(svgId, out var svgPartName) ||
+                        !packageParts.TryGetValue(svgPartName, out var svgPart))
+                        return false;
+                    var svgBinary = svgPart.SelectSingleNode("pkg:binaryData", namespaces);
+                    var svgXml = svgPart.SelectSingleNode("pkg:xmlData", namespaces);
+                    if (svgBinary == null && svgXml == null)
+                        return false;
+
+                    var insertionBytes = ApplyFractionalBaselineCompensation(
+                        state.Update.Render.SvgBytes, state.Metadata.DepthPt, 1);
+                    var replacement = Convert.ToBase64String(insertionBytes);
+                    if (replacedParts.TryGetValue(svgPartName, out var existing) &&
+                        !string.Equals(existing, replacement, StringComparison.Ordinal))
+                        return false;
+                    if (svgBinary != null)
+                        svgBinary.InnerText = replacement;
+                    else
+                    {
+                        var svgText = Encoding.UTF8.GetString(insertionBytes);
+                        svgText = Regex.Replace(svgText,
+                            "^\\s*<\\?xml[^?]*\\?>", string.Empty,
+                            RegexOptions.CultureInvariant,
+                            TimeSpan.FromSeconds(1));
+                        svgXml.InnerXml = svgText;
+                    }
+                    replacedParts[svgPartName] = replacement;
+                    NormalizeWordInlineRunXml(run, namespaces, format);
+                    found.Add(oldMetadata.Id);
+                }
+                if (found.Count != states.Count) return false;
+                patchedXml = document.OuterXml;
+                return true;
+            }
+            catch (XmlException) { return false; }
+            catch (FormatException) { return false; }
+            catch (ArgumentException) { return false; }
+            catch (InvalidDataException) { return false; }
+            catch (OverflowException) { return false; }
+            catch (System.Runtime.InteropServices.ExternalException) { return false; }
+        }
+
+        private static void NormalizeWordInlineRunXml(XmlNode run,
+            XmlNamespaceManager namespaces, BatchInlineXmlFormat format)
+        {
+            var size = format.SvgSize;
+            var effect = run.SelectSingleNode(".//wp:effectExtent", namespaces)
+                as XmlElement ?? throw new InvalidDataException(
+                    "Word inline SVG has no wp:effectExtent element.");
+            effect.SetAttribute("l", "0");
+            effect.SetAttribute("t", "0");
+            effect.SetAttribute("r", "0");
+            effect.SetAttribute("b", "0");
+            var inlineExtent = run.SelectSingleNode(".//wp:extent", namespaces)
+                as XmlElement ?? throw new InvalidDataException(
+                    "Word inline SVG has no wp:extent element.");
+            SetUnqualifiedIntegerAttribute(inlineExtent, "cx", size.WidthEmu);
+            SetUnqualifiedIntegerAttribute(inlineExtent, "cy", size.HeightEmu);
+            var transformExtent = run.SelectSingleNode(
+                ".//pic:spPr/a:xfrm/a:ext", namespaces) as XmlElement ??
+                throw new InvalidDataException(
+                    "Word inline SVG has no picture transform extent.");
+            SetUnqualifiedIntegerAttribute(transformExtent, "cx", size.WidthEmu);
+            SetUnqualifiedIntegerAttribute(transformExtent, "cy", size.HeightEmu);
+
+            var documentProperties = run.SelectSingleNode(".//wp:docPr", namespaces)
+                as XmlElement ?? throw new InvalidDataException(
+                    "Word inline SVG has no wp:docPr element.");
+            documentProperties.SetAttribute("title", format.Metadata.ToString());
+            documentProperties.SetAttribute("descr", format.Source);
+            var pictureProperties = run.SelectSingleNode(".//pic:cNvPr", namespaces)
+                as XmlElement;
+            if (pictureProperties != null)
+            {
+                pictureProperties.SetAttribute("title", format.Metadata.ToString());
+                pictureProperties.SetAttribute("descr", format.Source);
+            }
+
+            var owner = run.OwnerDocument ?? throw new InvalidDataException(
+                "Word formula run has no XML document.");
+            var runProperties = run.SelectSingleNode("w:rPr", namespaces);
+            if (runProperties == null)
+            {
+                runProperties = owner.CreateElement("w", "rPr",
+                    WordprocessingNamespace);
+                run.PrependChild(runProperties);
+            }
+            foreach (XmlNode verticalAlignment in runProperties.SelectNodes(
+                "w:vertAlign", namespaces))
+                runProperties.RemoveChild(verticalAlignment);
+            var halfPoints = checked((long)Math.Round(format.FontSizePt * 2,
+                MidpointRounding.AwayFromZero));
+            var baselineHalfPoints = checked((long)(-2 * Math.Round(format.DepthPt,
+                MidpointRounding.AwayFromZero)));
+            SetWordRunProperty(runProperties, namespaces, "sz", halfPoints);
+            SetWordRunProperty(runProperties, namespaces, "szCs", halfPoints);
+            SetWordRunProperty(runProperties, namespaces, "position",
+                baselineHalfPoints);
+        }
+
+        private static void SetWordRunProperty(XmlNode runProperties,
+            XmlNamespaceManager namespaces, string property, long value)
+        {
+            var owner = runProperties.OwnerDocument ?? throw new InvalidDataException(
+                "Word run properties have no XML document.");
+            var element = runProperties.SelectSingleNode("w:" + property, namespaces)
+                as XmlElement;
+            if (element == null)
+            {
+                element = owner.CreateElement("w", property,
+                    WordprocessingNamespace);
+                runProperties.AppendChild(element);
+            }
+            element.SetAttribute("val", WordprocessingNamespace,
+                value.ToString(CultureInfo.InvariantCulture));
+        }
+
+        private static void SetUnqualifiedIntegerAttribute(XmlElement element,
+            string attribute, long value)
+        {
+            element.SetAttribute(attribute,
+                value.ToString(CultureInfo.InvariantCulture));
+        }
+
         private static bool TryReadWordInlineMetadata(string xml,
             out LaTeXBlockMetadata metadata)
         {
@@ -3066,7 +3372,7 @@ namespace LaTeXBlocks.Word
             internal BatchInlineUpdateState(LaTeXBlockBatchUpdate update, int start,
                 WordInterop.WdStoryType storyType, int paragraphStart,
                 int paragraphEnd, LaTeXBlockMetadata metadata,
-                SvgPhysicalSize svgSize, string insertionPath)
+                SvgPhysicalSize svgSize)
             {
                 Update = update;
                 Start = start;
@@ -3075,7 +3381,6 @@ namespace LaTeXBlocks.Word
                 ParagraphEnd = paragraphEnd;
                 Metadata = metadata;
                 SvgSize = svgSize;
-                InsertionPath = insertionPath;
             }
 
             internal LaTeXBlockBatchUpdate Update { get; }
@@ -3085,8 +3390,44 @@ namespace LaTeXBlocks.Word
             internal int ParagraphEnd { get; }
             internal LaTeXBlockMetadata Metadata { get; }
             internal SvgPhysicalSize SvgSize { get; }
-            internal string InsertionPath { get; }
             internal WordInterop.InlineShape ImportedShape { get; set; }
+            internal WordInlineRunFormatSnapshot HostRunFormat { get; private set; }
+            internal NativeTextColorDescriptor NativeTextColor { get; private set; }
+            internal bool PreserveNativeTextColor { get; private set; }
+            internal int GraphicFillColor { get; private set; }
+
+            internal void CaptureHostFormat()
+            {
+                HostRunFormat = WordInlineRunFormatSnapshot.Capture(Update.Range);
+                PreserveNativeTextColor = NativeTextColorDescriptor.TryCapture(
+                    Update.Range, out var textColor);
+                NativeTextColor = textColor;
+                GraphicFillColor = CaptureGraphicFillColor(Update.Shape,
+                    Update.Render.TextColor);
+            }
+        }
+
+        private static int CaptureGraphicFillColor(WordInterop.InlineShape shape,
+            int fallbackColor)
+        {
+            if (shape == null) return NormalizeTextColor(fallbackColor);
+            WordInterop.FillFormat fill = null;
+            WordInterop.ColorFormat foreground = null;
+            try
+            {
+                fill = shape.Fill;
+                foreground = fill.ForeColor;
+                return NormalizeTextColor(foreground.RGB);
+            }
+            catch (COMException)
+            {
+                return NormalizeTextColor(fallbackColor);
+            }
+            finally
+            {
+                if (foreground != null) Marshal.ReleaseComObject(foreground);
+                if (fill != null) Marshal.ReleaseComObject(fill);
+            }
         }
 
         private void EnsureDocument()

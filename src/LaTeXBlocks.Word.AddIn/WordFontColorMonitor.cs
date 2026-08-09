@@ -294,7 +294,6 @@ namespace LaTeXBlocks.Word
         private readonly object stateGate = new object();
         private readonly Queue<WordFormatInteractionEventArgs> pendingFormatSignals =
             new Queue<WordFormatInteractionEventArgs>();
-        private AutomationElement automationRoot;
         private long mainButtonCommitDedupUntilUtcTicks;
         private long fontSizeCommitDedupUntilUtcTicks;
         private long fontSizeSessionUntilUtcTicks;
@@ -304,16 +303,9 @@ namespace LaTeXBlocks.Word
         private int paletteCandidateObjectId;
         private int paletteCandidateChildId;
         private uint paletteCandidateEventTime;
-        private double paletteCandidateLeft;
-        private double paletteCandidateTop;
-        private double paletteCandidateRight;
-        private double paletteCandidateBottom;
         private long paletteCandidateInteractionId;
         private long palettePressedInteractionId;
-        private double palettePressedLeft;
-        private double palettePressedTop;
-        private double palettePressedRight;
-        private double palettePressedBottom;
+        private IntPtr palettePressedHwnd;
         private long pendingPaletteCommitInteractionId;
         private long paletteCommitGeneration;
         private IntPtr hideHook;
@@ -394,8 +386,6 @@ namespace LaTeXBlocks.Word
         {
             ThrowIfDisposed();
             if (started) return;
-            var root = AutomationElement.RootElement;
-            automationRoot = root;
             try
             {
                 // Never subscribe an in-process Office add-in to desktop-root UIA
@@ -441,23 +431,18 @@ namespace LaTeXBlocks.Word
                 if (eventType == EventObjectSelection)
                 {
                     Interlocked.Increment(ref paletteSelectionsForTest);
-                    var hasRole = TryGetAccessibleRoleAndBounds(hwnd, objectId,
-                        childId, out var role, out var accessibleBounds);
-                    Volatile.Write(ref lastPaletteSelectionRoleForTest, role);
-                    var isGalleryItem = IsGalleryItemAtPointerOrFocus(
-                        out var pointerClass, out var candidateBounds);
-                    if (!accessibleBounds.IsEmpty && accessibleBounds.Width > 0 &&
-                        accessibleBounds.Height > 0)
-                        candidateBounds = accessibleBounds;
-                    lastPalettePointerClassForTest = pointerClass;
-                    var isFontColorSession = IsPaletteSessionActive();
-                    if (!isFontColorSession && hasRole &&
-                        IsPaletteItemRole(role) && isGalleryItem)
-                        isFontColorSession = TryBeginVisiblyExpandedPaletteInteraction();
-                    if (isFontColorSession && hasRole &&
-                        IsPaletteItemRole(role) && isGalleryItem)
-                        SetPaletteCandidate(hwnd, objectId, childId, eventTime,
-                            candidateBounds);
+                    // The Font Color dropdown click establishes the palette session
+                    // once, asynchronously. Never call UI Automation from every
+                    // gallery selection event: Office services those provider calls
+                    // on its UI thread, so swatch hover/selection can otherwise make
+                    // the pointer visibly stall.
+                    if (!IsPaletteSessionActive()) return;
+                    // Record only values already carried by the native event. Even
+                    // MSAA accRole/accLocation calls marshal back into Word and are
+                    // therefore forbidden on the hover path.
+                    Volatile.Write(ref lastPaletteSelectionRoleForTest, 0);
+                    lastPalettePointerClassForTest = "native-event";
+                    SetPaletteCandidate(hwnd, objectId, childId, eventTime);
                     return;
                 }
                 if (eventType == EventObjectInvoked)
@@ -840,40 +825,6 @@ namespace LaTeXBlocks.Word
                    Interlocked.Read(ref paletteSessionUntilUtcTicks);
         }
 
-        private bool TryBeginVisiblyExpandedPaletteInteraction()
-        {
-            // WINEVENT_OUTOFCONTEXT and UIA property notifications are both
-            // asynchronous. Some Office builds deliver OBJECT_SELECTION for a
-            // swatch before the earlier ExpandCollapse property callback reaches us.
-            // Confirm the stable FontColorPicker itself is visibly expanded, then
-            // establish the same semantic transaction the delayed callback would
-            // have established. This is deliberately narrower than accepting an
-            // arbitrary NetUIGalleryButton event.
-            AutomationElement picker = null;
-            try
-            {
-                var root = automationRoot;
-                if (root == null) return false;
-                picker = root.FindFirst(TreeScope.Subtree,
-                    new AndCondition(
-                        new PropertyCondition(AutomationElement.ProcessIdProperty,
-                            wordProcessId),
-                        new PropertyCondition(AutomationElement.AutomationIdProperty,
-                            FontColorPickerId)));
-                if (picker == null || !picker.TryGetCurrentPattern(
-                        ExpandCollapsePattern.Pattern, out var pattern) ||
-                    ((ExpandCollapsePattern)pattern).Current.ExpandCollapseState !=
-                        ExpandCollapseState.Expanded)
-                    return false;
-            }
-            catch (ElementNotAvailableException) { return false; }
-            catch (InvalidOperationException) { return false; }
-
-            Interlocked.Exchange(ref paletteSessionUntilUtcTicks, long.MaxValue);
-            BeginPaletteInteraction();
-            return true;
-        }
-
         private static bool IsPaletteItemRole(int role)
         {
             // Office accessibility providers vary by build: the same Fluent gallery
@@ -883,7 +834,7 @@ namespace LaTeXBlocks.Word
         }
 
         private void SetPaletteCandidate(IntPtr hwnd, int objectId, int childId,
-            uint eventTime, System.Windows.Rect bounds)
+            uint eventTime)
         {
             lock (stateGate)
             {
@@ -891,10 +842,6 @@ namespace LaTeXBlocks.Word
                 paletteCandidateObjectId = objectId;
                 paletteCandidateChildId = childId;
                 paletteCandidateEventTime = eventTime;
-                paletteCandidateLeft = bounds.Left;
-                paletteCandidateTop = bounds.Top;
-                paletteCandidateRight = bounds.Right;
-                paletteCandidateBottom = bounds.Bottom;
                 paletteCandidateInteractionId =
                     formatTransactionState.ActiveInteractionId;
                 lastPaletteCandidateTupleForTest = hwnd.ToInt64() + "/" +
@@ -911,23 +858,16 @@ namespace LaTeXBlocks.Word
             paletteCandidateHwnd = IntPtr.Zero;
             paletteCandidateObjectId = 0;
             paletteCandidateChildId = 0;
-            paletteCandidateEventTime = 0;
-            paletteCandidateInteractionId = 0;
-            paletteCandidateLeft = 0;
-            paletteCandidateTop = 0;
-            paletteCandidateRight = 0;
-            paletteCandidateBottom = 0;
-            ClearPalettePressLocked();
+                paletteCandidateEventTime = 0;
+                paletteCandidateInteractionId = 0;
+                ClearPalettePressLocked();
             Interlocked.Exchange(ref paletteCandidateUntilUtcTicks, 0);
         }
 
         private void ClearPalettePressLocked()
         {
             palettePressedInteractionId = 0;
-            palettePressedLeft = 0;
-            palettePressedTop = 0;
-            palettePressedRight = 0;
-            palettePressedBottom = 0;
+            palettePressedHwnd = IntPtr.Zero;
         }
 
         private bool TryConsumePaletteCandidate(IntPtr hwnd, int objectId, int childId,
@@ -1094,20 +1034,13 @@ namespace LaTeXBlocks.Word
                                 DateTime.UtcNow.Ticks <= Interlocked.Read(
                                     ref paletteCandidateUntilUtcTicks) &&
                                 paletteCandidateInteractionId != 0 &&
-                                IsSameWindowTree(window, paletteCandidateHwnd) &&
-                                mouse.Point.X >= paletteCandidateLeft &&
-                                mouse.Point.X <= paletteCandidateRight &&
-                                mouse.Point.Y >= paletteCandidateTop &&
-                                mouse.Point.Y <= paletteCandidateBottom)
+                                IsSameWindowTree(window, paletteCandidateHwnd))
                             {
-                                // As with provider Invoke, a late duplicate Expand may
-                                // rotate the token between hover and mouse-down. The
-                                // same live popup window is the gesture boundary.
+                                // The latest native selection event and the click are
+                                // in the same live popup. No provider hit-test or
+                                // geometry query is needed.
                                 palettePressedInteractionId = activeInteractionId;
-                                palettePressedLeft = paletteCandidateLeft;
-                                palettePressedTop = paletteCandidateTop;
-                                palettePressedRight = paletteCandidateRight;
-                                palettePressedBottom = paletteCandidateBottom;
+                                palettePressedHwnd = paletteCandidateHwnd;
                             }
                         }
                         else
@@ -1115,10 +1048,7 @@ namespace LaTeXBlocks.Word
                             if (isTargetProcess &&
                                 palettePressedInteractionId != 0 &&
                                 activeInteractionId == palettePressedInteractionId &&
-                                mouse.Point.X >= palettePressedLeft &&
-                                mouse.Point.X <= palettePressedRight &&
-                                mouse.Point.Y >= palettePressedTop &&
-                                mouse.Point.Y <= palettePressedBottom)
+                                IsSameWindowTree(window, palettePressedHwnd))
                             {
                                 interactionId = palettePressedInteractionId;
                                 // Publish confirmation before releasing stateGate so a
@@ -1166,6 +1096,13 @@ namespace LaTeXBlocks.Word
                     if (element == null) return;
                     var snapshot = ElementSnapshot.Capture(element, wordProcessId);
                     if (snapshot.IsInsideFontColorPicker &&
+                        snapshot.IsFontColorDropDown)
+                    {
+                        Interlocked.Exchange(ref paletteSessionUntilUtcTicks,
+                            long.MaxValue);
+                        BeginPaletteInteraction();
+                    }
+                    else if (snapshot.IsInsideFontColorPicker &&
                         !snapshot.IsFontColorDropDown && snapshot.IsMainButton)
                         ObserveMainButtonCommit();
                     else if (snapshot.IsInsideFontSize &&
@@ -1249,11 +1186,9 @@ namespace LaTeXBlocks.Word
             Unhook(ref selectionHook);
             Unhook(ref focusHook);
             Unhook(ref hideHook);
-            automationRoot = null;
             started = false;
-            // No global UIA handlers are registered. Clearing the root reference is
-            // sufficient and, unlike RemoveAutomationEventHandler, cannot start a
-            // provider/RPC teardown during Word exit.
+            // No global UIA handlers or retained desktop-root providers exist, so
+            // shutdown never needs a UIA provider/RPC teardown.
         }
 
         private bool TryCapturePointerOrFocusSnapshot(out ElementSnapshot snapshot)
@@ -1278,47 +1213,6 @@ namespace LaTeXBlocks.Word
             if (hook == IntPtr.Zero) return;
             try { UnhookWinEvent(hook); }
             finally { hook = IntPtr.Zero; }
-        }
-
-        private static bool IsGalleryItemAtPointerOrFocus(out string className,
-            out System.Windows.Rect bounds)
-        {
-            className = string.Empty;
-            bounds = System.Windows.Rect.Empty;
-            AutomationElement element = null;
-            try
-            {
-                var cursor = Cursor.Position;
-                element = AutomationElement.FromPoint(
-                    new System.Windows.Point(cursor.X, cursor.Y));
-                if (IsGalleryItem(element, out className, out bounds)) return true;
-                element = AutomationElement.FocusedElement;
-                return IsGalleryItem(element, out className, out bounds);
-            }
-            catch (ElementNotAvailableException) { return false; }
-            catch (InvalidOperationException) { return false; }
-        }
-
-        private static bool IsGalleryItem(AutomationElement element,
-            out string className, out System.Windows.Rect bounds)
-        {
-            className = string.Empty;
-            bounds = System.Windows.Rect.Empty;
-            if (element == null) return false;
-            try
-            {
-                className = element.Current.ClassName ?? string.Empty;
-                var isGalleryItem = string.Equals(className,
-                                        "NetUIGalleryButton",
-                                        StringComparison.OrdinalIgnoreCase) ||
-                                    string.Equals(className,
-                                        "NetUIGalleryCategoryContainer",
-                                        StringComparison.OrdinalIgnoreCase);
-                if (isGalleryItem) bounds = element.Current.BoundingRectangle;
-                return isGalleryItem && !bounds.IsEmpty &&
-                       bounds.Width > 0 && bounds.Height > 0;
-            }
-            catch (ElementNotAvailableException) { return false; }
         }
 
         private static bool TryGetAccessibleRole(IntPtr hwnd, int objectId,
