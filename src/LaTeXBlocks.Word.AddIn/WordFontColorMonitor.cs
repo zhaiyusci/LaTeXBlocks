@@ -268,11 +268,15 @@ namespace LaTeXBlocks.Word
         private const int RoleSystemMenuItem = 0x0c;
         private const int ObjIdWindow = 0;
         private const int HookCallWndProc = 4;
+        private const int HookLowLevelKeyboard = 13;
         private const int HookLowLevelMouse = 14;
         private const int HookCodeAction = 0;
         private const uint GetAncestorRoot = 2;
         private const uint WindowMessageLeftButtonDown = 0x0201;
         private const uint WindowMessageLeftButtonUp = 0x0202;
+        private const uint WindowMessageKeyDown = 0x0100;
+        private const uint WindowMessageSystemKeyDown = 0x0104;
+        private const uint VirtualKeyEscape = 0x1b;
         private const uint WindowMessageClose = 0x0010;
         private const uint WindowMessageCommand = 0x0111;
         private const int DialogResultOk = 1;
@@ -285,6 +289,7 @@ namespace LaTeXBlocks.Word
         private readonly WinEventDelegate winEventHandler;
         private readonly CallWndProcDelegate callWndProcHandler;
         private readonly LowLevelMouseDelegate lowLevelMouseHandler;
+        private readonly LowLevelKeyboardDelegate lowLevelKeyboardHandler;
         private System.Threading.Timer paletteCommitTimer;
         private readonly WordFontColorInteractionState interactionState =
             new WordFontColorInteractionState();
@@ -304,6 +309,7 @@ namespace LaTeXBlocks.Word
         private int paletteCandidateChildId;
         private uint paletteCandidateEventTime;
         private long paletteCandidateInteractionId;
+        private IntPtr palettePopupRootHwnd;
         private long palettePressedInteractionId;
         private IntPtr palettePressedHwnd;
         private long pendingPaletteCommitInteractionId;
@@ -313,6 +319,7 @@ namespace LaTeXBlocks.Word
         private IntPtr selectionHook;
         private IntPtr invokedHook;
         private IntPtr lowLevelMouseHook;
+        private IntPtr lowLevelKeyboardHook;
         private IntPtr dialogMessageHook;
         private IntPtr moreColorsDialogHwnd;
         private IntPtr pendingMoreColorsDialogHwnd;
@@ -329,6 +336,7 @@ namespace LaTeXBlocks.Word
         private string lastPaletteCandidateTupleForTest = string.Empty;
         private string lastPaletteInvokedTupleForTest = string.Empty;
         private string lastPalettePointerClassForTest = string.Empty;
+        private string lastPaletteHideForTest = string.Empty;
         private bool started;
         private bool disposed;
         private bool formatSignalDrainScheduled;
@@ -346,6 +354,7 @@ namespace LaTeXBlocks.Word
             winEventHandler = OnWinEvent;
             callWndProcHandler = OnCallWndProc;
             lowLevelMouseHandler = OnLowLevelMouse;
+            lowLevelKeyboardHandler = OnLowLevelKeyboard;
         }
 
         public event EventHandler<WordFormatInteractionEventArgs> FormatInteraction;
@@ -365,6 +374,7 @@ namespace LaTeXBlocks.Word
             ", candidateTuple=" + lastPaletteCandidateTupleForTest +
             ", invokedTuple=" + lastPaletteInvokedTupleForTest +
             ", pointerClass=" + lastPalettePointerClassForTest +
+            ", hide=" + lastPaletteHideForTest +
             ", session=" + IsPaletteSessionActive();
 
         internal void SetInteractionContext(bool enabled)
@@ -402,6 +412,9 @@ namespace LaTeXBlocks.Word
                 if (lowLevelMouseHook == IntPtr.Zero)
                     throw new Win32Exception(Marshal.GetLastWin32Error(),
                         "Word could not register its Font Color mouse monitor.");
+                lowLevelKeyboardHook = SetLowLevelKeyboardHook(
+                    HookLowLevelKeyboard, lowLevelKeyboardHandler,
+                    GetModuleHandle(null), 0);
                 started = true;
             }
             catch
@@ -475,6 +488,15 @@ namespace LaTeXBlocks.Word
                     if (IsWordDialogWindow(hwnd))
                         TrackOrRememberMoreColorsDialog(hwnd);
                     return;
+                }
+
+                if (eventType == EventObjectHide)
+                {
+                    var hiddenRoot = GetAncestor(hwnd, GetAncestorRoot);
+                    lastPaletteHideForTest = hwnd.ToInt64() + "/" + objectId +
+                        "/" + childId + "/root=" + hiddenRoot.ToInt64() +
+                        "/paletteRoot=" + palettePopupRootHwnd.ToInt64();
+                    if (TryCancelHiddenPalette(hwnd)) return;
                 }
 
                 bool moreColorsOpen;
@@ -838,6 +860,8 @@ namespace LaTeXBlocks.Word
         {
             lock (stateGate)
             {
+                var root = GetAncestor(hwnd, GetAncestorRoot);
+                if (root != IntPtr.Zero) palettePopupRootHwnd = root;
                 paletteCandidateHwnd = hwnd;
                 paletteCandidateObjectId = objectId;
                 paletteCandidateChildId = childId;
@@ -853,6 +877,31 @@ namespace LaTeXBlocks.Word
             }
         }
 
+        private bool TryCancelHiddenPalette(IntPtr hwnd)
+        {
+            var stopCommit = false;
+            lock (stateGate)
+            {
+                if (palettePopupRootHwnd == IntPtr.Zero ||
+                    formatTransactionState.ActiveInteractionId == 0 ||
+                    formatTransactionState.ActiveOrigin !=
+                        WordFormatInteractionOrigin.FontColorPalette ||
+                    pendingPaletteCommitInteractionId != 0 ||
+                    !IsSameWindowTree(hwnd, palettePopupRootHwnd))
+                    return false;
+                var interactionId = formatTransactionState.ActiveInteractionId;
+                QueueFormatSignalLocked(formatTransactionState.Cancel(interactionId,
+                    WordFormatProperty.TextColor,
+                    WordFormatInteractionOrigin.FontColorPalette));
+                Interlocked.Exchange(ref paletteSessionUntilUtcTicks, 0);
+                palettePopupRootHwnd = IntPtr.Zero;
+                ClearPaletteCandidateLocked();
+                stopCommit = true;
+            }
+            if (stopCommit) StopPaletteCommitTimer();
+            return true;
+        }
+
         private void ClearPaletteCandidateLocked()
         {
             paletteCandidateHwnd = IntPtr.Zero;
@@ -860,6 +909,7 @@ namespace LaTeXBlocks.Word
             paletteCandidateChildId = 0;
                 paletteCandidateEventTime = 0;
                 paletteCandidateInteractionId = 0;
+                palettePopupRootHwnd = IntPtr.Zero;
                 ClearPalettePressLocked();
             Interlocked.Exchange(ref paletteCandidateUntilUtcTicks, 0);
         }
@@ -1081,6 +1131,50 @@ namespace LaTeXBlocks.Word
             return CallNextHookEx(lowLevelMouseHook, hookCode, wParam, lParam);
         }
 
+        private IntPtr OnLowLevelKeyboard(int hookCode, IntPtr wParam, IntPtr lParam)
+        {
+            var message = unchecked((uint)wParam.ToInt64());
+            if (!disposed && Volatile.Read(ref interactionContextEnabled) != 0 &&
+                hookCode >= HookCodeAction && lParam != IntPtr.Zero &&
+                (message == WindowMessageKeyDown ||
+                 message == WindowMessageSystemKeyDown))
+            {
+                try
+                {
+                    var keyboard = (LowLevelKeyboardData)Marshal.PtrToStructure(
+                        lParam, typeof(LowLevelKeyboardData));
+                    if (keyboard.VirtualKey == VirtualKeyEscape)
+                        CancelActivePaletteFromKeyboard();
+                }
+                catch
+                {
+                    // Never block global keyboard delivery. A malformed callback
+                    // simply leaves native Word to close the popup normally.
+                }
+            }
+            return CallNextHookEx(lowLevelKeyboardHook, hookCode, wParam, lParam);
+        }
+
+        private void CancelActivePaletteFromKeyboard()
+        {
+            lock (stateGate)
+            {
+                var interactionId = formatTransactionState.ActiveInteractionId;
+                if (interactionId == 0 ||
+                    formatTransactionState.ActiveOrigin !=
+                        WordFormatInteractionOrigin.FontColorPalette ||
+                    pendingPaletteCommitInteractionId != 0)
+                    return;
+                QueueFormatSignalLocked(formatTransactionState.Cancel(interactionId,
+                    WordFormatProperty.TextColor,
+                    WordFormatInteractionOrigin.FontColorPalette));
+                Interlocked.Exchange(ref paletteSessionUntilUtcTicks, 0);
+                palettePopupRootHwnd = IntPtr.Zero;
+                ClearPaletteCandidateLocked();
+            }
+            StopPaletteCommitTimer();
+        }
+
         private void QueueFormattingControlHitTest(NativePoint point)
         {
             // EVENT_OBJECT_INVOKED is optional for the main half of Office's split
@@ -1182,6 +1276,10 @@ namespace LaTeXBlocks.Word
             var mouseHook = Interlocked.Exchange(ref lowLevelMouseHook, IntPtr.Zero);
             if (mouseHook != IntPtr.Zero)
                 try { UnhookWindowsHookEx(mouseHook); } catch { }
+            var keyboardHook = Interlocked.Exchange(ref lowLevelKeyboardHook,
+                IntPtr.Zero);
+            if (keyboardHook != IntPtr.Zero)
+                try { UnhookWindowsHookEx(keyboardHook); } catch { }
             Unhook(ref invokedHook);
             Unhook(ref selectionHook);
             Unhook(ref focusHook);
@@ -1391,6 +1489,16 @@ namespace LaTeXBlocks.Word
             internal UIntPtr ExtraInfo;
         }
 
+        [StructLayout(LayoutKind.Sequential)]
+        private struct LowLevelKeyboardData
+        {
+            internal uint VirtualKey;
+            internal uint ScanCode;
+            internal uint Flags;
+            internal uint Time;
+            internal UIntPtr ExtraInfo;
+        }
+
         private delegate void WinEventDelegate(IntPtr hWinEventHook, uint eventType,
             IntPtr hwnd, int idObject, int idChild, uint idEventThread,
             uint dwmsEventTime);
@@ -1399,6 +1507,9 @@ namespace LaTeXBlocks.Word
             IntPtr longParameter);
 
         private delegate IntPtr LowLevelMouseDelegate(int hookCode,
+            IntPtr wordParameter, IntPtr longParameter);
+
+        private delegate IntPtr LowLevelKeyboardDelegate(int hookCode,
             IntPtr wordParameter, IntPtr longParameter);
 
         [DllImport("user32.dll", SetLastError = true)]
@@ -1427,6 +1538,12 @@ namespace LaTeXBlocks.Word
             SetLastError = true)]
         private static extern IntPtr SetLowLevelMouseHook(int hookId,
             LowLevelMouseDelegate hookProcedure, IntPtr moduleHandle, uint threadId);
+
+        [DllImport("user32.dll", EntryPoint = "SetWindowsHookExW",
+            SetLastError = true)]
+        private static extern IntPtr SetLowLevelKeyboardHook(int hookId,
+            LowLevelKeyboardDelegate hookProcedure, IntPtr moduleHandle,
+            uint threadId);
 
         [DllImport("user32.dll")]
         private static extern IntPtr CallNextHookEx(IntPtr hook, int hookCode,

@@ -5,6 +5,8 @@ Word-and-PowerPoint package line.
 
 ## [Unreleased]
 
+## [0.2.90] — 2026-08-09
+
 ### Word
 
 - Font-size-only refreshes of automatic inline formulas now replace SVG media
@@ -21,6 +23,8 @@ Word-and-PowerPoint package line.
 - Font Color palette tracking now identifies the dropdown once on its click. Swatch
   hover events only record the native event tuple and make no UI Automation or MSAA
   provider calls; accessibility classification is deferred until an actual click.
+  Escape closes and cancels the active palette transaction through a provider-free
+  keyboard signal, preventing stale sessions after a popup is dismissed.
 - Mixed text/formula colour reconciliation now suppresses intermediate Word repaints
   while applying native Graphics Fill to the formulas, then repaints once after the
   atomic undo transaction.

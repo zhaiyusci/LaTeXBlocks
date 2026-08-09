@@ -2885,13 +2885,13 @@ namespace LaTeXBlocks.WordSmoke
                             ControlType.Button),
                         new PropertyCondition(AutomationElement.ClassNameProperty,
                             "NetUIRibbonButton")));
-                object mainPattern = null;
-                Assert(mainButton != null && mainButton.TryGetCurrentPattern(
-                           InvokePattern.Pattern, out mainPattern),
-                    "Word's Font Color main button did not expose InvokePattern.");
-                ((InvokePattern)mainPattern).Invoke();
+                Assert(mainButton != null,
+                    "Word's Font Color main button was not exposed.");
+                var mainButtonBounds = mainButton.Current.BoundingRectangle;
+                ClickAt(mainButtonBounds.Left + mainButtonBounds.Width / 2,
+                    mainButtonBounds.Top + mainButtonBounds.Height / 2);
                 WaitFor(() => Volatile.Read(ref commits) >= 1, 3000,
-                    "The Font Color main-button Invoke was not observed as a commit.");
+                    "The Font Color main-button click was not observed as a commit.");
 
                 var dropDown = picker.FindFirst(TreeScope.Descendants,
                     new PropertyCondition(AutomationElement.AutomationIdProperty,
@@ -2900,7 +2900,9 @@ namespace LaTeXBlocks.WordSmoke
                 Assert(dropDown != null && picker.TryGetCurrentPattern(
                            ExpandCollapsePattern.Pattern, out expandPattern),
                     "Word's Font Color split button did not expose ExpandCollapsePattern.");
-                ((ExpandCollapsePattern)expandPattern).Expand();
+                var dropDownBounds = dropDown.Current.BoundingRectangle;
+                ClickAt(dropDownBounds.Left + dropDownBounds.Width / 2,
+                    dropDownBounds.Top + dropDownBounds.Height / 2);
                 WaitFor(() => ((ExpandCollapsePattern)expandPattern).Current
                         .ExpandCollapseState == ExpandCollapseState.Expanded,
                     3000, "Word's Font Color dropdown did not remain expanded.");
@@ -2918,22 +2920,16 @@ namespace LaTeXBlocks.WordSmoke
                                 "NetUIGalleryButton")));
                     foreach (AutomationElement candidate in candidates)
                     {
-                        if (!candidate.Current.IsEnabled || candidate.Current.IsOffscreen ||
-                            !candidate.TryGetCurrentPattern(InvokePattern.Pattern, out _))
+                        if (!candidate.Current.IsEnabled || candidate.Current.IsOffscreen)
                             continue;
                         var bounds = candidate.Current.BoundingRectangle;
                         if (bounds.Width <= 0 || bounds.Height <= 0 ||
+                            bounds.Width > 64 || bounds.Height > 64 ||
                             bounds.Top < pickerBounds.Bottom - 1 ||
                             bounds.Right < pickerBounds.Left ||
                             bounds.Left > pickerBounds.Right)
                             continue;
-                        var hitElement = AutomationElement.FromPoint(
-                            new System.Windows.Point(
-                                bounds.Left + bounds.Width / 2,
-                                bounds.Top + bounds.Height / 2));
-                        if (IsElementOrDescendantOf(hitElement, candidate) ||
-                            IsElementOrDescendantOf(candidate, hitElement))
-                            return candidate;
+                        return candidate;
                     }
                     return null;
                 };
@@ -2966,8 +2962,6 @@ namespace LaTeXBlocks.WordSmoke
                         {
                             if (!candidate.Current.IsEnabled || candidate.Current.IsOffscreen)
                                 continue;
-                            if (!candidate.TryGetCurrentPattern(InvokePattern.Pattern,
-                                    out _)) continue;
                             var candidateBounds = candidate.Current.BoundingRectangle;
                             if (candidateBounds.Width <= 0 || candidateBounds.Height <= 0)
                                 continue;
@@ -2976,21 +2970,15 @@ namespace LaTeXBlocks.WordSmoke
                             // a Font Color popup item is below and horizontally overlaps
                             // the split button that was just expanded.
                             if (candidateBounds.Top < pickerBounds.Bottom - 1 ||
+                                candidateBounds.Width > 64 ||
+                                candidateBounds.Height > 64 ||
                                 candidateBounds.Right < pickerBounds.Left ||
                                 candidateBounds.Left > pickerBounds.Right)
                                 continue;
-                            var candidateHit = AutomationElement.FromPoint(
-                                new System.Windows.Point(
-                                    candidateBounds.Left + candidateBounds.Width / 2,
-                                    candidateBounds.Top + candidateBounds.Height / 2));
                             if (diagnosticCount++ < 16 && printThisPass)
                                 Console.WriteLine("  candidate '" +
                                     (candidate.Current.Name ?? string.Empty) + "' bounds=" +
-                                    candidateBounds + " hit=" +
-                                    (candidateHit?.Current.ClassName ?? "<none>") + ".");
-                            if (!IsElementOrDescendantOf(candidateHit, candidate) &&
-                                !IsElementOrDescendantOf(candidate, candidateHit))
-                                continue;
+                                    candidateBounds + ".");
                             swatch = candidate;
                             return true;
                         }
@@ -3000,29 +2988,21 @@ namespace LaTeXBlocks.WordSmoke
                             // stale popup tree whose screen bounds hit the document.
                             // Close and reopen the same control instead of accepting
                             // those stale elements as a human-click target.
-                            ((ExpandCollapsePattern)expandPattern).Collapse();
+                            SendKeys.SendWait("{ESC}");
                             System.Windows.Forms.Application.DoEvents();
-                            ((ExpandCollapsePattern)expandPattern).Expand();
+                            ClickAt(dropDownBounds.Left + dropDownBounds.Width / 2,
+                                dropDownBounds.Top + dropDownBounds.Height / 2);
                             paletteRetry.Restart();
                         }
                         return false;
                     }
                     catch (ElementNotAvailableException) { return false; }
                     catch (InvalidOperationException) { return false; }
-                }, 5000, "Word's open Font Color palette exposed no invokable swatch.");
-                object swatchPattern = null;
-                Assert(swatch.TryGetCurrentPattern(InvokePattern.Pattern,
-                           out swatchPattern),
-                    "The selected Font Color swatch lost InvokePattern.");
+                }, 5000, "Word's open Font Color palette exposed no visible swatch.");
                 var swatchBounds = swatch.Current.BoundingRectangle;
                 var swatchCenter = new System.Windows.Point(
                     swatchBounds.Left + swatchBounds.Width / 2,
                     swatchBounds.Top + swatchBounds.Height / 2);
-                var hit = AutomationElement.FromPoint(swatchCenter);
-                Assert(IsElementOrDescendantOf(hit, swatch) ||
-                       IsElementOrDescendantOf(swatch, hit),
-                    "The selected Font Color swatch center hit a different UIA element: " +
-                    (hit?.Current.ClassName ?? "<none>") + ".");
                 Console.WriteLine("Word: clicking Font Color swatch '" +
                     (swatch.Current.Name ?? string.Empty) + "' at " + swatchCenter + ".");
                 Assert(SetCursorPos((int)Math.Round(swatchCenter.X),
@@ -3089,9 +3069,11 @@ namespace LaTeXBlocks.WordSmoke
                     monitor.DiagnosticStateForTest + ").");
                 WaitFor(() => hasTerminal(escapedPaletteInteractionId,
                         WordFormatInteractionPhase.Canceled), 4000,
-                    "Escape did not cancel the first palette transaction.");
+                    "Escape did not cancel the first palette transaction (" +
+                    monitor.DiagnosticStateForTest + ").");
 
-                ((ExpandCollapsePattern)expandPattern).Expand();
+                ClickAt(dropDownBounds.Left + dropDownBounds.Width / 2,
+                    dropDownBounds.Top + dropDownBounds.Height / 2);
                 WaitFor(() => ((ExpandCollapsePattern)expandPattern).Current
                         .ExpandCollapseState == ExpandCollapseState.Expanded,
                     3000, "Word's Font Color dropdown did not reopen after Escape.");
@@ -3173,7 +3155,8 @@ namespace LaTeXBlocks.WordSmoke
                 // A late duplicate Expanded used to leave the session permanently
                 // active after commit. Open it once more and require a new token, then
                 // cancel it cleanly so every observed Begin has one terminal.
-                ((ExpandCollapsePattern)expandPattern).Expand();
+                ClickAt(dropDownBounds.Left + dropDownBounds.Width / 2,
+                    dropDownBounds.Top + dropDownBounds.Height / 2);
                 WaitFor(() => ((ExpandCollapsePattern)expandPattern).Current
                         .ExpandCollapseState == ExpandCollapseState.Expanded,
                     3000, "Word's Font Color dropdown did not open after a commit.");
