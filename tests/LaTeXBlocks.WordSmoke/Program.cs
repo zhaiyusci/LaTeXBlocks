@@ -33,7 +33,12 @@ namespace LaTeXBlocks.WordSmoke
             WordInterop.Document document = null;
             StemTeXBackend renderer = null;
             var ownsWord = false;
-            var artifactDirectory = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "artifacts");
+            // A crashed or externally terminated Office smoke can leave its last
+            // document locked by an orphaned WINWORD process. Give each runner an
+            // isolated artifact directory so that a stale diagnostic file cannot
+            // turn the next otherwise-independent run into a false SaveAs failure.
+            var artifactDirectory = Path.Combine(AppDomain.CurrentDomain.BaseDirectory,
+                "artifacts", "run-" + Process.GetCurrentProcess().Id);
             var documentPath = Path.Combine(artifactDirectory, "LaTeXBlocks-Smoke.docx");
             var numberedDocumentPath = Path.Combine(artifactDirectory, "LaTeXBlocks-Numbered-Smoke.docx");
             var spacingDocumentPath = Path.Combine(artifactDirectory, "LaTeXBlocks-Inline-Spacing-Smoke.docx");
@@ -490,6 +495,16 @@ namespace LaTeXBlocks.WordSmoke
                 Assert(LaTeXBlockService.PrepareDisplayMathSource("\\[E=mc^2\\]") ==
                     "\\(\n\\displaystyle\nE=mc^2\n\\)",
                     "The numbered-equation render wrapper did not preserve the formula body.");
+                Assert(LaTeXBlockService.IsDisplayMathSource("\\[E=mc^2\\]") &&
+                       LaTeXBlockService.IsDisplayMathSource("$$E=mc^2$$") &&
+                       LaTeXBlockService.IsDisplayMathSource(
+                           "\\begin{equation*}E=mc^2\\end{equation*}") &&
+                       !LaTeXBlockService.IsDisplayMathSource("$E=mc^2$") &&
+                       LaTeXBlockService.ResolveImportedFormulaMode(LaTeXContentKind.InlineMath) ==
+                           LaTeXBlockLayoutMode.Auto &&
+                       LaTeXBlockService.ResolveImportedFormulaMode(LaTeXContentKind.DisplayMath) ==
+                           LaTeXBlockLayoutMode.Auto,
+                    "Display math was confused with a user-sized Fixed Block.");
                 const string commentedNumberedSource =
                     "\\begin {align}\r\nE&=mc^2 % exact source comment\r\n\\end {align}";
                 var canonicalCommentedNumberedSource =
@@ -1918,6 +1933,7 @@ namespace LaTeXBlocks.WordSmoke
                 document = null;
 
                 RunMixedSelectionTextColorSmoke(word, service, profile, wordRed, wordBlue);
+                RunMixedSelectionFontSizeSmoke(word, service, profile, wordRed, wordBlue);
 
                 document = word.Documents.Add();
                 document.Content.Font.Name = "Times New Roman";
@@ -1929,12 +1945,33 @@ namespace LaTeXBlocks.WordSmoke
                 Assert(display.AlternativeText == displaySource &&
                        LaTeXBlockService.TextColorsEqual((int)display.Range.Font.Color, wordRed),
                     "A fixed-width display formula did not inherit Word's text color.");
+                Assert(LaTeXBlockService.TryReadContract(display,
+                           out var fixedColorMetadata, out _),
+                    "The external fixed-Block color fixture lost its contract.");
+                var fixedColorStart = display.Range.Start;
+                var fixedColorWidth = display.Width;
+                var fixedColorHeight = display.Height;
                 display.Range.Font.Color = (WordInterop.WdColor)wordBlue;
-                var recoloredDisplay = service.UpdateBlock(display, displaySource, 300,
-                    LaTeXBlockLayoutMode.Fixed, profile, 14, false);
-                Assert(LaTeXBlockService.TextColorsEqual((int)recoloredDisplay.Range.Font.Color,
-                           wordBlue),
-                    "Updating a fixed-width display formula lost the Word text color.");
+                var fixedFillApplied = service.TryApplyGraphicFillsBatch(
+                           new List<LaTeXBlockColorUpdate>
+                           {
+                               new LaTeXBlockColorUpdate(display, wordBlue)
+                           });
+                var fixedFontColor = (int)display.Range.Font.Color;
+                var fixedFillColor = (int)display.Fill.ForeColor.RGB;
+                Assert(fixedFillApplied &&
+                       LaTeXBlockService.TextColorsEqual(fixedFontColor, wordBlue) &&
+                       LaTeXBlockService.TextColorsEqual(fixedFillColor, wordBlue) &&
+                       display.Range.Start == fixedColorStart &&
+                       Math.Abs(display.Width - fixedColorWidth) < 0.01 &&
+                       Math.Abs(display.Height - fixedColorHeight) < 0.01 &&
+                       LaTeXBlockService.TryReadContract(display,
+                           out var recoloredFixedMetadata, out var recoloredFixedSource) &&
+                       recoloredFixedMetadata.Id == fixedColorMetadata.Id &&
+                       recoloredFixedSource == displaySource,
+                    "An external fixed-Block color change did not remain a Graphics Fill operation. " +
+                    "Applied=" + fixedFillApplied + ", Font.Color=" + fixedFontColor +
+                    ", Fill=" + fixedFillColor + ".");
                 document.Close(WordInterop.WdSaveOptions.wdDoNotSaveChanges);
                 Release(document);
                 document = null;
@@ -1949,13 +1986,32 @@ namespace LaTeXBlocks.WordSmoke
                 Assert(numbered.AlternativeText == displaySource &&
                        LaTeXBlockService.TextColorsEqual((int)numbered.Range.Font.Color, wordRed),
                     "A numbered display formula did not inherit Word's text color.");
+                Assert(LaTeXBlockService.TryReadContract(numbered,
+                           out var numberedColorMetadata, out _),
+                    "The external numbered-formula color fixture lost its contract.");
+                var numberedColorStart = numbered.Range.Start;
+                var numberedColorWidth = numbered.Width;
+                var numberedColorHeight = numbered.Height;
                 numbered.Range.Font.Color = (WordInterop.WdColor)wordBlue;
-                var recoloredNumbered = service.UpdateBlock(numbered, displaySource, 360,
-                    LaTeXBlockLayoutMode.Auto, profile, 14, false);
-                Assert(recoloredNumbered.AlternativeText == displaySource &&
-                       LaTeXBlockService.TextColorsEqual((int)recoloredNumbered.Range.Font.Color,
-                           wordBlue),
-                    "Updating a numbered display formula lost the Word text color.");
+                Assert(service.TryApplyGraphicFillsBatch(
+                           new List<LaTeXBlockColorUpdate>
+                           {
+                               new LaTeXBlockColorUpdate(numbered, wordBlue)
+                           }) &&
+                       numbered.AlternativeText == displaySource &&
+                       LaTeXBlockService.TextColorsEqual(
+                           (int)numbered.Range.Font.Color, wordBlue) &&
+                       LaTeXBlockService.TextColorsEqual(
+                           (int)numbered.Fill.ForeColor.RGB, wordBlue) &&
+                       numbered.Range.Start == numberedColorStart &&
+                       Math.Abs(numbered.Width - numberedColorWidth) < 0.01 &&
+                       Math.Abs(numbered.Height - numberedColorHeight) < 0.01 &&
+                       LaTeXBlockService.TryReadContract(numbered,
+                           out var recoloredNumberedMetadata,
+                           out var recoloredNumberedSource) &&
+                       recoloredNumberedMetadata.Id == numberedColorMetadata.Id &&
+                       recoloredNumberedSource == displaySource,
+                    "An external numbered-formula color change replaced or moved its Office object instead of using Graphics Fill.");
                 Console.WriteLine("Word: text color insertion, refresh, and persistence passed.");
             }
             finally
@@ -2147,8 +2203,213 @@ namespace LaTeXBlocks.WordSmoke
             }
         }
 
+        private static void RunMixedSelectionFontSizeSmoke(WordInterop.Application word,
+            LaTeXBlockService service, string profile, int firstColor, int secondColor)
+        {
+            const string firstSource = "$a^2$";
+            const string secondSource = "$b_2$";
+            const string fixtureText = "first xx tail\rsecond yy tail\routside";
+            const double originalFontSizePt = 14;
+            const double changedFontSizePt = 18;
+            const int firstBold = -1;
+            const int firstItalic = 0;
+            const int secondBold = 0;
+            const int secondItalic = -1;
+            const int firstNoProofing = -1;
+            const int secondNoProofing = 0;
+            var firstUnderline = WordInterop.WdUnderline.wdUnderlineSingle;
+            var secondUnderline = WordInterop.WdUnderline.wdUnderlineDouble;
+            var firstHighlight = WordInterop.WdColorIndex.wdBrightGreen;
+            var secondHighlight = WordInterop.WdColorIndex.wdTurquoise;
+            WordInterop.Document document = null;
+            try
+            {
+                Console.WriteLine("Word: testing Font Size across paragraphs...");
+                document = word.Documents.Add();
+                document.Range(0, 0).Text = fixtureText;
+                document.Content.Font.Name = "Times New Roman";
+                document.Content.Font.Size = (float)originalFontSizePt;
+
+                var firstPlaceholder = (document.Content.Text ?? string.Empty)
+                    .IndexOf("xx", StringComparison.Ordinal);
+                document.Range(firstPlaceholder, firstPlaceholder + 2).Select();
+                var firstRender = service.RenderPreview(firstSource, 360,
+                    LaTeXBlockLayoutMode.Auto, profile, originalFontSizePt, false,
+                    firstColor);
+                var first = service.InsertRendered(firstSource, 360,
+                    LaTeXBlockLayoutMode.Auto, firstRender);
+
+                var secondPlaceholder = (document.Content.Text ?? string.Empty)
+                    .IndexOf("yy", StringComparison.Ordinal);
+                document.Range(secondPlaceholder, secondPlaceholder + 2).Select();
+                var secondRender = service.RenderPreview(secondSource, 360,
+                    LaTeXBlockLayoutMode.Auto, profile, originalFontSizePt, false,
+                    secondColor);
+                var second = service.InsertRendered(secondSource, 360,
+                    LaTeXBlockLayoutMode.Auto, secondRender);
+                Assert(LaTeXBlockService.TryReadContract(first,
+                           out var firstMetadata, out var firstStoredSource) &&
+                       firstStoredSource == firstSource,
+                    "The cross-paragraph Font Size fixture did not create its first formula.");
+                Assert(LaTeXBlockService.TryReadContract(second,
+                           out var secondMetadata, out var secondStoredSource) &&
+                       secondStoredSource == secondSource,
+                    "The cross-paragraph Font Size fixture did not create its second formula.");
+
+                first.Range.Font.Color = (WordInterop.WdColor)firstColor;
+                first.Range.Font.Bold = firstBold;
+                first.Range.Font.Italic = firstItalic;
+                first.Range.Font.Underline = firstUnderline;
+                first.Range.NoProofing = firstNoProofing;
+                first.Range.HighlightColorIndex = firstHighlight;
+                first.Range.Font.Name = "Arial";
+                first.Range.Font.Spacing = 1.25f;
+                first.Range.Font.Position = 7;
+                first.Range.Font.Subscript = -1;
+                LaTeXBlockService.ApplyGraphicFill(first, firstColor);
+
+                second.Range.Font.Color = (WordInterop.WdColor)secondColor;
+                second.Range.Font.Bold = secondBold;
+                second.Range.Font.Italic = secondItalic;
+                second.Range.Font.Underline = secondUnderline;
+                second.Range.NoProofing = secondNoProofing;
+                second.Range.HighlightColorIndex = secondHighlight;
+                second.Range.Font.Name = "Calibri";
+                second.Range.Font.Scaling = 105;
+                second.Range.Font.Position = -6;
+                second.Range.Font.Superscript = -1;
+                LaTeXBlockService.ApplyGraphicFill(second, secondColor);
+
+                var secondParagraph = second.Range.Paragraphs[1].Range;
+                var selectionStart = first.Range.Paragraphs[1].Range.Start;
+                var selectionEnd = secondParagraph.End;
+                var paragraphCount = document.Paragraphs.Count;
+                var textBefore = document.Content.Text;
+                document.Range(selectionStart, selectionEnd).Select();
+                word.Selection.Font.Size = (float)changedFontSizePt;
+
+                var changedFirstRender = service.RenderCommittedAsync(firstSource, 360,
+                    LaTeXBlockLayoutMode.Auto, profile, changedFontSizePt, false,
+                    firstColor).GetAwaiter().GetResult();
+                var changedSecondRender = service.RenderCommittedAsync(secondSource, 360,
+                    LaTeXBlockLayoutMode.Auto, profile, changedFontSizePt, false,
+                    secondColor).GetAwaiter().GetResult();
+                var firstRange = first.Range;
+                var firstParagraph = firstRange.Paragraphs[1].Range;
+                var secondRange = second.Range;
+                secondParagraph = secondRange.Paragraphs[1].Range;
+                service.UpdateRenderedBatch(new List<LaTeXBlockBatchUpdate>
+                {
+                    new LaTeXBlockBatchUpdate(first, firstSource, 360,
+                        changedFirstRender, firstMetadata, firstRange,
+                        firstParagraph.Start, firstParagraph.End),
+                    new LaTeXBlockBatchUpdate(second, secondSource, 360,
+                        changedSecondRender, secondMetadata, secondRange,
+                        secondParagraph.Start, secondParagraph.End)
+                }, true);
+
+                var changedFirst = FindInlineFormula(document, firstMetadata.Id);
+                var changedSecond = FindInlineFormula(document, secondMetadata.Id);
+                Assert(changedFirst != null && changedSecond != null,
+                    "The cross-paragraph Font Size update lost a formula.");
+                AssertAutoFormatRefreshState(changedFirst, firstMetadata.Id,
+                    firstSource, 360, changedFontSizePt, firstColor,
+                    changedFirstRender.DepthPt, firstBold, firstItalic,
+                    firstUnderline, firstNoProofing, firstHighlight,
+                    "First cross-paragraph Font Size formula");
+                AssertAutoFormatRefreshState(changedSecond, secondMetadata.Id,
+                    secondSource, 360, changedFontSizePt, secondColor,
+                    changedSecondRender.DepthPt, secondBold, secondItalic,
+                    secondUnderline, secondNoProofing, secondHighlight,
+                    "Second cross-paragraph Font Size formula");
+                Assert(changedFirst.Range.Font.Name == "Arial" &&
+                       Math.Abs((double)changedFirst.Range.Font.Spacing - 1.25) < 0.001 &&
+                       changedSecond.Range.Font.Name == "Calibri" &&
+                       changedSecond.Range.Font.Scaling == 105,
+                    "A cross-paragraph Font Size update reset or exchanged run properties.");
+                Assert(document.Paragraphs.Count == paragraphCount &&
+                       document.Content.Text == textBefore,
+                    "A cross-paragraph Font Size update changed text or paragraph marks.");
+
+                // The asynchronous drawing replacement is one custom Word history
+                // entry. Undo must restore both old drawings together; a second Undo
+                // remains available for Word's preceding native Font Size command.
+                document.Undo();
+                var undoneFirst = FindInlineFormula(document, firstMetadata.Id);
+                var undoneSecond = FindInlineFormula(document, secondMetadata.Id);
+                Assert(undoneFirst != null && undoneSecond != null &&
+                       LaTeXBlockService.TryReadContract(undoneFirst,
+                           out var undoneFirstMetadata, out _) &&
+                       LaTeXBlockService.TryReadContract(undoneSecond,
+                           out var undoneSecondMetadata, out _) &&
+                       Math.Abs(undoneFirstMetadata.FontSizePt -
+                           originalFontSizePt) < 0.001 &&
+                       Math.Abs(undoneSecondMetadata.FontSizePt -
+                           originalFontSizePt) < 0.001 &&
+                       Math.Abs((double)undoneFirst.Range.Font.Size -
+                           changedFontSizePt) < 0.001 &&
+                       Math.Abs((double)undoneSecond.Range.Font.Size -
+                           changedFontSizePt) < 0.001 &&
+                       undoneFirst.Range.Font.Position == 7 &&
+                       undoneSecond.Range.Font.Position == -6 &&
+                       LaTeXBlockService.TextColorsEqual(
+                           (int)undoneFirst.Fill.ForeColor.RGB, firstColor) &&
+                       LaTeXBlockService.TextColorsEqual(
+                           (int)undoneSecond.Fill.ForeColor.RGB, secondColor),
+                    "One Undo did not restore both pre-refresh drawings and their Graphics Fill together.");
+
+                document.Redo();
+                var redoneFirst = FindInlineFormula(document, firstMetadata.Id);
+                var redoneSecond = FindInlineFormula(document, secondMetadata.Id);
+                Assert(redoneFirst != null && redoneSecond != null &&
+                       LaTeXBlockService.TryReadContract(redoneFirst,
+                           out var redoneFirstMetadata, out _) &&
+                       LaTeXBlockService.TryReadContract(redoneSecond,
+                           out var redoneSecondMetadata, out _) &&
+                       Math.Abs(redoneFirstMetadata.FontSizePt -
+                           changedFontSizePt) < 0.001 &&
+                       Math.Abs(redoneSecondMetadata.FontSizePt -
+                           changedFontSizePt) < 0.001 &&
+                       redoneFirst.Range.Font.Position == -(int)Math.Round(
+                           changedFirstRender.DepthPt, MidpointRounding.AwayFromZero) &&
+                       redoneSecond.Range.Font.Position == -(int)Math.Round(
+                           changedSecondRender.DepthPt, MidpointRounding.AwayFromZero),
+                    "One Redo did not restore both refreshed formulas and their recomputed baselines.");
+                Assert(document.Paragraphs.Count == paragraphCount &&
+                       document.Content.Text == textBefore,
+                    "Undo/Redo of a cross-paragraph Font Size refresh changed paragraph structure.");
+                Console.WriteLine("Word: cross-paragraph Font Size refresh passed.");
+            }
+            finally
+            {
+                if (document != null)
+                {
+                    document.Close(WordInterop.WdSaveOptions.wdDoNotSaveChanges);
+                    Release(document);
+                }
+            }
+        }
+
         private static void RunWordFormatInteractionStateSmoke()
         {
+            var ordinaryAutoMetadata = LaTeXBlockMetadata.Create(360, 2,
+                LaTeXBlockLayoutMode.Auto, 14, LaTeXBlockRole.Content);
+            var numberedAutoMetadata = LaTeXBlockMetadata.Create(360, 2,
+                LaTeXBlockLayoutMode.Auto, 14,
+                LaTeXBlockRole.NumberedEquation);
+            var fixedContentMetadata = LaTeXBlockMetadata.Create(360, 2,
+                LaTeXBlockLayoutMode.Fixed, 14, LaTeXBlockRole.Content);
+            Assert(LaTeXBlockService.CanShareOrdinaryAutoFormatBatch(
+                       ordinaryAutoMetadata, false) &&
+                   !LaTeXBlockService.CanShareOrdinaryAutoFormatBatch(
+                       numberedAutoMetadata, false) &&
+                   !LaTeXBlockService.CanShareOrdinaryAutoFormatBatch(
+                       fixedContentMetadata, false) &&
+                   !LaTeXBlockService.CanShareOrdinaryAutoFormatBatch(
+                       ordinaryAutoMetadata, true),
+                "Format batching did not distinguish ordinary Auto inline formulas " +
+                "from numbered equations, fixed Blocks, or width changes.");
+
             Console.WriteLine("Word: testing abstract format-interaction transactions...");
             var state = new WordFormatTransactionState();
             var began = state.Begin(WordFormatProperty.TextColor,
@@ -3227,7 +3488,7 @@ namespace LaTeXBlocks.WordSmoke
                 MidpointRounding.AwayFromZero);
             var hasContract = LaTeXBlockService.TryReadContract(shape,
                 out var metadata, out var source);
-            Assert(hasContract &&
+            var valid = hasContract &&
                    metadata.Id == expectedId && source == expectedSource &&
                    metadata.Role == LaTeXBlockRole.Content &&
                    metadata.Mode == LaTeXBlockLayoutMode.Auto &&
@@ -3248,9 +3509,28 @@ namespace LaTeXBlocks.WordSmoke
                    shape.Range.Font.Italic == expectedItalic &&
                    shape.Range.Font.Underline == expectedUnderline &&
                    shape.Range.NoProofing == expectedNoProofing &&
-                   shape.Range.HighlightColorIndex == expectedHighlight,
-                context + " did not preserve identity/source/layout/run or Graphics Fill formatting, " +
-                "or did not derive its baseline from the new TeX depth.");
+                   shape.Range.HighlightColorIndex == expectedHighlight;
+            if (valid) return;
+            throw new InvalidOperationException(context +
+                " did not preserve identity/source/layout/run or Graphics Fill formatting, " +
+                "or did not derive its baseline from the new TeX depth. Actual: contract=" +
+                hasContract + ", id=" + (hasContract ? metadata.Id.ToString("D") : "-") +
+                ", source=" + (source ?? "<null>") +
+                ", width=" + (hasContract ? metadata.WidthPt.ToString("0.###") : "-") +
+                ", metadata-size=" + (hasContract ? metadata.FontSizePt.ToString("0.###") : "-") +
+                ", depth=" + (hasContract ? metadata.DepthPt.ToString("0.###") : "-") +
+                ", run-size=" + shape.Range.Font.Size +
+                ", size-bi=" + shape.Range.Font.SizeBi +
+                ", font-color=" + (int)shape.Range.Font.Color +
+                ", fill=" + (int)shape.Fill.ForeColor.RGB +
+                ", position=" + shape.Range.Font.Position +
+                ", sub=" + shape.Range.Font.Subscript +
+                ", super=" + shape.Range.Font.Superscript +
+                ", bold=" + shape.Range.Font.Bold +
+                ", italic=" + shape.Range.Font.Italic +
+                ", underline=" + shape.Range.Font.Underline +
+                ", no-proof=" + shape.Range.NoProofing +
+                ", highlight=" + shape.Range.HighlightColorIndex + ".");
         }
 
         private static void AssertInlineWordJoinerBoundary(WordInterop.InlineShape shape,

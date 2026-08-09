@@ -444,7 +444,58 @@ namespace LaTeXBlocks.Word
             var requests = CaptureTextColorRefreshes(interaction.Formulas,
                 interaction.SelectionLease);
             RememberSelection(Application.Selection);
-            QueueFormatBatch(requests, interaction.SelectionLease);
+            TryApplyExternalColorRequests(requests);
+        }
+
+        private bool TryApplyExternalColorRequests(
+            IList<FormatRefreshRequest> requests)
+        {
+            if (shuttingDown || requests == null || requests.Count == 0)
+                return false;
+            var updates = new List<LaTeXBlockColorUpdate>(requests.Count);
+            foreach (var request in requests)
+            {
+                var shape = request.Shape;
+                if (shape == null || !request.ChangesTextColor ||
+                    request.ChangesFontSize || request.ChangesWidth ||
+                    !request.PreviousTextColor.HasValue ||
+                    !LaTeXBlockService.TryReadContract(shape, out var metadata,
+                        out var source) || source != request.Source ||
+                    !SameMetadataState(metadata, request.Metadata))
+                    return false;
+                var liveColor = LaTeXBlockService.ResolveTextColor(shape.Range);
+                if (!LaTeXBlockService.TextColorsEqual(liveColor,
+                        request.TextColor))
+                    return false;
+                updates.Add(new LaTeXBlockColorUpdate(shape, request.TextColor));
+            }
+
+            var applied = false;
+            var screenUpdating = true;
+            try { screenUpdating = Application.ScreenUpdating; }
+            catch (COMException) { }
+            try
+            {
+                try { Application.ScreenUpdating = false; }
+                catch (COMException) { }
+                RunProgrammaticMutation(() =>
+                {
+                    applied = Blocks.TryApplyGraphicFillsBatch(updates);
+                });
+            }
+            finally
+            {
+                try { Application.ScreenUpdating = screenUpdating; }
+                catch (COMException) { }
+            }
+            if (!applied) return false;
+            foreach (var request in requests)
+            {
+                pendingFormatRefreshes.Remove(request.ShapeKey);
+                pendingFormatBatchTargets.Remove(request.ShapeKey);
+            }
+            ribbon?.InvalidateWidthControl();
+            return true;
         }
 
         private void QueueFormatBatch(IList<FormatRefreshRequest> requests,
@@ -491,7 +542,9 @@ namespace LaTeXBlocks.Word
                     tasks.Add(service.RenderCommittedAsync(request.Source,
                         request.Metadata.WidthPt, request.Metadata.Mode, batch.Profile,
                         request.FontSizePt,
-                        request.Metadata.Role == LaTeXBlockRole.NumberedEquation,
+                        request.Metadata.Role == LaTeXBlockRole.NumberedEquation ||
+                        request.Metadata.Mode == LaTeXBlockLayoutMode.Auto &&
+                        LaTeXBlockService.IsDisplayMathSource(request.Source),
                         request.TextColor));
                 var renders = await Task.WhenAll(tasks).ConfigureAwait(false);
                 await InvokeOnWordUiAsync(() => CompleteFormatBatch(service, batch,
@@ -532,9 +585,6 @@ namespace LaTeXBlocks.Word
                 if (!LaTeXBlockService.TextColorsEqual(liveColor,
                         request.TextColor) || liveSize < 1 || liveSize > 200 ||
                     Math.Abs(liveSize - request.FontSizePt) >= 0.001)
-                    return false;
-                if (metadata.Mode != LaTeXBlockLayoutMode.Auto ||
-                    metadata.Role != LaTeXBlockRole.Content)
                     return false;
                 updates.Add(new LaTeXBlockColorUpdate(shape, request.TextColor));
             }
@@ -606,8 +656,9 @@ namespace LaTeXBlocks.Word
                                 Math.Abs(liveSize - request.FontSizePt) >= 0.001)
                                 continue;
                             var paragraph = shapeRange.Paragraphs[1].Range;
-                            if (currentMetadata.Mode != LaTeXBlockLayoutMode.Auto ||
-                                currentMetadata.Role != LaTeXBlockRole.Content ||
+                            var ordinaryAuto = LaTeXBlockService.CanShareOrdinaryAutoFormatBatch(
+                                currentMetadata, request.ChangesWidth);
+                            if (!ordinaryAuto ||
                                 (batchParagraphStart.HasValue &&
                                  (batchParagraphStart.Value != paragraph.Start ||
                                   batchParagraphEnd.Value != paragraph.End)))
@@ -621,8 +672,8 @@ namespace LaTeXBlocks.Word
                                 request.Source, request.Metadata.WidthPt,
                                 renders[index], currentMetadata, shapeRange,
                                 paragraph.Start, paragraph.End));
-                            if (!request.ChangesFontSize || request.ChangesTextColor ||
-                                request.ChangesWidth)
+                            if (!ordinaryAuto || !request.ChangesFontSize ||
+                                request.ChangesTextColor)
                                 canReplaceSvgMediaDirectly = false;
                         }
                         catch (Exception exception)
@@ -834,12 +885,13 @@ namespace LaTeXBlocks.Word
                     prepared.Add(new PreparedLaTeXImportSegment(segment, null, 0));
                     continue;
                 }
-                var mode = segment.Kind == LaTeXContentKind.InlineMath
-                    ? LaTeXBlockLayoutMode.Auto : LaTeXBlockLayoutMode.Fixed;
-                var width = mode == LaTeXBlockLayoutMode.Auto
-                    ? 360 : LaTeXBlockWidthPolicy.ResolveDefaultFixedWidth();
+                // Display math is still a natural-size formula.  Its independent
+                // line and paragraph placement belong to Word; only an explicit
+                // Block owns a fixed outer frame.
+                var mode = LaTeXBlockService.ResolveImportedFormulaMode(segment.Kind);
+                const double width = 360;
                 var render = Blocks.RenderPreview(segment.Source, width, mode, profile,
-                    fontSizePt, false, textColor);
+                    fontSizePt, segment.Kind == LaTeXContentKind.DisplayMath, textColor);
                 prepared.Add(new PreparedLaTeXImportSegment(segment, render, width));
             }
 
@@ -881,8 +933,7 @@ namespace LaTeXBlocks.Word
                         }
                         continue;
                     }
-                    var mode = item.Segment.Kind == LaTeXContentKind.InlineMath
-                        ? LaTeXBlockLayoutMode.Auto : LaTeXBlockLayoutMode.Fixed;
+                    var mode = LaTeXBlockService.ResolveImportedFormulaMode(item.Segment.Kind);
                     // Restore ordinary insertion formatting before each drawing so
                     // formula-owned run properties cannot leak into following text.
                     // The drawing baseline itself depends only on its TeX depth.
@@ -1018,7 +1069,9 @@ namespace LaTeXBlocks.Word
             using (var editor = new LaTeXBlockEditorForm(Blocks, source, metadata.WidthPt,
                 metadata.Mode, currentProfile ?? Renderers.DefaultAvailableProfile,
                 SetCurrentProfile, true, metadata.FontSizePt, null,
-                metadata.Role == LaTeXBlockRole.NumberedEquation, textColor, style,
+                metadata.Role == LaTeXBlockRole.NumberedEquation ||
+                metadata.Mode == LaTeXBlockLayoutMode.Auto &&
+                LaTeXBlockService.IsDisplayMathSource(source), textColor, style,
                 outerHeightPt, outerWidthPt, floatingShape != null))
             {
                 if (editor.ShowDialog(new LaTeXBlocksRibbon.WordWindow(Application)) == DialogResult.OK)
@@ -1324,10 +1377,11 @@ namespace LaTeXBlocks.Word
                     var shape = snapshot.Shape;
                     if (shape == null ||
                         !LaTeXBlockService.TryReadContract(shape, out var metadata,
-                            out var source) ||
-                        metadata.Mode != LaTeXBlockLayoutMode.Auto)
+                            out var source))
                         continue;
-                    var fontSizePt = (double)shape.Range.Font.Size;
+                    var fontSizePt = metadata.Mode == LaTeXBlockLayoutMode.Auto
+                        ? (double)shape.Range.Font.Size
+                        : metadata.FontSizePt;
                     if (fontSizePt < 1 || fontSizePt > 200) continue;
                     var textColor = LaTeXBlockService.ResolveTextColor(shape.Range);
                     var changed = !LaTeXBlockService.TextColorsEqual(
@@ -1525,28 +1579,43 @@ namespace LaTeXBlocks.Word
         private void QueueFormatRefresh(List<FormatRefreshRequest> requests)
         {
             if (shuttingDown || requests == null || requests.Count == 0) return;
-            var batchable = requests.Count > 0;
-            var selectionLease = requests[0].SelectionLease;
+            var ordinaryAutoRequests = new List<FormatRefreshRequest>();
+            var externalColorRequests = new List<FormatRefreshRequest>();
+            var individualRequests = new List<FormatRefreshRequest>();
+            SelectionRangeLease ordinarySelectionLease = null;
             foreach (var request in requests)
             {
-                if (request.ChangesWidth || request.Metadata == null ||
-                    request.Metadata.Mode != LaTeXBlockLayoutMode.Auto)
+                var externalColorOnly = request.ChangesTextColor &&
+                    !request.ChangesFontSize && !request.ChangesWidth &&
+                    request.PreviousTextColor.HasValue;
+                if (externalColorOnly)
                 {
-                    batchable = false;
-                    break;
+                    externalColorRequests.Add(request);
                 }
-                if (!ReferenceEquals(selectionLease, request.SelectionLease))
-                    selectionLease = null;
+                else if (LaTeXBlockService.CanShareOrdinaryAutoFormatBatch(request.Metadata,
+                        request.ChangesWidth))
+                {
+                    if (ordinaryAutoRequests.Count == 0)
+                        ordinarySelectionLease = request.SelectionLease;
+                    else if (!ReferenceEquals(ordinarySelectionLease,
+                                 request.SelectionLease))
+                        ordinarySelectionLease = null;
+                    ordinaryAutoRequests.Add(request);
+                }
+                else
+                    individualRequests.Add(request);
             }
             // A Word format command is one visual operation even when it changes
             // several renderer inputs. Colour, font size, and a future combination
-            // of the two therefore share one render/commit batch.
-            if (batchable)
-            {
-                QueueFormatBatch(requests, selectionLease);
-                return;
-            }
-            foreach (var request in requests) QueueFormatRefresh(request);
+            // of the two therefore share one render/commit batch. Numbered equations
+            // and Fixed Blocks have different replacement contracts; keep them out
+            // of that batch without forfeiting batching for ordinary formulas in the
+            // same selection.
+            if (externalColorRequests.Count > 0)
+                TryApplyExternalColorRequests(externalColorRequests);
+            if (ordinaryAutoRequests.Count > 0)
+                QueueFormatBatch(ordinaryAutoRequests, ordinarySelectionLease);
+            foreach (var request in individualRequests) QueueFormatRefresh(request);
         }
 
         private void QueueFormatRefresh(FormatRefreshRequest request)
@@ -1878,7 +1947,9 @@ namespace LaTeXBlocks.Word
                 var render = await service.RenderCommittedAsync(pending.Source,
                     pending.TargetWidthPt, pending.BaseMetadata.Mode, pending.Profile,
                     pending.TargetFontSizePt,
-                    pending.BaseMetadata.Role == LaTeXBlockRole.NumberedEquation,
+                    pending.BaseMetadata.Role == LaTeXBlockRole.NumberedEquation ||
+                    pending.BaseMetadata.Mode == LaTeXBlockLayoutMode.Auto &&
+                    LaTeXBlockService.IsDisplayMathSource(pending.Source),
                     pending.TargetTextColor)
                     .ConfigureAwait(false);
                 await InvokeOnWordUiAsync(() => CompleteFormatRefresh(service, pending,

@@ -41,7 +41,12 @@ development builds, and a no-argument publish consistent with the shipped packag
 ```powershell
 pwsh.exe -NoProfile -File .\scripts\Build-LaTeXBlocks.ps1 -Configuration Release
 pwsh.exe -NoProfile -File .\scripts\Test-LaTeXBlocks.ps1 -Configuration Release -TargetHost Both
+pwsh.exe -NoProfile -File .\scripts\Test-LaTeXBlocks.ps1 -Configuration Release -TargetHost Word -Interaction
 ```
+
+The interaction run is deliberately separate: it foregrounds the isolated Word instance and performs real mouse
+input against the Font Color split button and palette. A release is not considered tested if only the hidden Office
+smokes passed.
 
 The PowerPoint width integration test is a package-validation gate: run it **after** installing the generated
 candidate, as described below. A VSTO solution identity has one deployment codebase, so a registry-only switch from
@@ -89,7 +94,15 @@ Get-Content "$installer.sha256"
 
 Confirm that the computed SHA-256 matches the checksum file and, when signing was expected, that the signature is
 present and valid for the publishing user. Finally, install the package on a clean user registration, reopen Word and
-PowerPoint, and confirm that each loads **LaTeX Blocks** and can render with the bundled StemTeX runtime. Then run:
+PowerPoint, and confirm all of the following before publishing the assets:
+
+- both hosts load **LaTeX Blocks** without a disabled-add-in warning;
+- Word and PowerPoint can each render with the bundled StemTeX runtime and both bundled profiles;
+- a Word document and a presentation containing formulas survive save, close, reopen, and update;
+- Word and PowerPoint exit promptly after the last LaTeX Blocks window is closed;
+- the installed package—not an older development registration—is the active VSTO deployment.
+
+Then run:
 
 ```powershell
 pwsh.exe -NoProfile -File .\tests\Test-PowerPointWidthIntegration.ps1 -Configuration Release

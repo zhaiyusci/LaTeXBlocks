@@ -5,6 +5,35 @@ Word-and-PowerPoint package line.
 
 ## [Unreleased]
 
+## [0.2.93] — 2026-08-10
+
+### Word
+
+- Unnumbered display math pasted from LaTeX is now a natural-size Auto formula,
+  not a user-sized Fixed Block. It therefore follows native Word font-size changes
+  like inline math while retaining display-style TeX rendering.
+
+## [0.2.92] — 2026-08-10
+
+### Word and PowerPoint
+
+- Pure external foreground changes are now always host paint operations. Word Font
+  Color and Office Graphics Fill update ordinary formulas, numbered equations, and
+  Fixed Blocks directly without creating a StemTeX render task or replacing the
+  Office object. TeX-authored explicit child colours remain independent.
+
+## [0.2.91] — 2026-08-09
+
+### Word
+
+- Mixed selections containing ordinary inline formulas together with numbered
+  equations or Fixed Blocks now route each object through its correct update
+  contract. Ordinary Auto formulas retain the fast batch path, while special
+  objects no longer trigger the “Only ordinary Auto inline formulas” error.
+- Font-size-only direct SVG replacement now clears stale Word subscript and
+  superscript transforms before deriving the new formula baseline, while retaining
+  independent run formatting and Graphics Fill per formula across paragraphs.
+
 ## [0.2.90] — 2026-08-09
 
 ### Word

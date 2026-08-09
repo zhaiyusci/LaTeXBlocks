@@ -466,7 +466,9 @@ namespace LaTeXBlocks.Word
         {
             var size = fontSizePt ?? ResolveFontSize(oldShape.Range, mode, 10);
             var displayMathStyle = TryReadContract(oldShape, out var metadata, out _) &&
-                                   metadata.Role == LaTeXBlockRole.NumberedEquation;
+                                   (metadata.Role == LaTeXBlockRole.NumberedEquation ||
+                                    mode == LaTeXBlockLayoutMode.Auto &&
+                                    IsDisplayMathSource(source));
             var style = metadata != null && metadata.HasExplicitStyle ? metadata.Style : null;
             var textColor = style != null ? ToWordColor(style.TextColor) : ResolveTextColor(oldShape.Range);
             var preserveFixedFrame = metadata != null &&
@@ -541,6 +543,34 @@ namespace LaTeXBlocks.Word
             // canonical source supplied by the user. \displaystyle changes TeX math style;
             // Word, not TeX, owns the display line and its horizontal placement.
             return "\\(\n\\displaystyle\n" + body + "\n\\)";
+        }
+
+        internal static bool IsDisplayMathSource(string source)
+        {
+            if (string.IsNullOrWhiteSpace(source)) return false;
+            var body = NormalizeSourceText(source).Trim();
+            if (TryStripOuter(body, "\\[", "\\]", out _) ||
+                TryStripOuter(body, "$$", "$$", out _))
+                return true;
+            foreach (var environment in new[]
+                     {
+                         "displaymath", "equation", "equation*", "align", "align*",
+                         "gather", "gather*", "split", "alignat", "alignat*"
+                     })
+                if (TryStripEnvironment(body, environment, out _)) return true;
+            return false;
+        }
+
+        internal static LaTeXBlockLayoutMode ResolveImportedFormulaMode(
+            LaTeXContentKind kind)
+        {
+            if (kind == LaTeXContentKind.Text)
+                throw new ArgumentException("Plain text has no formula layout mode.",
+                    nameof(kind));
+            // Inline/display is a TeX math-style distinction, not a physical-frame
+            // distinction. Both are natural-size formulas; only Insert Block creates
+            // a Fixed viewport.
+            return LaTeXBlockLayoutMode.Auto;
         }
 
         private static bool TryStripOuter(string source, string open, string close, out string body)
@@ -825,6 +855,12 @@ namespace LaTeXBlocks.Word
                             (float)state.Metadata.FontSizePt;
                         candidate.Range.Font.SizeBi =
                             (float)state.Metadata.FontSizePt;
+                        // Script placement belongs to TeX. HostRunFormat preserves
+                        // every independent Word character property, but these two
+                        // values are derived transforms just like Font.Position and
+                        // must never survive an SVG rerender.
+                        candidate.Range.Font.Subscript = 0;
+                        candidate.Range.Font.Superscript = 0;
                         ApplyBaselinePosition(candidate, state.Metadata);
                         if (state.PreserveNativeTextColor)
                             state.NativeTextColor.ApplyTo(candidate.Range);
@@ -903,6 +939,14 @@ namespace LaTeXBlocks.Word
                 if (undoStarted)
                     try { application.UndoRecord.EndCustomRecord(); } catch { }
             }
+        }
+
+        internal static bool CanShareOrdinaryAutoFormatBatch(
+            LaTeXBlockMetadata metadata, bool changesWidth)
+        {
+            return !changesWidth && metadata != null &&
+                   metadata.Mode == LaTeXBlockLayoutMode.Auto &&
+                   metadata.Role == LaTeXBlockRole.Content;
         }
 
         /// <summary>
@@ -1942,9 +1986,7 @@ namespace LaTeXBlocks.Word
             if (updates.Count == 0) return false;
             foreach (var update in updates)
                 if (update?.Shape == null ||
-                    !TryReadContract(update.Shape, out var metadata, out _) ||
-                    metadata.Mode != LaTeXBlockLayoutMode.Auto ||
-                    metadata.Role != LaTeXBlockRole.Content)
+                    !TryReadContract(update.Shape, out _, out _))
                     return false;
 
             var undoStarted = false;

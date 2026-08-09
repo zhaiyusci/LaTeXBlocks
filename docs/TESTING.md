@@ -33,11 +33,23 @@ pwsh.exe -NoProfile -File .\scripts\Test-LaTeXBlocks.ps1 -Configuration Debug -T
 `-TargetHost` accepts `Word`, `PowerPoint`, and `Both`; `Both` runs the Word executable first and then the
 PowerPoint executable.
 
+Run the real Word ribbon interaction gate explicitly:
+
+```powershell
+pwsh.exe -NoProfile -File .\scripts\Test-LaTeXBlocks.ps1 `
+  -Configuration Release -TargetHost Word -Interaction
+```
+
+`-Interaction` adds visible, real mouse interaction with Word's Font Color main button and palette to the ordinary
+Word smoke. It verifies hover rejection, Escape cancellation, one commit per click, and ordered transaction
+lifecycle delivery. Because it foregrounds Word and moves the pointer, run it on an idle desktop; it is a release
+gate, not a headless CI test.
+
 ### What each smoke test launches
 
 | Test | Office behavior | Main coverage |
 | --- | --- | --- |
-| Word smoke | Starts a separate hidden Word instance and closes it when complete. It rejects an accidental attachment to an existing visible Word instance. | StemTeX startup/shutdown, rendering, SVG insertion and replacement, metadata, baseline/inline behavior, paragraph-end formula insertion/update without consuming the existing paragraph mark, standard minimum `a/A/g` line boxes for natural-width inline and displaystyle formulas without preview padding, shared fixed-Block style persistence (leading, padding, fill, border, and Top/Middle/Bottom placement), stable ordinary-text Block line boxes with clean standalone displays, exact fixed-Block frame reflow/persistence for both InlineShape and Square-wrapped Shape forms, abstract Font Color transaction contracts, live ordered Begin/terminal delivery, hover-only rejection, Escape/stale-click rejection, and real paired palette clicks, exact formula caret-proxy, mixed text/formula range colour and selection leases, plus property-preserving Font Size/Color refreshes that recompute baseline, conditional selected-formula replacement semantics, 2500.25 pt physical-frame preservation, no-op move/rotation geometry, rapid resize composition, numbered equations, and DOCX persistence. |
+| Word smoke | Starts a separate hidden Word instance and closes it when complete. It rejects an accidental attachment to an existing visible Word instance. `-Interaction` temporarily makes that isolated instance visible for the ribbon test. | StemTeX startup/shutdown, rendering, SVG insertion and replacement, metadata, baseline/inline behavior, paragraph-end formula insertion/update without consuming the existing paragraph mark, standard minimum `a/A/g` line boxes for natural-width inline and displaystyle formulas without preview padding, shared fixed-Block style persistence (leading, padding, fill, border, and Top/Middle/Bottom placement), stable ordinary-text Block line boxes with clean standalone displays, exact fixed-Block frame reflow/persistence for both InlineShape and Square-wrapped Shape forms, abstract Font Color transaction contracts, optional live ordered Begin/terminal delivery, hover-only rejection, Escape/stale-click rejection, and real paired palette clicks, exact formula caret-proxy, mixed text/formula range colour and selection leases, plus property-preserving Font Size/Color refreshes—including a cross-paragraph, independently formatted, one-Undo batch—that recompute baseline, conditional selected-formula replacement semantics, 2500.25 pt physical-frame preservation, no-op move/rotation geometry, rapid resize composition, numbered equations, and DOCX persistence. |
 | PowerPoint smoke | Requires PowerPoint to be closed, then starts a visible temporary PowerPoint instance and closes it when complete. | Rendering, block insertion and editing, version-one vertical-alignment persistence, TeX-only Top/Middle/Bottom placement, stable `a/A/g` ordinary-text line boxes with clean standalone displays, padding-only SVG positioning/style persistence, profile/TeX-size/width controls, unified host-frame resize handling, and PPTX persistence. |
 
 The tests leave diagnostic documents under ignored `artifacts` directories. They are useful when diagnosing a failed
@@ -83,6 +95,7 @@ Use the same commands with `-Configuration Release` before packaging:
 ```powershell
 pwsh.exe -NoProfile -File .\scripts\Build-LaTeXBlocks.ps1 -Configuration Release
 pwsh.exe -NoProfile -File .\scripts\Test-LaTeXBlocks.ps1 -Configuration Release -TargetHost Both
+pwsh.exe -NoProfile -File .\scripts\Test-LaTeXBlocks.ps1 -Configuration Release -TargetHost Word -Interaction
 ```
 
 For a package candidate, install the intended package and run the PowerPoint width integration test against that
