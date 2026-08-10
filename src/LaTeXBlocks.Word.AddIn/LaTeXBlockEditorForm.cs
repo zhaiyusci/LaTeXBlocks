@@ -609,7 +609,7 @@ namespace LaTeXBlocks.Word
                     Kind == LaTeXBlockKind.DisplayMath || Kind == LaTeXBlockKind.NumberedMath,
                     LaTeXBlockService.ToWordColor(textColor), style,
                     CanEditStyle ? previewFrameHeightPt : null,
-                    CanEditStyle ? previewFrameWidthPt : null);
+                    CanEditStyle ? previewFrameWidthPt : null, Kind);
                 phase = "Preview update";
                 if (IsDisposed) return;
                 if (version == editVersion)

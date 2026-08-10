@@ -193,10 +193,11 @@ namespace LaTeXBlocks.Word
         internal LaTeXBlockRender RenderPreview(string source, double widthPt, LaTeXBlockLayoutMode mode, string profile,
             double fontSizePt = 10, bool displayMathStyle = false,
             int textColor = AutomaticTextColor, LaTeXBlockStyle style = null,
-            double? outerHeightPt = null, double? outerWidthPt = null)
+            double? outerHeightPt = null, double? outerWidthPt = null,
+            LaTeXBlockKind renderKind = LaTeXBlockKind.Unspecified)
         {
             return RenderPreviewAsync(source, widthPt, mode, profile, fontSizePt, displayMathStyle,
-                    textColor, style, outerHeightPt, outerWidthPt)
+                    textColor, style, outerHeightPt, outerWidthPt, renderKind)
                 .GetAwaiter().GetResult();
         }
 
@@ -204,20 +205,24 @@ namespace LaTeXBlocks.Word
             LaTeXBlockLayoutMode mode, string profile, double fontSizePt = 10,
             bool displayMathStyle = false, int textColor = AutomaticTextColor,
             LaTeXBlockStyle style = null, double? outerHeightPt = null,
-            double? outerWidthPt = null)
+            double? outerWidthPt = null,
+            LaTeXBlockKind renderKind = LaTeXBlockKind.Unspecified)
         {
             return await RenderAsync(source, widthPt, mode, profile, fontSizePt,
-                displayMathStyle, false, textColor, style, outerHeightPt, outerWidthPt);
+                displayMathStyle, false, textColor, style, outerHeightPt, outerWidthPt,
+                renderKind);
         }
 
         internal async Task<LaTeXBlockRender> RenderCommittedAsync(string source, double widthPt,
             LaTeXBlockLayoutMode mode, string profile, double fontSizePt = 10,
             bool displayMathStyle = false, int textColor = AutomaticTextColor,
             LaTeXBlockStyle style = null, double? outerHeightPt = null,
-            double? outerWidthPt = null)
+            double? outerWidthPt = null,
+            LaTeXBlockKind renderKind = LaTeXBlockKind.Unspecified)
         {
             return await RenderAsync(source, widthPt, mode, profile, fontSizePt,
-                displayMathStyle, true, textColor, style, outerHeightPt, outerWidthPt);
+                displayMathStyle, true, textColor, style, outerHeightPt, outerWidthPt,
+                renderKind);
         }
 
         internal void CancelPreview()
@@ -230,14 +235,16 @@ namespace LaTeXBlocks.Word
         private async Task<LaTeXBlockRender> RenderAsync(string source, double widthPt,
             LaTeXBlockLayoutMode mode, string profile, double fontSizePt,
             bool displayMathStyle, bool committed, int textColor, LaTeXBlockStyle style,
-            double? outerHeightPt, double? outerWidthPt)
+            double? outerHeightPt, double? outerWidthPt,
+            LaTeXBlockKind renderKind)
         {
             var normalizedSource = NormalizeSourceText(source);
-            var renderKind = mode == LaTeXBlockLayoutMode.Fixed
-                ? LaTeXBlockKind.LaTeXBlock
-                : displayMathStyle
-                    ? LaTeXBlockKind.DisplayMath
-                    : LaTeXBlockKind.InlineMath;
+            if (renderKind == LaTeXBlockKind.Unspecified)
+                renderKind = mode == LaTeXBlockLayoutMode.Fixed
+                    ? LaTeXBlockKind.LaTeXBlock
+                    : displayMathStyle
+                        ? LaTeXBlockKind.DisplayMath
+                        : LaTeXBlockKind.InlineMath;
             var renderSource = renderKind == LaTeXBlockKind.LaTeXBlock
                 ? normalizedSource
                 : PrepareMathRenderSource(normalizedSource, renderKind);
@@ -356,12 +363,15 @@ namespace LaTeXBlocks.Word
                         documentMutated = true;
                     }
                     target.Collapse(WordInterop.WdCollapseDirection.wdCollapseStart);
+                    ValidateDisplayMathTarget(target);
+                    ConfigureTabsForDisplayInsertion(target);
                     var leadingBreak = NeedsManualBreakBefore(target) ? "\v" : string.Empty;
                     var trailingBreak = NeedsManualBreakAfter(target) ? "\v" : string.Empty;
-                    var formulaPosition = target.Start + leadingBreak.Length;
-                    if (leadingBreak.Length + trailingBreak.Length > 0)
+                    var formulaPosition = target.Start + leadingBreak.Length + 1;
+                    var scaffold = leadingBreak + "\t" + trailingBreak;
+                    if (scaffold.Length > 0)
                     {
-                        target.Text = leadingBreak + trailingBreak;
+                        target.Text = scaffold;
                         documentMutated = true;
                     }
                     var formulaTarget = document.Range(formulaPosition, formulaPosition);
@@ -399,7 +409,7 @@ namespace LaTeXBlocks.Word
             var fontSizePt = ResolveFontSize(application.Selection, mode, 10);
             var textColor = ResolveTextColor(application.Selection);
             var render = RenderPreview(source, widthPt, mode, profile, fontSizePt, true,
-                textColor);
+                textColor, renderKind: LaTeXBlockKind.NumberedMath);
             return InsertNumberedRendered(source, widthPt, mode, render);
         }
 
@@ -519,7 +529,8 @@ namespace LaTeXBlocks.Word
             var render = RenderPreview(source, widthPt, mode, profile, size, displayMathStyle,
                 textColor, style,
                 preserveFixedFrame && style != null ? oldShape.Height : (double?)null,
-                preserveFixedFrame && style != null ? oldShape.Width : (double?)null);
+                preserveFixedFrame && style != null ? oldShape.Width : (double?)null,
+                metadata?.Kind ?? LaTeXBlockKind.Unspecified);
             // UpdateBlock is also used by callers outside the editor. Preserve a
             // Fixed Content Block's exact Word-owned outer viewport there too;
             // otherwise replacing the SVG would silently restore its natural
@@ -620,6 +631,8 @@ namespace LaTeXBlocks.Word
                 kind != LaTeXBlockKind.NumberedMath)
                 throw new ArgumentException("A math rendering requires a math object kind.",
                     nameof(kind));
+            if (kind == LaTeXBlockKind.NumberedMath)
+                return PrepareDisplayMathSource(source);
             var body = NormalizeMathBody(source);
             return kind == LaTeXBlockKind.InlineMath
                 ? "\\(\n" + body + "\n\\)"
@@ -638,6 +651,18 @@ namespace LaTeXBlocks.Word
             return IsDisplayMathSource(source)
                 ? LaTeXBlockKind.DisplayMath
                 : LaTeXBlockKind.InlineMath;
+        }
+
+        internal static bool SameRefreshMetadataState(LaTeXBlockMetadata left,
+            LaTeXBlockMetadata right)
+        {
+            return left != null && right != null && left.Id == right.Id &&
+                   left.Mode == right.Mode && left.Role == right.Role &&
+                   left.Kind == right.Kind &&
+                   Math.Abs(left.WidthPt - right.WidthPt) < 0.001 &&
+                   Math.Abs(left.FontSizePt - right.FontSizePt) < 0.001 &&
+                   string.Equals(left.StyleData, right.StyleData,
+                       StringComparison.Ordinal);
         }
 
         internal static bool IsDisplayMathSource(string source)
@@ -734,6 +759,12 @@ namespace LaTeXBlocks.Word
                         GetNumberedEquationLayout(probe, render.FontSizePt));
                     EnsureEquationCategory();
                 }
+                else if (newKind == LaTeXBlockKind.DisplayMath)
+                {
+                    var probe = oldShape.Range.Duplicate;
+                    probe.Collapse(WordInterop.WdCollapseDirection.wdCollapseStart);
+                    ValidateDisplayMathTarget(probe);
+                }
 
                 application.UndoRecord.StartCustomRecord("Convert LaTeX Math");
                 undoStarted = true;
@@ -750,7 +781,7 @@ namespace LaTeXBlocks.Word
                     if (previousKind == LaTeXBlockKind.InlineMath)
                         RemoveInlineWordJoinerBoundaries(oldShape);
                     else if (previousKind == LaTeXBlockKind.DisplayMath)
-                        RemoveDisplayMathBreaks(oldShape);
+                        RemoveDisplayMathScaffold(oldShape);
                     insertionStart = oldShape.Range.Start;
                     mutationStarted = true;
                     oldShape.Delete();
@@ -789,6 +820,7 @@ namespace LaTeXBlocks.Word
                         throw new InvalidOperationException(
                             "Word could not create the equation number field.");
                     document.Bookmarks.Add(EquationBookmarkName(metadata.Id), field.Result);
+                    UpdateEquationNumbers(document, false);
                     ValidateNumberedEquationPlacement(formula, render.SvgBytes,
                         render.FontSizePt);
                     MoveCaretAfterNumberedEquation(field);
@@ -797,15 +829,18 @@ namespace LaTeXBlocks.Word
 
                 if (newKind == LaTeXBlockKind.DisplayMath)
                 {
+                    ConfigureTabsForDisplayInsertion(target);
                     var leadingBreak = NeedsManualBreakBefore(target) ? "\v" : string.Empty;
                     var trailingBreak = NeedsManualBreakAfter(target) ? "\v" : string.Empty;
-                    target.Text = leadingBreak + trailingBreak;
-                    var formulaPosition = insertionStart + leadingBreak.Length;
+                    target.Text = leadingBreak + "\t" + trailingBreak;
+                    var formulaPosition = insertionStart + leadingBreak.Length + 1;
                     var formula = InsertRenderedAt(
                         document.Range(formulaPosition, formulaPosition), source,
                         LaTeXBlockLayoutMode.Auto, render, metadata, false);
                     RestoreConvertedMathRunFormat(formula, metadata, render,
                         hostRunFormat, preserveNativeTextColor, nativeTextColor);
+                    if (previousKind == LaTeXBlockKind.NumberedMath)
+                        UpdateEquationNumbers(document, false);
                     MoveCaretAfterDisplayFormula(formula);
                     return formula;
                 }
@@ -814,6 +849,11 @@ namespace LaTeXBlocks.Word
                     LaTeXBlockLayoutMode.Auto, render, metadata, false);
                 RestoreConvertedMathRunFormat(inline, metadata, render,
                     hostRunFormat, preserveNativeTextColor, nativeTextColor);
+                if (previousKind == LaTeXBlockKind.NumberedMath)
+                    UpdateEquationNumbers(document, false);
+                if (previousKind == LaTeXBlockKind.NumberedMath ||
+                    previousKind == LaTeXBlockKind.DisplayMath)
+                    ConfigureOwnedMathTabs(inline.Range.Paragraphs[1]);
                 MoveCaretAfterInlineFormula(inline, metadata);
                 return inline;
             }
@@ -846,11 +886,16 @@ namespace LaTeXBlocks.Word
             if (preserveNativeTextColor) nativeTextColor.ApplyTo(shape.Range);
         }
 
-        private static void RemoveDisplayMathBreaks(WordInterop.InlineShape shape)
+        private static void RemoveDisplayMathScaffold(WordInterop.InlineShape shape)
         {
             var following = AdjacentCharacter(shape.Range, false);
             if (following != null && following.Text == "\v") following.Delete();
             var preceding = AdjacentCharacter(shape.Range, true);
+            if (preceding != null && preceding.Text == "\t")
+            {
+                preceding.Delete();
+                preceding = AdjacentCharacter(shape.Range, true);
+            }
             if (preceding != null && preceding.Text == "\v") preceding.Delete();
         }
 
@@ -875,7 +920,6 @@ namespace LaTeXBlocks.Word
                 numberedLayout = GetNumberedEquationLayout(oldShape.Range, render.FontSizePt);
                 numberedField = FindEquationNumberField(oldShape, previous);
             }
-
             var target = oldShape.Range.Duplicate;
             var svgSize = ReadSvgPhysicalSize(render.SvgBytes);
             var styleData = mode == LaTeXBlockLayoutMode.Fixed &&
@@ -911,6 +955,12 @@ namespace LaTeXBlocks.Word
                 hostRunFormat = WordInlineRunFormatSnapshot.Capture(oldShape.Range);
                 application.UndoRecord.StartCustomRecord("Update LaTeX Block");
                 undoStarted = true;
+
+                if (!numbered && kind == LaTeXBlockKind.DisplayMath)
+                {
+                    documentMutated = true;
+                    EnsureDisplayMathTabScaffold(oldShape);
+                }
 
                 // Establish the final boundary state while the old formula still
                 // identifies the exact character being replaced.
@@ -960,6 +1010,8 @@ namespace LaTeXBlocks.Word
                     try
                     {
                         if (numbered) MoveCaretAfterNumberedEquation(numberedField);
+                        else if (metadata.Kind == LaTeXBlockKind.DisplayMath)
+                            MoveCaretAfterDisplayFormula(replacement);
                         else MoveCaretAfterInlineFormula(replacement, metadata);
                     }
                     catch
@@ -1960,6 +2012,17 @@ namespace LaTeXBlocks.Word
             ValidateEquationInsertionPoint(target);
         }
 
+        private static void ValidateDisplayMathTarget(WordInterop.Range target)
+        {
+            if (target == null) throw new ArgumentNullException(nameof(target));
+            if (target.Start != target.End)
+                throw new InvalidOperationException(
+                    "Place a collapsed insertion point where the display math belongs.");
+            ValidateParagraphTabOwnership(target.Paragraphs[1]);
+            ValidateParagraphTabStops(target.Paragraphs[1]);
+            ValidateEquationInsertionPoint(target);
+        }
+
         private static void ValidateParagraphTabOwnership(WordInterop.Paragraph paragraph)
         {
             var range = paragraph.Range;
@@ -1971,11 +2034,12 @@ namespace LaTeXBlocks.Word
                        Format: false))
             {
                 var tabStart = search.Start;
-                var belongsToEquation = IsNumberedShapeAt(range.Document, tabStart + 1) ||
-                                        IsNumberedShapeAt(range.Document, tabStart - 1);
-                if (!belongsToEquation)
+                var belongsToMath = IsNumberedShapeAt(range.Document, tabStart + 1) ||
+                                    IsNumberedShapeAt(range.Document, tabStart - 1) ||
+                                    IsDisplayShapeAt(range.Document, tabStart + 1);
+                if (!belongsToMath)
                     throw new InvalidOperationException(
-                        "This paragraph already uses tabs for ordinary content. A numbered equation owns its paragraph's center and right tab stops.");
+                        "This paragraph already uses tabs for ordinary content. Display and numbered math own their paragraph's math tab stops.");
                 search.SetRange(search.End, paragraphEnd);
             }
         }
@@ -1989,12 +2053,27 @@ namespace LaTeXBlocks.Word
                    metadata.Role == LaTeXBlockRole.NumberedEquation;
         }
 
+        private static bool IsDisplayShapeAt(WordInterop.Document document, int position)
+        {
+            if (position < 0 || position >= document.Content.End) return false;
+            var candidate = document.Range(position, position + 1);
+            if (candidate.InlineShapes.Count != 1) return false;
+            return TryReadContract(candidate.InlineShapes[1], out var metadata, out _) &&
+                   metadata.Kind == LaTeXBlockKind.DisplayMath;
+        }
+
         private static void ValidateParagraphTabStops(WordInterop.Paragraph paragraph)
         {
             var numberedShapes = 0;
+            var displayShapes = 0;
             foreach (WordInterop.InlineShape shape in paragraph.Range.InlineShapes)
-                if (TryReadContract(shape, out var metadata, out _) &&
-                    metadata.Role == LaTeXBlockRole.NumberedEquation) numberedShapes++;
+                if (TryReadContract(shape, out var metadata, out _))
+                {
+                    if (metadata.Role == LaTeXBlockRole.NumberedEquation)
+                        numberedShapes++;
+                    else if (metadata.Kind == LaTeXBlockKind.DisplayMath)
+                        displayShapes++;
+                }
 
             var tabs = paragraph.Range.ParagraphFormat.TabStops;
             var customTabs = 0;
@@ -2010,17 +2089,25 @@ namespace LaTeXBlocks.Word
 
             if (customTabs == 0)
             {
-                if (numberedShapes > 0)
-                    throw new InvalidOperationException("The existing numbered-equation paragraph has lost its tab stops.");
+                if (numberedShapes > 0 || displayShapes > 0)
+                    throw new InvalidOperationException(
+                        "The existing display-math paragraph has lost its tab stops.");
                 return;
             }
-            if (numberedShapes == 0)
+            if (numberedShapes == 0 && displayShapes == 0)
                 throw new InvalidOperationException(
-                    "This paragraph already has custom tab stops. A numbered equation must own its center and right tab layout.");
-            if (customTabs != 2)
-                throw new InvalidOperationException("The existing numbered-equation paragraph has conflicting tab stops.");
-            if (!hasCenter || !hasRight)
-                throw new InvalidOperationException("The existing numbered-equation paragraph has conflicting tab stops.");
+                    "This paragraph already has custom tab stops. Display and numbered math must own their tab layout.");
+            if (numberedShapes > 0)
+            {
+                if (customTabs != 2 || !hasCenter || !hasRight)
+                    throw new InvalidOperationException(
+                        "The existing numbered-equation paragraph has conflicting tab stops.");
+            }
+            else if (customTabs != 1 || !hasCenter || hasRight)
+            {
+                throw new InvalidOperationException(
+                    "The existing display-math paragraph has conflicting tab stops.");
+            }
         }
 
         private static void ValidateEquationInsertionPoint(WordInterop.Range target)
@@ -2086,12 +2173,7 @@ namespace LaTeXBlocks.Word
         private static NumberedEquationLayout GetNumberedEquationLayout(WordInterop.Range target,
             double fontSizePt)
         {
-            var page = target.Sections[1].PageSetup;
-            var columnWidth = (double)page.PageWidth - page.LeftMargin - page.RightMargin;
-            var columns = page.TextColumns;
-            if (columns.Count > 1)
-                columnWidth = (columnWidth - columns.Spacing * (columns.Count - 1)) / columns.Count;
-
+            var columnWidth = GetTextColumnWidth(target);
             if (columnWidth < 72)
                 throw new InvalidOperationException("The current paragraph is too narrow for a numbered equation.");
             var numberReserve = Math.Max(EquationNumberReservePt, fontSizePt * 3);
@@ -2106,6 +2188,17 @@ namespace LaTeXBlocks.Word
             return new NumberedEquationLayout(columnWidth / 2, columnWidth, maximumFormulaWidth);
         }
 
+        private static double GetTextColumnWidth(WordInterop.Range target)
+        {
+            var page = target.Sections[1].PageSetup;
+            var columnWidth = (double)page.PageWidth - page.LeftMargin - page.RightMargin;
+            var columns = page.TextColumns;
+            if (columns.Count > 1)
+                columnWidth = (columnWidth - columns.Spacing * (columns.Count - 1)) /
+                              columns.Count;
+            return columnWidth;
+        }
+
         private static void ConfigureNumberedEquationTabs(WordInterop.Paragraph paragraph,
             NumberedEquationLayout layout)
         {
@@ -2115,6 +2208,83 @@ namespace LaTeXBlocks.Word
                 WordInterop.WdTabLeader.wdTabLeaderSpaces);
             tabs.Add((float)layout.RightTabPt, WordInterop.WdTabAlignment.wdAlignTabRight,
                 WordInterop.WdTabLeader.wdTabLeaderSpaces);
+        }
+
+        private static void ConfigureDisplayMathTabs(WordInterop.Paragraph paragraph,
+            double centerTabPt)
+        {
+            var tabs = paragraph.Range.ParagraphFormat.TabStops;
+            tabs.ClearAll();
+            tabs.Add((float)centerTabPt, WordInterop.WdTabAlignment.wdAlignTabCenter,
+                WordInterop.WdTabLeader.wdTabLeaderSpaces);
+        }
+
+        private static void ConfigureTabsForDisplayInsertion(WordInterop.Range target)
+        {
+            var paragraph = target.Paragraphs[1];
+            foreach (WordInterop.InlineShape shape in paragraph.Range.InlineShapes)
+                if (TryReadContract(shape, out var metadata, out _) &&
+                    metadata.Kind == LaTeXBlockKind.NumberedMath)
+                {
+                    ConfigureNumberedEquationTabs(paragraph,
+                        GetNumberedEquationLayout(target, metadata.FontSizePt));
+                    return;
+                }
+            ConfigureDisplayMathTabs(paragraph, GetTextColumnWidth(target) / 2);
+        }
+
+        private static void ConfigureOwnedMathTabs(WordInterop.Paragraph paragraph)
+        {
+            WordInterop.InlineShape firstNumbered = null;
+            var hasDisplay = false;
+            foreach (WordInterop.InlineShape shape in paragraph.Range.InlineShapes)
+                if (TryReadContract(shape, out var metadata, out _))
+                {
+                    if (metadata.Kind == LaTeXBlockKind.NumberedMath &&
+                        firstNumbered == null)
+                        firstNumbered = shape;
+                    else if (metadata.Kind == LaTeXBlockKind.DisplayMath)
+                        hasDisplay = true;
+                }
+            if (firstNumbered != null && TryReadContract(firstNumbered,
+                    out var numberedMetadata, out _))
+            {
+                ConfigureNumberedEquationTabs(paragraph,
+                    GetNumberedEquationLayout(firstNumbered.Range,
+                        numberedMetadata.FontSizePt));
+                return;
+            }
+            if (hasDisplay)
+            {
+                ConfigureDisplayMathTabs(paragraph,
+                    GetTextColumnWidth(paragraph.Range) / 2);
+                return;
+            }
+            paragraph.Range.ParagraphFormat.TabStops.ClearAll();
+        }
+
+        private static void EnsureDisplayMathTabScaffold(WordInterop.InlineShape shape)
+        {
+            var preceding = AdjacentCharacter(shape.Range, true);
+            if (preceding != null && preceding.Text == "\t")
+            {
+                ConfigureOwnedMathTabs(shape.Range.Paragraphs[1]);
+                return;
+            }
+            var target = shape.Range.Duplicate;
+            target.Collapse(WordInterop.WdCollapseDirection.wdCollapseStart);
+            ValidateParagraphTabOwnership(target.Paragraphs[1]);
+            var tabs = target.Paragraphs[1].Range.ParagraphFormat.TabStops;
+            var hasCustomTab = false;
+            for (var index = 1; index <= tabs.Count; index++)
+                if (tabs[index].CustomTab)
+                {
+                    hasCustomTab = true;
+                    break;
+                }
+            if (hasCustomTab) ValidateParagraphTabStops(target.Paragraphs[1]);
+            ConfigureTabsForDisplayInsertion(target);
+            target.Text = "\t";
         }
 
         private static bool NeedsManualBreakBefore(WordInterop.Range target)

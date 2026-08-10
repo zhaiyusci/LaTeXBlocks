@@ -74,6 +74,8 @@ namespace LaTeXBlocks.Word
                 else if (kind == LaTeXBlockKind.DisplayMath)
                 {
                     if (start > selection.Start &&
+                        ReadCharacter(shape.Range.Document, start - 1) == '\t') start--;
+                    if (start > selection.Start &&
                         ReadCharacter(shape.Range.Document, start - 1) == '\v') start--;
                     if (end < selection.End &&
                         ReadCharacter(shape.Range.Document, end) == '\v') end++;

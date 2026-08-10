@@ -557,7 +557,7 @@ namespace LaTeXBlocks.Word
                         request.FontSizePt,
                         request.Metadata.Kind == LaTeXBlockKind.DisplayMath ||
                         request.Metadata.Kind == LaTeXBlockKind.NumberedMath,
-                        request.TextColor));
+                        request.TextColor, renderKind: request.Metadata.Kind));
                 var renders = await Task.WhenAll(tasks).ConfigureAwait(false);
                 await InvokeOnWordUiAsync(() => CompleteFormatBatch(service, batch,
                     renders)).ConfigureAwait(false);
@@ -1780,7 +1780,8 @@ namespace LaTeXBlocks.Word
                     pending.BaseMetadata.FontSizePt, false,
                     textColor, style,
                     style != null ? pending.TargetFrameHeightPt : (double?)null,
-                    style != null ? pending.TargetFrameWidthPt : (double?)null)
+                    style != null ? pending.TargetFrameWidthPt : (double?)null,
+                    pending.BaseMetadata.Kind)
                     .ConfigureAwait(false);
                 // A styled render has already received the exact outer frame, so TeX
                 // made and aligned the corresponding (frame - 2*padding) content box.
@@ -1965,7 +1966,7 @@ namespace LaTeXBlocks.Word
                     pending.TargetFontSizePt,
                     pending.BaseMetadata.Kind == LaTeXBlockKind.DisplayMath ||
                     pending.BaseMetadata.Kind == LaTeXBlockKind.NumberedMath,
-                    pending.TargetTextColor)
+                    pending.TargetTextColor, renderKind: pending.BaseMetadata.Kind)
                     .ConfigureAwait(false);
                 await InvokeOnWordUiAsync(() => CompleteFormatRefresh(service, pending,
                     render)).ConfigureAwait(false);
@@ -2211,12 +2212,7 @@ namespace LaTeXBlocks.Word
         private static bool SameMetadataState(LaTeXBlockMetadata left,
             LaTeXBlockMetadata right)
         {
-            return left != null && right != null && left.Id == right.Id &&
-                   left.Mode == right.Mode && left.Role == right.Role &&
-                   Math.Abs(left.WidthPt - right.WidthPt) < 0.001 &&
-                   Math.Abs(left.FontSizePt - right.FontSizePt) < 0.001 &&
-                   string.Equals(left.StyleData, right.StyleData,
-                       StringComparison.Ordinal);
+            return LaTeXBlockService.SameRefreshMetadataState(left, right);
         }
 
         private static bool SameBlockFrameState(LaTeXBlockMetadata left,

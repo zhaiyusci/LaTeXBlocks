@@ -5,6 +5,40 @@ Word-and-PowerPoint package line.
 
 ## [Unreleased]
 
+## [0.2.107] — 2026-08-10
+
+### Word
+
+- Migrating an older Display Math object to the center-tab scaffold during
+  Update now belongs to the same Word Undo record and rollback transaction as
+  the SVG replacement.
+
+## [0.2.106] — 2026-08-10
+
+### Word
+
+- Display Math now owns a Word center TabStop and a leading tab on its visual
+  line, matching the centering model used by Numbered Math without becoming a
+  separate paragraph or floating object.
+- Display Math update, conversion, deletion, and Copy as LaTeX paths now migrate,
+  preserve, or remove the centering scaffold atomically as appropriate.
+- Display and numbered math can share one paragraph's owned center/right tab
+  layout while ordinary author tabs remain protected from silent replacement.
+
+## [0.2.105] — 2026-08-10
+
+### Word
+
+- Display Math updates now retain display-line caret semantics and reset the
+  trailing Shift+Enter boundary to the body-text baseline.
+- Converting to or from Numbered Math now refreshes all Word-owned equation
+  numbers in the same undo transaction.
+- In-flight format renders now include the persisted math kind in their stale
+  result guard, preventing an Inline render from replacing a converted Display
+  formula or vice versa.
+- Numbered Math now uses its Word-owned numbering source validation through the
+  production render path, rejecting TeX-side tags and unsupported environments.
+
 ## [0.2.104] — 2026-08-10
 
 ### Word

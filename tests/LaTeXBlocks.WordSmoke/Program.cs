@@ -587,6 +587,15 @@ namespace LaTeXBlocks.WordSmoke
                 try { LaTeXBlockService.PrepareDisplayMathSource("\\[E=mc^2 \\tag{A}\\]"); }
                 catch (ArgumentException) { texTagRejected = true; }
                 Assert(texTagRejected, "A TeX-side tag was allowed to compete with Word-owned numbering.");
+                texTagRejected = false;
+                try
+                {
+                    LaTeXBlockService.PrepareMathRenderSource("E=mc^2 \\tag{A}",
+                        LaTeXBlockKind.NumberedMath);
+                }
+                catch (ArgumentException) { texTagRejected = true; }
+                Assert(texTagRejected,
+                    "The production Numbered Math render path bypassed Word-owned numbering validation.");
                 Console.WriteLine("StemTeX: testing natural-width display-style rendering...");
                 var simpleDisplaySvg = renderer.RenderSvg(profile,
                     LaTeXBlockService.PrepareDisplayMathSource("\\[a\\]"),
@@ -1476,6 +1485,26 @@ namespace LaTeXBlocks.WordSmoke
             const double widthPt = 360;
             const double fontSizePt = 14;
             var service = new LaTeXBlockService(word, renderer);
+            var stateId = Guid.NewGuid();
+            var inlineState = new LaTeXBlockMetadata(stateId, widthPt, 2,
+                LaTeXBlockLayoutMode.Auto, fontSizePt, LaTeXBlockRole.Content,
+                kind: LaTeXBlockKind.InlineMath);
+            var displayState = new LaTeXBlockMetadata(stateId, widthPt, 2,
+                LaTeXBlockLayoutMode.Auto, fontSizePt, LaTeXBlockRole.Content,
+                kind: LaTeXBlockKind.DisplayMath);
+            Assert(!LaTeXBlockService.SameRefreshMetadataState(
+                    inlineState, displayState),
+                "An in-flight render still treats different math kinds as the same state.");
+            var numberedTagRejected = false;
+            try
+            {
+                service.RenderPreview("E=mc^2 \\tag{A}", widthPt,
+                    LaTeXBlockLayoutMode.Auto, profile, fontSizePt, true,
+                    renderKind: LaTeXBlockKind.NumberedMath);
+            }
+            catch (ArgumentException) { numberedTagRejected = true; }
+            Assert(numberedTagRejected,
+                "Numbered Math accepted a TeX-side tag through the production render API.");
 
             document.Range(0, 0).Text = "before after";
             document.Content.Font.Size = (float)fontSizePt;
@@ -1493,6 +1522,7 @@ namespace LaTeXBlocks.WordSmoke
                 "Numbered Math");
 
             document.Range(0, document.Content.End - 1).Delete();
+            document.Paragraphs[1].Range.ParagraphFormat.TabStops.ClearAll();
             document.Range(0, 0).Text = "before after";
             document.Content.Font.Size = (float)fontSizePt;
             document.Range(6, 6).Select();
@@ -1506,8 +1536,113 @@ namespace LaTeXBlocks.WordSmoke
             Assert(displayPosition < 0 &&
                    display.Range.Font.Position == displayPosition,
                 "Display Math lost its TeX baseline.");
+            AssertDisplayCenteredByTab(display);
             AssertCaretAndFollowingTextUseBodyBaseline(word, document,
                 "Display Math");
+
+            var updatedDisplayRender = service.RenderPreview("x^2", widthPt,
+                LaTeXBlockLayoutMode.Auto, profile, fontSizePt, true,
+                renderKind: LaTeXBlockKind.DisplayMath);
+            display = service.UpdateRendered(display, "x^2", widthPt,
+                LaTeXBlockLayoutMode.Auto, updatedDisplayRender, true, null,
+                LaTeXBlockKind.DisplayMath);
+            Assert(display.Range.Font.Position ==
+                   -(int)Math.Round(updatedDisplayRender.DepthPt,
+                       MidpointRounding.AwayFromZero),
+                "Updating Display Math lost its newly derived TeX baseline.");
+            AssertDisplayCenteredByTab(display);
+            AssertCaretAndFollowingTextUseBodyBaseline(word, document,
+                "updated Display Math");
+
+            var exportedDisplay = WordSelectionLaTeXExporter.Export(document.Content);
+            Assert(exportedDisplay.Contains("\\[x^2\\]") &&
+                   exportedDisplay.IndexOf('\t') < 0,
+                "Copy as LaTeX exposed the Display Math centering tab.");
+            var convertedInlineRender = service.RenderPreview("x^2", widthPt,
+                LaTeXBlockLayoutMode.Auto, profile, fontSizePt, false,
+                renderKind: LaTeXBlockKind.InlineMath);
+            var convertedInline = service.ConvertMathRendered(display, "x^2", widthPt,
+                convertedInlineRender, LaTeXBlockKind.InlineMath);
+            Assert(document.Range(convertedInline.Range.Start - 1,
+                       convertedInline.Range.Start).Text != "\t" &&
+                   document.Range(convertedInline.Range.End,
+                       convertedInline.Range.End + 1).Text != "\t" &&
+                   CountCustomTabs(convertedInline.Range.Paragraphs[1]) == 0,
+                "Converting Display Math to Inline Math left its centering scaffold behind.");
+
+            RunMathConversionNumberingProbe(word, document, service, profile,
+                widthPt, fontSizePt);
+        }
+
+        private static void AssertDisplayCenteredByTab(WordInterop.InlineShape display)
+        {
+            Assert(display.Range.Start > display.Range.Paragraphs[1].Range.Start &&
+                   display.Range.Document.Range(display.Range.Start - 1,
+                       display.Range.Start).Text == "\t",
+                "Display Math is not preceded by its owned centering tab.");
+            var tabs = display.Range.Paragraphs[1].Range.ParagraphFormat.TabStops;
+            var centerTabs = 0;
+            for (var index = 1; index <= tabs.Count; index++)
+                if (tabs[index].CustomTab &&
+                    tabs[index].Alignment ==
+                    WordInterop.WdTabAlignment.wdAlignTabCenter)
+                    centerTabs++;
+            Assert(centerTabs == 1,
+                "Display Math does not own exactly one center TabStop.");
+        }
+
+        private static int CountCustomTabs(WordInterop.Paragraph paragraph)
+        {
+            var tabs = paragraph.Range.ParagraphFormat.TabStops;
+            var count = 0;
+            for (var index = 1; index <= tabs.Count; index++)
+                if (tabs[index].CustomTab) count++;
+            return count;
+        }
+
+        private static void RunMathConversionNumberingProbe(
+            WordInterop.Application word, WordInterop.Document document,
+            LaTeXBlockService service, string profile, double widthPt,
+            double fontSizePt)
+        {
+            document.Range(0, document.Content.End - 1).Delete();
+            document.Paragraphs[1].Range.ParagraphFormat.TabStops.ClearAll();
+            document.Range(0, 0).Select();
+            var firstRender = service.RenderPreview("a", widthPt,
+                LaTeXBlockLayoutMode.Auto, profile, fontSizePt, true,
+                renderKind: LaTeXBlockKind.NumberedMath);
+            var first = service.InsertNumberedRendered("a", widthPt,
+                LaTeXBlockLayoutMode.Auto, firstRender);
+            var secondRender = service.RenderPreview("b", widthPt,
+                LaTeXBlockLayoutMode.Auto, profile, fontSizePt, true,
+                renderKind: LaTeXBlockKind.NumberedMath);
+            var paragraphEnd = document.Paragraphs[1].Range.End - 1;
+            document.Range(paragraphEnd, paragraphEnd).Select();
+            service.InsertNumberedRendered("b", widthPt,
+                LaTeXBlockLayoutMode.Auto, secondRender);
+            Assert(document.Fields.Count == 2 &&
+                   EquationNumberText(document.Fields[1]) == "1" &&
+                   EquationNumberText(document.Fields[2]) == "2",
+                "The conversion probe could not establish two numbered equations.");
+
+            var inlineRender = service.RenderPreview("a", widthPt,
+                LaTeXBlockLayoutMode.Auto, profile, fontSizePt, false,
+                renderKind: LaTeXBlockKind.InlineMath);
+            var inline = service.ConvertMathRendered(first, "a", widthPt,
+                inlineRender, LaTeXBlockKind.InlineMath);
+            Assert(document.Fields.Count == 1 &&
+                   EquationNumberText(document.Fields[1]) == "1",
+                "Converting Numbered Math to Inline Math left following numbers stale.");
+
+            var numberedRender = service.RenderPreview("a", widthPt,
+                LaTeXBlockLayoutMode.Auto, profile, fontSizePt, true,
+                renderKind: LaTeXBlockKind.NumberedMath);
+            service.ConvertMathRendered(inline, "a", widthPt, numberedRender,
+                LaTeXBlockKind.NumberedMath);
+            Assert(document.Fields.Count == 2 &&
+                   EquationNumberText(document.Fields[1]) == "1" &&
+                   EquationNumberText(document.Fields[2]) == "2",
+                "Converting Inline Math to Numbered Math did not refresh all numbers.");
         }
 
         private static void AssertCaretAndFollowingTextUseBodyBaseline(
