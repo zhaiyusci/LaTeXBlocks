@@ -5,6 +5,59 @@ Word-and-PowerPoint package line.
 
 ## [Unreleased]
 
+## [0.2.99] — 2026-08-10
+
+### Word
+
+- Numbered equations now participate in the same Auto InlineShape format batch as
+  ordinary inline and display formulas. Their role only selects display-style
+  rendering and validates the available width; the surrounding SEQ field, bookmark,
+  tabs, and paragraph scaffold remain host-owned and survive the shared SVG update.
+
+## [0.2.98] — 2026-08-10
+
+### Word
+
+- A numbered display equation interleaved with ordinary formulas now completes a
+  Ctrl+A Font Size update after save and reopen. If the ordinary direct-media batch
+  reconstructs the surrounding OpenXML envelope, the independent equation update
+  reacquires its current InlineShape by the persisted formula GUID instead of using
+  the deleted COM wrapper.
+
+## [0.2.97] — 2026-08-10
+
+### Word
+
+- Ctrl+A Font Size changes now retain the value committed in Word's native size
+  control and reconcile the selection after Word has propagated the command. Inline
+  and unnumbered display formulas therefore enter the same Auto InlineShape batch,
+  even when the immediate selection size is temporarily mixed or stale.
+
+## [0.2.96] — 2026-08-10
+
+### Word
+
+- Existing inline display formulas written by older Paste From LaTeX versions as
+  unstyled Fixed Content are now interpreted as natural-size Auto formulas. Their
+  next font-size update persists the corrected mode; explicitly styled Blocks remain
+  Fixed even when their TeX source contains a display environment.
+
+## [0.2.95] — 2026-08-10
+
+### Word
+
+- Native Font Size commits are now observed when an individual inline or display
+  formula is selected as an InlineShape. The exact-selection Font Color guard remains
+  separate, so formula colour continues to use Office Graphics Fill without rendering.
+
+## [0.2.94] — 2026-08-10
+
+### Word
+
+- Removed the obsolete render-batch colour fallback now that every external
+  colour-only change is handled directly through Office Graphics Fill. Added
+  separate profiling for StemTeX font-size rendering and the Word batch commit.
+
 ## [0.2.93] — 2026-08-10
 
 ### Word

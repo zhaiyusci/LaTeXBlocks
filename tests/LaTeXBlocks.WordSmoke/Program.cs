@@ -20,12 +20,13 @@ namespace LaTeXBlocks.WordSmoke
         private const string UiaFontColorSmoke = "LATEXBLOCKS_UIA_FONT_COLOR_SMOKE";
         private const string UiaFontColorOnly = "LATEXBLOCKS_UIA_FONT_COLOR_ONLY";
         private const string BaselineColorOnly = "LATEXBLOCKS_BASELINE_COLOR_ONLY";
+        private const string MixedFontSizeOnly = "LATEXBLOCKS_MIXED_FONT_SIZE_ONLY";
         private const string WordJoiner = "\u2060";
         private const uint MouseEventLeftDown = 0x0002;
         private const uint MouseEventLeftUp = 0x0004;
 
         [STAThread]
-        private static int Main()
+        private static int Main(string[] args)
         {
             const string source = "$C_{ij}$";
             const string updatedSource = "$E=mc^2$";
@@ -57,8 +58,9 @@ namespace LaTeXBlocks.WordSmoke
                     Console.WriteLine("Word Font Color accessibility-only smoke passed.");
                     return 0;
                 }
-                if (string.Equals(Environment.GetEnvironmentVariable(StartupShutdownProbeChild), "1",
-                    StringComparison.Ordinal))
+                if (args != null && args.Contains("--startup-shutdown-probe") ||
+                    string.Equals(Environment.GetEnvironmentVariable(StartupShutdownProbeChild), "1",
+                        StringComparison.Ordinal))
                 {
                     Console.WriteLine("StemTeX: testing immediate shutdown during renderer initialization...");
                     RunStartupShutdownProbe();
@@ -505,6 +507,21 @@ namespace LaTeXBlocks.WordSmoke
                        LaTeXBlockService.ResolveImportedFormulaMode(LaTeXContentKind.DisplayMath) ==
                            LaTeXBlockLayoutMode.Auto,
                     "Display math was confused with a user-sized Fixed Block.");
+                var legacyDisplayMetadata = LaTeXBlockMetadata.Create(360, 2,
+                    LaTeXBlockLayoutMode.Fixed, 14, LaTeXBlockRole.Content);
+                var normalizedLegacyDisplay =
+                    LaTeXBlockService.NormalizeLegacyDisplayFormulaMetadata(
+                        legacyDisplayMetadata, "\\[E=mc^2\\]");
+                var styledDisplayBlock = LaTeXBlockMetadata.Create(360, 2,
+                    LaTeXBlockLayoutMode.Fixed, 14, LaTeXBlockRole.Content,
+                    new LaTeXBlockStyle(1.2, 3,
+                        LaTeXBlockVerticalAlignment.Top));
+                Assert(normalizedLegacyDisplay.Mode == LaTeXBlockLayoutMode.Auto &&
+                       normalizedLegacyDisplay.Id == legacyDisplayMetadata.Id &&
+                       ReferenceEquals(styledDisplayBlock,
+                           LaTeXBlockService.NormalizeLegacyDisplayFormulaMetadata(
+                               styledDisplayBlock, "\\[E=mc^2\\]")),
+                    "Legacy display formulas were not promoted without also changing a styled Block.");
                 const string commentedNumberedSource =
                     "\\begin {align}\r\nE&=mc^2 % exact source comment\r\n\\end {align}";
                 var canonicalCommentedNumberedSource =
@@ -591,6 +608,17 @@ namespace LaTeXBlocks.WordSmoke
                 document.Content.Font.Size = 11;
                 document.Range(document.Content.End - 1, document.Content.End - 1).Select();
                 var service = new LaTeXBlockService(word, renderer);
+                if (string.Equals(Environment.GetEnvironmentVariable(MixedFontSizeOnly),
+                        "1", StringComparison.Ordinal))
+                {
+                    RunMixedSelectionFontSizeSmoke(word, service, profile,
+                        0x0000ff, 0x00ff0000);
+                    RunLegacyDisplayPersistenceSmoke(word, service, profile);
+                    RunInterleavedNumberedDisplayPersistenceSmoke(word, service,
+                        profile);
+                    Console.WriteLine("Word mixed Font Size-only smoke passed.");
+                    return 0;
+                }
                 var fixedBorderBeforeAuto = service.RenderPreview("a", 180,
                     LaTeXBlockLayoutMode.Fixed, profile, 14);
                 var serviceAutoLine = service.RenderPreview("a", 180,
@@ -2207,7 +2235,7 @@ namespace LaTeXBlocks.WordSmoke
             LaTeXBlockService service, string profile, int firstColor, int secondColor)
         {
             const string firstSource = "$a^2$";
-            const string secondSource = "$b_2$";
+            const string secondSource = "\\[b_2\\]";
             const string fixtureText = "first xx tail\rsecond yy tail\routside";
             const double originalFontSizePt = 14;
             const double changedFontSizePt = 18;
@@ -2243,7 +2271,7 @@ namespace LaTeXBlocks.WordSmoke
                     .IndexOf("yy", StringComparison.Ordinal);
                 document.Range(secondPlaceholder, secondPlaceholder + 2).Select();
                 var secondRender = service.RenderPreview(secondSource, 360,
-                    LaTeXBlockLayoutMode.Auto, profile, originalFontSizePt, false,
+                    LaTeXBlockLayoutMode.Auto, profile, originalFontSizePt, true,
                     secondColor);
                 var second = service.InsertRendered(secondSource, 360,
                     LaTeXBlockLayoutMode.Auto, secondRender);
@@ -2287,17 +2315,27 @@ namespace LaTeXBlocks.WordSmoke
                 var textBefore = document.Content.Text;
                 document.Range(selectionStart, selectionEnd).Select();
                 word.Selection.Font.Size = (float)changedFontSizePt;
+                Assert(word.Selection.Range.InlineShapes.Count == 2,
+                    "The Ctrl+A-like cross-paragraph range did not expose both formulas.");
+                Assert(Math.Abs((double)word.Selection.Font.Size - changedFontSizePt) < 0.001,
+                    "Word did not expose the committed Font Size on the full mixed selection.");
+                Assert(Math.Abs((double)first.Range.Font.Size - changedFontSizePt) < 0.001 &&
+                       Math.Abs((double)second.Range.Font.Size - changedFontSizePt) < 0.001,
+                    "Word did not apply the full-selection Font Size to both formula anchors.");
 
+                var fontSizeRenderTimer = Stopwatch.StartNew();
                 var changedFirstRender = service.RenderCommittedAsync(firstSource, 360,
                     LaTeXBlockLayoutMode.Auto, profile, changedFontSizePt, false,
                     firstColor).GetAwaiter().GetResult();
                 var changedSecondRender = service.RenderCommittedAsync(secondSource, 360,
-                    LaTeXBlockLayoutMode.Auto, profile, changedFontSizePt, false,
+                    LaTeXBlockLayoutMode.Auto, profile, changedFontSizePt, true,
                     secondColor).GetAwaiter().GetResult();
+                fontSizeRenderTimer.Stop();
                 var firstRange = first.Range;
                 var firstParagraph = firstRange.Paragraphs[1].Range;
                 var secondRange = second.Range;
                 secondParagraph = secondRange.Paragraphs[1].Range;
+                var fontSizeWordCommitTimer = Stopwatch.StartNew();
                 service.UpdateRenderedBatch(new List<LaTeXBlockBatchUpdate>
                 {
                     new LaTeXBlockBatchUpdate(first, firstSource, 360,
@@ -2307,6 +2345,12 @@ namespace LaTeXBlocks.WordSmoke
                         changedSecondRender, secondMetadata, secondRange,
                         secondParagraph.Start, secondParagraph.End)
                 }, true);
+                fontSizeWordCommitTimer.Stop();
+                Console.WriteLine("PROFILE font-size batch (2 formulas): StemTeX=" +
+                    fontSizeRenderTimer.Elapsed.TotalMilliseconds.ToString("0.0") +
+                    " ms, Word commit=" +
+                    fontSizeWordCommitTimer.Elapsed.TotalMilliseconds.ToString("0.0") +
+                    " ms");
 
                 var changedFirst = FindInlineFormula(document, firstMetadata.Id);
                 var changedSecond = FindInlineFormula(document, secondMetadata.Id);
@@ -2390,6 +2434,188 @@ namespace LaTeXBlocks.WordSmoke
             }
         }
 
+        private static void RunLegacyDisplayPersistenceSmoke(
+            WordInterop.Application word, LaTeXBlockService service, string profile)
+        {
+            const string displaySource = "\\[c_3\\]";
+            const double originalFontSizePt = 14;
+            const double changedFontSizePt = 18;
+            var documentPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory,
+                "artifacts", "legacy-display-persistence-" +
+                Process.GetCurrentProcess().Id + ".docx");
+            WordInterop.Document document = null;
+            try
+            {
+                Console.WriteLine("Word: testing reopened legacy display Font Size...");
+                document = word.Documents.Add();
+                document.Range(0, 0).Text = "before zz after";
+                document.Content.Font.Size = (float)originalFontSizePt;
+                var placeholder = (document.Content.Text ?? string.Empty)
+                    .IndexOf("zz", StringComparison.Ordinal);
+                document.Range(placeholder, placeholder + 2).Select();
+                var render = service.RenderPreview(displaySource, 360,
+                    LaTeXBlockLayoutMode.Fixed, profile, originalFontSizePt,
+                    false, LaTeXBlockService.AutomaticTextColor);
+                var legacy = service.InsertRendered(displaySource, 360,
+                    LaTeXBlockLayoutMode.Fixed, render);
+                Assert(LaTeXBlockMetadata.TryParse(legacy.Title,
+                           out var rawMetadata) &&
+                       rawMetadata.Mode == LaTeXBlockLayoutMode.Fixed,
+                    "The legacy display fixture was not persisted as Fixed.");
+                document.SaveAs2(documentPath,
+                    WordInterop.WdSaveFormat.wdFormatXMLDocument);
+                document.Close(WordInterop.WdSaveOptions.wdSaveChanges);
+                Release(document);
+                document = word.Documents.Open(documentPath, ReadOnly: false);
+                var reopened = document.InlineShapes[1];
+                Assert(LaTeXBlockService.TryReadContract(reopened,
+                           out var normalizedMetadata, out var reopenedSource) &&
+                       reopenedSource == displaySource &&
+                       normalizedMetadata.Mode == LaTeXBlockLayoutMode.Auto,
+                    "A reopened legacy display formula was not interpreted as Auto.");
+                document.Content.Select();
+                word.Selection.Font.Size = (float)changedFontSizePt;
+                Assert(Math.Abs((double)reopened.Range.Font.Size -
+                           changedFontSizePt) < 0.001,
+                    "A reopened legacy display anchor did not receive the full-selection Font Size.");
+                Console.WriteLine("Word: reopened legacy display Font Size passed.");
+            }
+            finally
+            {
+                if (document != null)
+                {
+                    document.Close(WordInterop.WdSaveOptions.wdDoNotSaveChanges);
+                    Release(document);
+                }
+            }
+        }
+
+        private static void RunInterleavedNumberedDisplayPersistenceSmoke(
+            WordInterop.Application word, LaTeXBlockService service, string profile)
+        {
+            const string firstSource = "$a^2$";
+            const string numberedSource = "\\[E=mc^2\\]";
+            const string lastSource = "$b_2$";
+            const double originalFontSizePt = 14;
+            const double changedFontSizePt = 18;
+            var documentPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory,
+                "artifacts", "interleaved-numbered-display-" +
+                Process.GetCurrentProcess().Id + ".docx");
+            WordInterop.Document document = null;
+            try
+            {
+                Console.WriteLine("Word: testing an interleaved reopened numbered display...");
+                document = word.Documents.Add();
+                document.Range(0, 0).Text = "first xx tail\r\rthird yy tail";
+                document.Content.Font.Size = (float)originalFontSizePt;
+
+                var firstPlaceholder = (document.Content.Text ?? string.Empty)
+                    .IndexOf("xx", StringComparison.Ordinal);
+                document.Range(firstPlaceholder, firstPlaceholder + 2).Select();
+                var firstRender = service.RenderPreview(firstSource, 360,
+                    LaTeXBlockLayoutMode.Auto, profile, originalFontSizePt);
+                var first = service.InsertRendered(firstSource, 360,
+                    LaTeXBlockLayoutMode.Auto, firstRender);
+                Assert(LaTeXBlockService.TryReadContract(first,
+                           out var firstMetadata, out _),
+                    "The interleaved fixture lost its first formula metadata.");
+
+                var lastPlaceholder = (document.Content.Text ?? string.Empty)
+                    .IndexOf("yy", StringComparison.Ordinal);
+                document.Range(lastPlaceholder, lastPlaceholder + 2).Select();
+                var lastRender = service.RenderPreview(lastSource, 360,
+                    LaTeXBlockLayoutMode.Auto, profile, originalFontSizePt);
+                var last = service.InsertRendered(lastSource, 360,
+                    LaTeXBlockLayoutMode.Auto, lastRender);
+                Assert(LaTeXBlockService.TryReadContract(last,
+                           out var lastMetadata, out _),
+                    "The interleaved fixture lost its last formula metadata.");
+
+                document.Paragraphs[2].Range.Select();
+                word.Selection.Collapse(WordInterop.WdCollapseDirection.wdCollapseStart);
+                var numbered = service.InsertNumberedBlock(numberedSource, 360,
+                    LaTeXBlockLayoutMode.Auto, profile);
+                Assert(LaTeXBlockService.TryReadContract(numbered,
+                           out var numberedMetadata, out _) &&
+                       numberedMetadata.Role == LaTeXBlockRole.NumberedEquation,
+                    "The interleaved fixture did not create a numbered display.");
+
+                document.SaveAs2(documentPath,
+                    WordInterop.WdSaveFormat.wdFormatXMLDocument);
+                document.Close(WordInterop.WdSaveOptions.wdSaveChanges);
+                Release(document);
+                document = word.Documents.Open(documentPath, ReadOnly: false);
+
+                first = LaTeXBlockService.FindInlineShapeById(document,
+                    firstMetadata.Id);
+                numbered = LaTeXBlockService.FindInlineShapeById(document,
+                    numberedMetadata.Id);
+                last = LaTeXBlockService.FindInlineShapeById(document,
+                    lastMetadata.Id);
+                Assert(first != null && numbered != null && last != null,
+                    "The interleaved formulas did not survive save and reopen.");
+                document.Content.Select();
+                word.Selection.Font.Size = (float)changedFontSizePt;
+
+                var changedFirstRender = service.RenderCommittedAsync(firstSource,
+                    360, LaTeXBlockLayoutMode.Auto, profile, changedFontSizePt,
+                    false, LaTeXBlockService.ResolveTextColor(first.Range))
+                    .GetAwaiter().GetResult();
+                var changedLastRender = service.RenderCommittedAsync(lastSource,
+                    360, LaTeXBlockLayoutMode.Auto, profile, changedFontSizePt,
+                    false, LaTeXBlockService.ResolveTextColor(last.Range))
+                    .GetAwaiter().GetResult();
+                var changedNumberedRender = service.RenderCommittedAsync(
+                    numberedSource, 360, LaTeXBlockLayoutMode.Auto, profile,
+                    changedFontSizePt, true,
+                    LaTeXBlockService.ResolveTextColor(numbered.Range))
+                    .GetAwaiter().GetResult();
+                var firstRange = first.Range;
+                var numberedRange = numbered.Range;
+                var lastRange = last.Range;
+                var firstParagraph = firstRange.Paragraphs[1].Range;
+                var numberedParagraph = numberedRange.Paragraphs[1].Range;
+                var lastParagraph = lastRange.Paragraphs[1].Range;
+                service.UpdateRenderedBatch(new List<LaTeXBlockBatchUpdate>
+                {
+                    new LaTeXBlockBatchUpdate(first, firstSource, 360,
+                        changedFirstRender, firstMetadata, firstRange,
+                        firstParagraph.Start, firstParagraph.End),
+                    new LaTeXBlockBatchUpdate(numbered, numberedSource, 360,
+                        changedNumberedRender, numberedMetadata, numberedRange,
+                        numberedParagraph.Start, numberedParagraph.End),
+                    new LaTeXBlockBatchUpdate(last, lastSource, 360,
+                        changedLastRender, lastMetadata, lastRange,
+                        lastParagraph.Start, lastParagraph.End)
+                }, true);
+
+                var currentNumbered = LaTeXBlockService.FindInlineShapeById(document,
+                    numberedMetadata.Id);
+                Assert(currentNumbered != null,
+                    "The unified Auto-inline batch lost the interleaved numbered display.");
+                Assert(LaTeXBlockService.TryReadContract(currentNumbered,
+                           out var changedNumberedMetadata, out _) &&
+                       changedNumberedMetadata.Role ==
+                           LaTeXBlockRole.NumberedEquation &&
+                       Math.Abs(changedNumberedMetadata.FontSizePt -
+                           changedFontSizePt) < 0.001 &&
+                       document.Bookmarks.Exists(
+                           LaTeXBlockService.EquationBookmarkName(
+                               numberedMetadata.Id)) &&
+                       document.Fields.Count == 1,
+                    "The unified Auto-inline batch did not preserve and update the numbered display contract.");
+                Console.WriteLine("Word: interleaved reopened numbered display passed.");
+            }
+            finally
+            {
+                if (document != null)
+                {
+                    document.Close(WordInterop.WdSaveOptions.wdDoNotSaveChanges);
+                    Release(document);
+                }
+            }
+        }
+
         private static void RunWordFormatInteractionStateSmoke()
         {
             var ordinaryAutoMetadata = LaTeXBlockMetadata.Create(360, 2,
@@ -2399,16 +2625,16 @@ namespace LaTeXBlocks.WordSmoke
                 LaTeXBlockRole.NumberedEquation);
             var fixedContentMetadata = LaTeXBlockMetadata.Create(360, 2,
                 LaTeXBlockLayoutMode.Fixed, 14, LaTeXBlockRole.Content);
-            Assert(LaTeXBlockService.CanShareOrdinaryAutoFormatBatch(
+            Assert(LaTeXBlockService.CanShareAutoInlineFormatBatch(
                        ordinaryAutoMetadata, false) &&
-                   !LaTeXBlockService.CanShareOrdinaryAutoFormatBatch(
+                   LaTeXBlockService.CanShareAutoInlineFormatBatch(
                        numberedAutoMetadata, false) &&
-                   !LaTeXBlockService.CanShareOrdinaryAutoFormatBatch(
+                   !LaTeXBlockService.CanShareAutoInlineFormatBatch(
                        fixedContentMetadata, false) &&
-                   !LaTeXBlockService.CanShareOrdinaryAutoFormatBatch(
+                   !LaTeXBlockService.CanShareAutoInlineFormatBatch(
                        ordinaryAutoMetadata, true),
-                "Format batching did not distinguish ordinary Auto inline formulas " +
-                "from numbered equations, fixed Blocks, or width changes.");
+                "Format batching did not include all Auto inline formulas while " +
+                "excluding Fixed Blocks and width changes.");
 
             Console.WriteLine("Word: testing abstract format-interaction transactions...");
             var state = new WordFormatTransactionState();
@@ -3687,7 +3913,10 @@ namespace LaTeXBlocks.WordSmoke
             {
                 UseShellExecute = false
             };
-            startInfo.EnvironmentVariables[StartupShutdownProbeChild] = "1";
+            // Use a command-line switch instead of mutating ProcessStartInfo's
+            // inherited environment. Some launchers preserve both Path and PATH;
+            // merely accessing the .NET Framework environment table then throws.
+            startInfo.Arguments = "--startup-shutdown-probe";
             using (var child = Process.Start(startInfo))
             {
                 Assert(child != null, "The isolated renderer-initialization shutdown probe did not start.");

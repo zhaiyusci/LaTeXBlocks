@@ -754,10 +754,13 @@ namespace LaTeXBlocks.Word
                             nameof(updates));
                     var previous = update.Metadata;
                     if (previous == null ||
-                        previous.Mode != LaTeXBlockLayoutMode.Auto ||
-                        previous.Role != LaTeXBlockRole.Content)
+                        previous.Mode != LaTeXBlockLayoutMode.Auto)
                         throw new InvalidOperationException(
-                            "Only ordinary Auto inline formulas can share a batch replacement.");
+                            "Only Auto inline formulas can share a batch replacement.");
+
+                    if (previous.Role == LaTeXBlockRole.NumberedEquation)
+                        ValidateNumberedEquationPlacement(update.Shape,
+                            update.Render.SvgBytes, update.Render.FontSizePt);
 
                     var range = update.Range;
                     if (document == null) document = range.Document;
@@ -941,12 +944,11 @@ namespace LaTeXBlocks.Word
             }
         }
 
-        internal static bool CanShareOrdinaryAutoFormatBatch(
+        internal static bool CanShareAutoInlineFormatBatch(
             LaTeXBlockMetadata metadata, bool changesWidth)
         {
             return !changesWidth && metadata != null &&
-                   metadata.Mode == LaTeXBlockLayoutMode.Auto &&
-                   metadata.Role == LaTeXBlockRole.Content;
+                   metadata.Mode == LaTeXBlockLayoutMode.Auto;
         }
 
         /// <summary>
@@ -1121,10 +1123,43 @@ namespace LaTeXBlocks.Word
                 if (!LaTeXBlockMetadata.TryParse(shape.Title, out metadata)) return false;
                 source = shape.AlternativeText;
                 if (string.IsNullOrWhiteSpace(source)) { metadata = null; source = null; return false; }
+                metadata = NormalizeLegacyDisplayFormulaMetadata(metadata, source);
                 return true;
             }
             catch (COMException) { metadata = null; source = null; return false; }
             catch (NotImplementedException) { metadata = null; source = null; return false; }
+        }
+
+        internal static WordInterop.InlineShape FindInlineShapeById(
+            WordInterop.Document document, Guid id)
+        {
+            if (document == null || id == Guid.Empty) return null;
+            try
+            {
+                foreach (WordInterop.InlineShape candidate in document.InlineShapes)
+                    if (TryReadContract(candidate, out var metadata, out _) &&
+                        metadata.Id == id)
+                        return candidate;
+            }
+            catch (COMException) { }
+            return null;
+        }
+
+        internal static LaTeXBlockMetadata NormalizeLegacyDisplayFormulaMetadata(
+            LaTeXBlockMetadata metadata, string source)
+        {
+            if (metadata == null || metadata.Mode != LaTeXBlockLayoutMode.Fixed ||
+                metadata.Role != LaTeXBlockRole.Content || metadata.HasExplicitStyle ||
+                !IsDisplayMathSource(source))
+                return metadata;
+            // Paste From LaTeX used to persist unnumbered display formulas as
+            // unstyled Fixed Content. Current user-sized Blocks carry an explicit
+            // style, so this old inline contract can be safely interpreted as the
+            // natural-size Auto formula it was meant to be. The next update writes
+            // the corrected mode back while preserving identity and source.
+            return new LaTeXBlockMetadata(metadata.Id, metadata.WidthPt,
+                metadata.DepthPt, LaTeXBlockLayoutMode.Auto, metadata.FontSizePt,
+                metadata.Role, metadata.FrameWidthPt, metadata.FrameHeightPt);
         }
 
         internal static bool TryReadContract(WordInterop.Shape shape, out LaTeXBlockMetadata metadata,
@@ -3440,6 +3475,9 @@ namespace LaTeXBlocks.Word
 
             internal void CaptureHostFormat()
             {
+                // Word's Flat OPC does not expose every effective Font property for
+                // an inline drawing run. Keep the resolved COM Font snapshot for
+                // those independent properties, plus the host-owned paint state.
                 HostRunFormat = WordInlineRunFormatSnapshot.Capture(Update.Range);
                 PreserveNativeTextColor = NativeTextColorDescriptor.TryCapture(
                     Update.Range, out var textColor);
