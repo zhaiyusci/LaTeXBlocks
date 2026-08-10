@@ -5,6 +5,53 @@ Word-and-PowerPoint package line.
 
 ## [Unreleased]
 
+## [0.2.104] — 2026-08-10
+
+### Word
+
+- Fixed baseline leakage after Display Math and Numbered Math. Their TeX-derived
+  picture offset remains unchanged, while the trailing Shift+Enter boundary and
+  insertion point are reset to the body-text baseline before subsequent typing.
+- Numbered Math now locates its literal closing parenthesis and trailing manual
+  line break from the actual Word range instead of assuming fixed field offsets.
+
+## [0.2.103] — 2026-08-10
+
+### Word
+
+- Display and numbered math now reapply their derived TeX baseline after Word has
+  created line/number scaffolding and moved the insertion point. This prevents
+  Word from merging the drawing run back to `Font.Position = 0` when no U+2060
+  boundary is present.
+
+## [0.2.102] — 2026-08-10
+
+### Word
+
+- Inline Math, Display Math, Numbered Math, and LaTeX Block now have explicit,
+  persisted object kinds and four distinct Ribbon insertion commands.
+- The three math objects store only their delimiter-free math body. Their inline or
+  display wrapper is added only for rendering, while LaTeX Block continues to accept
+  unrestricted text-mode LaTeX source.
+- Only Inline Math uses U+2060 boundaries. Display and numbered math remain
+  InlineShapes in Word's text flow but own display-line scaffolding instead.
+- The shared math editor can atomically convert inline, display, and numbered math,
+  including Word SEQ fields, bookmarks, tab stops, and line scaffolding.
+
+## [0.2.101] — 2026-08-10
+
+### Word
+
+- The Shift+Enter spacing toggle now maps Word's underlying compatibility flag
+  to the native UI behavior correctly, and its Ribbon label is consistently English.
+
+## [0.2.100] — 2026-08-10
+
+### Word
+
+- The Ribbon now exposes the current document's native “Don't expand character
+  spaces on a line ending with Shift+Enter” compatibility option as a toggle.
+
 ## [0.2.99] — 2026-08-10
 
 ### Word

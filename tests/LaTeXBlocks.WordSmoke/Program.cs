@@ -20,6 +20,7 @@ namespace LaTeXBlocks.WordSmoke
         private const string UiaFontColorSmoke = "LATEXBLOCKS_UIA_FONT_COLOR_SMOKE";
         private const string UiaFontColorOnly = "LATEXBLOCKS_UIA_FONT_COLOR_ONLY";
         private const string BaselineColorOnly = "LATEXBLOCKS_BASELINE_COLOR_ONLY";
+        private const string NumberedCaretOnly = "LATEXBLOCKS_NUMBERED_CARET_ONLY";
         private const string MixedFontSizeOnly = "LATEXBLOCKS_MIXED_FONT_SIZE_ONLY";
         private const string WordJoiner = "\u2060";
         private const uint MouseEventLeftDown = 0x0002;
@@ -89,6 +90,19 @@ namespace LaTeXBlocks.WordSmoke
                     document = word.Documents.Add();
                     RunColorOnlyBaselineProbe(word, document, renderer, profile);
                     Console.WriteLine("Word colour-only baseline probe passed.");
+                    return 0;
+                }
+                if (string.Equals(Environment.GetEnvironmentVariable(NumberedCaretOnly),
+                        "1", StringComparison.Ordinal))
+                {
+                    renderer.WarmUp(profile);
+                    word = new WordInterop.Application();
+                    ownsWord = true;
+                    word.Visible = false;
+                    word.DisplayAlerts = WordInterop.WdAlertLevel.wdAlertsNone;
+                    document = word.Documents.Add();
+                    RunMathCaretBaselineProbe(word, document, renderer, profile);
+                    Console.WriteLine("Word math caret/baseline probe passed.");
                     return 0;
                 }
                 RunRenderHostClientSmoke(profile);
@@ -483,11 +497,45 @@ namespace LaTeXBlocks.WordSmoke
                            StringComparison.Ordinal) >= 0 &&
                        ribbonXml.IndexOf("onAction=\"OnReflowFrame\"", StringComparison.Ordinal) >= 0,
                     "The Word Ribbon does not expose the floating-frame reflow command.");
+                Assert(ribbonXml.IndexOf("id=\"" +
+                           LaTeXBlocksRibbon.DontExpandShiftEnterControlId + "\"",
+                           StringComparison.Ordinal) >= 0 &&
+                       ribbonXml.IndexOf("getPressed=\"GetDontExpandShiftEnterPressed\"",
+                           StringComparison.Ordinal) >= 0 &&
+                       ribbonXml.IndexOf("onAction=\"OnDontExpandShiftEnter\"",
+                           StringComparison.Ordinal) >= 0,
+                    "The Word Ribbon does not expose the Shift+Enter spacing option.");
                 Assert(ribbonXml.IndexOf("id=\"LaTeXBlocks.InsertEquationReference\"",
                            StringComparison.Ordinal) >= 0 &&
                        ribbonXml.IndexOf("onAction=\"OnInsertEquationReference\"",
                            StringComparison.Ordinal) >= 0,
                     "The Word Ribbon does not expose the equation-reference command.");
+                Assert(ribbonXml.IndexOf("id=\"LaTeXBlocks.InsertDisplayMath\"",
+                           StringComparison.Ordinal) >= 0 &&
+                       ribbonXml.IndexOf("onAction=\"OnInsertDisplayMath\"",
+                           StringComparison.Ordinal) >= 0,
+                    "The Word Ribbon does not expose a distinct Display Math command.");
+                var inlineKindMetadata = LaTeXBlockMetadata.Create(360, 2,
+                    LaTeXBlockLayoutMode.Auto, 11, LaTeXBlockRole.Content, null,
+                    LaTeXBlockKind.InlineMath);
+                var displayKindMetadata = LaTeXBlockMetadata.Create(360, 2,
+                    LaTeXBlockLayoutMode.Auto, 11, LaTeXBlockRole.Content, null,
+                    LaTeXBlockKind.DisplayMath);
+                Assert(LaTeXBlockMetadata.TryParse(inlineKindMetadata.ToString(),
+                           out var parsedInlineKind) &&
+                       parsedInlineKind.Kind == LaTeXBlockKind.InlineMath &&
+                       LaTeXBlockService.UsesInlineWordJoinerBoundaries(
+                           parsedInlineKind) &&
+                       !LaTeXBlockService.UsesInlineWordJoinerBoundaries(
+                           displayKindMetadata),
+                    "The persisted math kind no longer restricts U+2060 boundaries to Inline Math.");
+                Assert(LaTeXBlockService.NormalizeMathBody("$a+b$") == "a+b" &&
+                       LaTeXBlockService.NormalizeMathBody("\\[a+b\\]") == "a+b" &&
+                       LaTeXBlockService.PrepareMathRenderSource("a+b",
+                           LaTeXBlockKind.InlineMath).Contains("\\(\n") &&
+                       LaTeXBlockService.PrepareMathRenderSource("a+b",
+                           LaTeXBlockKind.DisplayMath).Contains("\\displaystyle"),
+                    "Math objects do not persist a delimiter-free body and add their wrapper only for rendering.");
                 Assert(!LaTeXBlockService.ShouldRefreshForHostFontSizeChange(11, 11, 10),
                     "Selecting and leaving an unchanged formula would spuriously rerender it at the host character size.");
                 Assert(LaTeXBlockService.ShouldRefreshForHostFontSizeChange(11, 12, 11),
@@ -1419,6 +1467,71 @@ namespace LaTeXBlocks.WordSmoke
             Assert(restored != null && positionPreserved && highlightPreserved &&
                    textPreserved && graphicFillColor == targetColor,
                 "Graphics Fill did not recolour the formula while preserving baseline, highlight, and text.");
+        }
+
+        private static void RunMathCaretBaselineProbe(WordInterop.Application word,
+            WordInterop.Document document, StemTeXBackend renderer, string profile)
+        {
+            const string source = "E=mc^2";
+            const double widthPt = 360;
+            const double fontSizePt = 14;
+            var service = new LaTeXBlockService(word, renderer);
+
+            document.Range(0, 0).Text = "before after";
+            document.Content.Font.Size = (float)fontSizePt;
+            document.Range(6, 6).Select();
+            var numberedRender = service.RenderPreview(source, widthPt,
+                LaTeXBlockLayoutMode.Auto, profile, fontSizePt, true);
+            var numbered = service.InsertNumberedRendered(source, widthPt,
+                LaTeXBlockLayoutMode.Auto, numberedRender);
+            var numberedPosition = -(int)Math.Round(numberedRender.DepthPt,
+                MidpointRounding.AwayFromZero);
+            Assert(numberedPosition < 0 &&
+                   numbered.Range.Font.Position == numberedPosition,
+                "Numbered Math lost its TeX baseline.");
+            AssertCaretAndFollowingTextUseBodyBaseline(word, document,
+                "Numbered Math");
+
+            document.Range(0, document.Content.End - 1).Delete();
+            document.Range(0, 0).Text = "before after";
+            document.Content.Font.Size = (float)fontSizePt;
+            document.Range(6, 6).Select();
+            var displayRender = service.RenderPreview(source, widthPt,
+                LaTeXBlockLayoutMode.Auto, profile, fontSizePt, true);
+            var display = service.InsertRendered(source, widthPt,
+                LaTeXBlockLayoutMode.Auto, displayRender, null,
+                LaTeXBlockKind.DisplayMath);
+            var displayPosition = -(int)Math.Round(displayRender.DepthPt,
+                MidpointRounding.AwayFromZero);
+            Assert(displayPosition < 0 &&
+                   display.Range.Font.Position == displayPosition,
+                "Display Math lost its TeX baseline.");
+            AssertCaretAndFollowingTextUseBodyBaseline(word, document,
+                "Display Math");
+        }
+
+        private static void AssertCaretAndFollowingTextUseBodyBaseline(
+            WordInterop.Application word, WordInterop.Document document,
+            string objectName)
+        {
+            var caretStart = word.Selection.Start;
+            var contextStart = Math.Max(0, caretStart - 8);
+            var contextEnd = Math.Min(document.Content.End, caretStart + 8);
+            var caretContext = (document.Range(contextStart, contextEnd).Text ?? string.Empty)
+                .Replace("\r", "<P>").Replace("\v", "<BR>")
+                .Replace("\t", "<TAB>");
+            // Word Range coordinates include field-code delimiters, so the visible
+            // Shift+Enter is not necessarily caretStart - 1 for Numbered Math.
+            Assert(caretStart > 0 && caretContext.Contains("<BR>"),
+                objectName + " did not move the caret past its trailing Shift+Enter. " +
+                "Caret=" + caretStart + ", context=" + caretContext);
+            Assert(word.Selection.Font.Position == 0,
+                objectName + " left the caret at the formula baseline offset.");
+            word.Selection.TypeText("probe");
+            var typed = document.Range(caretStart, caretStart + 5);
+            Assert(typed.Text == "probe" && typed.Font.Position == 0,
+                "Text typed after " + objectName +
+                " inherited the formula baseline offset.");
         }
 
         private static string DescribeStoredSvgPaint(string flatOpc)

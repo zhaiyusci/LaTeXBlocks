@@ -65,12 +65,25 @@ namespace LaTeXBlocks.Word
                     continue;
                 var start = shape.Range.Start;
                 var end = shape.Range.End;
-                if (metadata.Role == LaTeXBlockRole.NumberedEquation)
+                var kind = LaTeXBlockService.ResolveKind(metadata, source);
+                if (kind == LaTeXBlockKind.NumberedMath)
                 {
                     start = NumberedScaffoldStart(shape, selection.Start);
                     end = NumberedScaffoldEnd(shape, selection.End);
-                    source = "\n" + source + "\n";
                 }
+                else if (kind == LaTeXBlockKind.DisplayMath)
+                {
+                    if (start > selection.Start &&
+                        ReadCharacter(shape.Range.Document, start - 1) == '\v') start--;
+                    if (end < selection.End &&
+                        ReadCharacter(shape.Range.Document, end) == '\v') end++;
+                }
+                if (kind == LaTeXBlockKind.InlineMath)
+                    source = "\\(" + LaTeXBlockService.NormalizeMathBody(source) + "\\)";
+                else if (kind == LaTeXBlockKind.DisplayMath ||
+                         kind == LaTeXBlockKind.NumberedMath)
+                    source = "\n\\[" + LaTeXBlockService.NormalizeMathBody(source) +
+                             "\\]\n";
                 tokens[start] = new ExportToken(source, end);
             }
             return tokens;

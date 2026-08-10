@@ -63,6 +63,28 @@ namespace LaTeXBlocks.Word
         private IStemTeXBackend Renderers => rendererPool ?? (rendererPool = new RenderHostClientBackend());
         private LaTeXBlockService Blocks => blocks ?? (blocks = new LaTeXBlockService(Application, Renderers));
 
+        internal bool HasActiveDocument()
+        {
+            return Application.Documents.Count > 0;
+        }
+
+        internal bool GetDontExpandShiftEnter()
+        {
+            // The current Word Advanced-options checkbox is the inverse of the
+            // legacy compatibility flag exposed by the PIA. Keep that inversion
+            // here so the Ribbon's pressed state describes the visible behavior.
+            return HasActiveDocument() && !Application.ActiveDocument.Compatibility[
+                WordInterop.WdCompatibility.wdExpandShiftReturn];
+        }
+
+        internal void SetDontExpandShiftEnter(bool enabled)
+        {
+            if (!HasActiveDocument())
+                throw new InvalidOperationException("Open a Word document first.");
+            Application.ActiveDocument.Compatibility[
+                WordInterop.WdCompatibility.wdExpandShiftReturn] = !enabled;
+        }
+
         private void ThisAddIn_Startup(object sender, EventArgs e)
         {
             try
@@ -533,9 +555,8 @@ namespace LaTeXBlocks.Word
                     tasks.Add(service.RenderCommittedAsync(request.Source,
                         request.Metadata.WidthPt, request.Metadata.Mode, batch.Profile,
                         request.FontSizePt,
-                        request.Metadata.Role == LaTeXBlockRole.NumberedEquation ||
-                        request.Metadata.Mode == LaTeXBlockLayoutMode.Auto &&
-                        LaTeXBlockService.IsDisplayMathSource(request.Source),
+                        request.Metadata.Kind == LaTeXBlockKind.DisplayMath ||
+                        request.Metadata.Kind == LaTeXBlockKind.NumberedMath,
                         request.TextColor));
                 var renders = await Task.WhenAll(tasks).ConfigureAwait(false);
                 await InvokeOnWordUiAsync(() => CompleteFormatBatch(service, batch,
@@ -706,16 +727,36 @@ namespace LaTeXBlocks.Word
             var fontSizePt = LaTeXBlockService.ResolveFontSize(Application.Selection,
                 LaTeXBlockLayoutMode.Auto, 10);
             var textColor = LaTeXBlockService.ResolveTextColor(Application.Selection);
-            using (var editor = new LaTeXBlockEditorForm(Blocks, "$E=mc^2$", 360,
+            using (var editor = new LaTeXBlockEditorForm(Blocks, "E=mc^2", 360,
                 LaTeXBlockLayoutMode.Auto,
                 currentProfile ?? Renderers.DefaultAvailableProfile, SetCurrentProfile, false,
-                fontSizePt, null, false, textColor))
+                fontSizePt, "Insert Inline Math", false, textColor, null, null, null,
+                false, LaTeXBlockKind.InlineMath))
             {
                 if (editor.ShowDialog(new LaTeXBlocksRibbon.WordWindow(Application)) == DialogResult.OK)
                 {
-                    RunProgrammaticMutation(() =>
-                        Blocks.InsertRendered(editor.Source, editor.WidthPt, editor.Mode,
-                            editor.CurrentRender));
+                    RunProgrammaticMutation(() => InsertMathFromEditor(editor));
+                }
+            }
+        }
+
+        internal void ShowInsertDisplayMathEditor()
+        {
+            if (Application.Documents.Count == 0)
+                throw new InvalidOperationException("Open a Word document first.");
+            var fontSizePt = LaTeXBlockService.ResolveFontSize(Application.Selection,
+                LaTeXBlockLayoutMode.Auto, 10);
+            var textColor = LaTeXBlockService.ResolveTextColor(Application.Selection);
+            using (var editor = new LaTeXBlockEditorForm(Blocks, "E=mc^2", 360,
+                LaTeXBlockLayoutMode.Auto,
+                currentProfile ?? Renderers.DefaultAvailableProfile, SetCurrentProfile, false,
+                fontSizePt, "Insert Display Math", true, textColor, null, null, null,
+                false, LaTeXBlockKind.DisplayMath))
+            {
+                if (editor.ShowDialog(new LaTeXBlocksRibbon.WordWindow(Application)) ==
+                    DialogResult.OK)
+                {
+                    RunProgrammaticMutation(() => InsertMathFromEditor(editor));
                 }
             }
         }
@@ -727,17 +768,20 @@ namespace LaTeXBlocks.Word
             var fontSizePt = LaTeXBlockService.ResolveFontSize(Application.Selection,
                 LaTeXBlockLayoutMode.Fixed, 10);
             var textColor = LaTeXBlockService.ResolveTextColor(Application.Selection);
-            using (var editor = new LaTeXBlockEditorForm(Blocks, "\\[E=mc^2\\]", widthPt,
+            using (var editor = new LaTeXBlockEditorForm(Blocks,
+                "This is a LaTeX Block with $E=mc^2$.", widthPt,
                 LaTeXBlockLayoutMode.Fixed,
                 currentProfile ?? Renderers.DefaultAvailableProfile, SetCurrentProfile, false,
                 fontSizePt,
-                null, false, textColor))
+                null, false, textColor, null, null, null, true,
+                LaTeXBlockKind.LaTeXBlock))
             {
                 if (editor.ShowDialog(new LaTeXBlocksRibbon.WordWindow(Application)) == DialogResult.OK)
                 {
                     RunProgrammaticMutation(() =>
                         Blocks.InsertRendered(editor.Source, editor.WidthPt, editor.Mode,
-                            editor.CurrentRender, editor.AcceptedStyle));
+                            editor.CurrentRender, editor.AcceptedStyle,
+                            LaTeXBlockKind.LaTeXBlock));
                 }
             }
         }
@@ -750,17 +794,27 @@ namespace LaTeXBlocks.Word
                 LaTeXBlockLayoutMode.Auto, 10);
             var textColor = LaTeXBlockService.ResolveTextColor(Application.Selection);
             const double widthPt = 360;
-            using (var editor = new LaTeXBlockEditorForm(Blocks, "\\[E=mc^2\\]", widthPt,
+            using (var editor = new LaTeXBlockEditorForm(Blocks, "E=mc^2", widthPt,
                 LaTeXBlockLayoutMode.Auto,
                 currentProfile ?? Renderers.DefaultAvailableProfile, SetCurrentProfile, false,
-                fontSizePt, "Insert Numbered Equation", true, textColor))
+                fontSizePt, "Insert Numbered Math", true, textColor, null, null, null,
+                false, LaTeXBlockKind.NumberedMath))
             {
                 if (editor.ShowDialog(new LaTeXBlocksRibbon.WordWindow(Application)) == DialogResult.OK)
                 {
-                    RunProgrammaticMutation(() =>
-                        Blocks.InsertNumberedRendered(editor.Source, editor.WidthPt, editor.Mode, editor.CurrentRender));
+                    RunProgrammaticMutation(() => InsertMathFromEditor(editor));
                 }
             }
+        }
+
+        private void InsertMathFromEditor(LaTeXBlockEditorForm editor)
+        {
+            if (editor.Kind == LaTeXBlockKind.NumberedMath)
+                Blocks.InsertNumberedRendered(editor.Source, editor.WidthPt, editor.Mode,
+                    editor.CurrentRender);
+            else
+                Blocks.InsertRendered(editor.Source, editor.WidthPt, editor.Mode,
+                    editor.CurrentRender, null, editor.Kind);
         }
 
         internal void ShowInsertEquationReference()
@@ -881,7 +935,10 @@ namespace LaTeXBlocks.Word
                     // The drawing baseline itself depends only on its TeX depth.
                     baseTextFormat.Apply(Application.Selection);
                     Blocks.InsertRendered(item.Segment.Source, item.WidthPt,
-                        mode, item.Render);
+                        mode, item.Render, null,
+                        item.Segment.Kind == LaTeXContentKind.DisplayMath
+                            ? LaTeXBlockKind.DisplayMath
+                            : LaTeXBlockKind.InlineMath);
                 }
             });
             Application.StatusBar = "Pasted LaTeX text with " +
@@ -1011,21 +1068,26 @@ namespace LaTeXBlocks.Word
             using (var editor = new LaTeXBlockEditorForm(Blocks, source, metadata.WidthPt,
                 metadata.Mode, currentProfile ?? Renderers.DefaultAvailableProfile,
                 SetCurrentProfile, true, metadata.FontSizePt, null,
-                metadata.Role == LaTeXBlockRole.NumberedEquation ||
-                metadata.Mode == LaTeXBlockLayoutMode.Auto &&
-                LaTeXBlockService.IsDisplayMathSource(source), textColor, style,
-                outerHeightPt, outerWidthPt, floatingShape != null))
+                metadata.Kind == LaTeXBlockKind.DisplayMath ||
+                metadata.Kind == LaTeXBlockKind.NumberedMath, textColor, style,
+                outerHeightPt, outerWidthPt, floatingShape != null, metadata.Kind))
             {
                 if (editor.ShowDialog(new LaTeXBlocksRibbon.WordWindow(Application)) == DialogResult.OK)
                 {
                     RunProgrammaticMutation(() =>
                     {
-                        var acceptedStyle = editor.Mode == LaTeXBlockLayoutMode.Fixed &&
-                            metadata.Role == LaTeXBlockRole.Content
+                        var acceptedStyle = editor.Kind == LaTeXBlockKind.LaTeXBlock
                             ? editor.AcceptedStyle
                             : null;
                         if (inlineShape != null)
                         {
+                            if (metadata.Kind != LaTeXBlockKind.LaTeXBlock &&
+                                editor.Kind != metadata.Kind)
+                            {
+                                Blocks.ConvertMathRendered(inlineShape, editor.Source,
+                                    editor.WidthPt, editor.CurrentRender, editor.Kind);
+                                return;
+                            }
                             // In Line with Text is only a Word layout choice. A fixed
                             // Content Block can still have an author-sized outer frame,
                             // so editing TeX must preserve that frame. Styled previews
@@ -1038,7 +1100,7 @@ namespace LaTeXBlocks.Word
                                     inlineShape.Width, inlineShape.Height)
                                 : editor.CurrentRender;
                             Blocks.UpdateRendered(inlineShape, editor.Source, editor.WidthPt,
-                                editor.Mode, inlineRender, true, acceptedStyle);
+                                editor.Mode, inlineRender, true, acceptedStyle, editor.Kind);
                         }
                         else
                         {
@@ -1901,9 +1963,8 @@ namespace LaTeXBlocks.Word
                 var render = await service.RenderCommittedAsync(pending.Source,
                     pending.TargetWidthPt, pending.BaseMetadata.Mode, pending.Profile,
                     pending.TargetFontSizePt,
-                    pending.BaseMetadata.Role == LaTeXBlockRole.NumberedEquation ||
-                    pending.BaseMetadata.Mode == LaTeXBlockLayoutMode.Auto &&
-                    LaTeXBlockService.IsDisplayMathSource(pending.Source),
+                    pending.BaseMetadata.Kind == LaTeXBlockKind.DisplayMath ||
+                    pending.BaseMetadata.Kind == LaTeXBlockKind.NumberedMath,
                     pending.TargetTextColor)
                     .ConfigureAwait(false);
                 await InvokeOnWordUiAsync(() => CompleteFormatRefresh(service, pending,

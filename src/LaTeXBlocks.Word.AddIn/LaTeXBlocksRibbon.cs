@@ -11,6 +11,8 @@ namespace LaTeXBlocks.Word
     {
         internal const string WidthControlId = "LaTeXBlocks.WidthPt";
         internal const string ReflowFrameControlId = "LaTeXBlocks.ReflowFrame";
+        internal const string DontExpandShiftEnterControlId =
+            "LaTeXBlocks.DontExpandShiftEnter";
         // EditText is Office's standard pencil/text-edit glyph and is available
         // in both Word and PowerPoint Ribbon hosts.
         internal const string EditBlockImageMso = "EditText";
@@ -29,9 +31,10 @@ namespace LaTeXBlocks.Word
             return "<customUI xmlns=\"http://schemas.microsoft.com/office/2009/07/customui\" onLoad=\"OnLoad\">" +
                    "<ribbon><tabs><tab id=\"LaTeXBlocks.Tab\" label=\"LaTeX Blocks\">" +
                    "<group id=\"LaTeXBlocks.Blocks\" label=\"LaTeX\">" +
-                   "<button id=\"LaTeXBlocks.InsertFormula\" label=\"Insert Formula\" size=\"large\" imageMso=\"EquationInsertNew\" onAction=\"OnInsertFormula\"/>" +
-                   "<button id=\"LaTeXBlocks.InsertBlock\" label=\"Insert Block\" size=\"large\" imageMso=\"TextBoxInsert\" onAction=\"OnInsertBlock\"/>" +
-                   "<button id=\"LaTeXBlocks.InsertNumberedEquation\" label=\"Numbered Equation\" size=\"large\" imageMso=\"CaptionInsert\" onAction=\"OnInsertNumberedEquation\"/>" +
+                   "<button id=\"LaTeXBlocks.InsertFormula\" label=\"Inline Math\" size=\"large\" imageMso=\"EquationInsertNew\" onAction=\"OnInsertFormula\"/>" +
+                   "<button id=\"LaTeXBlocks.InsertDisplayMath\" label=\"Display Math\" size=\"large\" imageMso=\"EquationInsertNew\" onAction=\"OnInsertDisplayMath\"/>" +
+                   "<button id=\"LaTeXBlocks.InsertNumberedEquation\" label=\"Numbered Math\" size=\"large\" imageMso=\"CaptionInsert\" onAction=\"OnInsertNumberedEquation\"/>" +
+                   "<button id=\"LaTeXBlocks.InsertBlock\" label=\"LaTeX Block\" size=\"large\" imageMso=\"TextBoxInsert\" onAction=\"OnInsertBlock\"/>" +
                    "<button id=\"LaTeXBlocks.InsertEquationReference\" label=\"Equation Reference\" imageMso=\"InsertCrossReference\" onAction=\"OnInsertEquationReference\"/>" +
                    "<button id=\"LaTeXBlocks.Edit\" label=\"Edit Block\" size=\"large\" imageMso=\"" +
                    EditBlockImageMso + "\" onAction=\"OnEdit\"/>" +
@@ -40,6 +43,8 @@ namespace LaTeXBlocks.Word
                    "<button id=\"LaTeXBlocks.UpdateEquationNumbers\" label=\"Update Numbers\" imageMso=\"FieldsUpdate\" onAction=\"OnUpdateEquationNumbers\"/>" +
                    "<button id=\"LaTeXBlocks.CopyAsLaTeX\" label=\"Copy as LaTeX\" imageMso=\"Copy\" onAction=\"OnCopyAsLaTeX\"/>" +
                    "<button id=\"LaTeXBlocks.PasteFromLaTeX\" label=\"Paste from LaTeX\" imageMso=\"Paste\" onAction=\"OnPasteFromLaTeX\"/>" +
+                   "<toggleButton id=\"" + DontExpandShiftEnterControlId +
+                   "\" label=\"Don't Expand Shift+Enter Lines\" getEnabled=\"GetDontExpandShiftEnterEnabled\" getPressed=\"GetDontExpandShiftEnterPressed\" onAction=\"OnDontExpandShiftEnter\"/>" +
                    "<editBox id=\"" + WidthControlId +
                    "\" label=\"Typesetting width (pt)\" sizeString=\"000.0\" getText=\"GetWidthText\" getEnabled=\"GetWidthEnabled\" onChange=\"OnWidthChanged\"/>" +
                    "</group></tab></tabs></ribbon></customUI>";
@@ -47,6 +52,7 @@ namespace LaTeXBlocks.Word
 
         public void OnLoad(Office.IRibbonUI ui) { ribbonUi = ui; }
         public void OnInsertFormula(Office.IRibbonControl control) { Run(addIn.ShowInsertFormulaEditor); }
+        public void OnInsertDisplayMath(Office.IRibbonControl control) { Run(addIn.ShowInsertDisplayMathEditor); }
         public void OnInsertBlock(Office.IRibbonControl control) { Run(addIn.ShowInsertBlockEditor); }
         public void OnInsertNumberedEquation(Office.IRibbonControl control) { Run(addIn.ShowInsertNumberedEquationEditor); }
         public void OnInsertEquationReference(Office.IRibbonControl control) { Run(addIn.ShowInsertEquationReference); }
@@ -55,6 +61,20 @@ namespace LaTeXBlocks.Word
         public void OnUpdateEquationNumbers(Office.IRibbonControl control) { Run(addIn.UpdateEquationNumbers); }
         public void OnCopyAsLaTeX(Office.IRibbonControl control) { Run(addIn.CopySelectionAsLaTeX); }
         public void OnPasteFromLaTeX(Office.IRibbonControl control) { Run(addIn.PasteFromLaTeX); }
+        public bool GetDontExpandShiftEnterEnabled(Office.IRibbonControl control)
+        {
+            try { return addIn.HasActiveDocument(); }
+            catch { return false; }
+        }
+        public bool GetDontExpandShiftEnterPressed(Office.IRibbonControl control)
+        {
+            try { return addIn.GetDontExpandShiftEnter(); }
+            catch { return false; }
+        }
+        public void OnDontExpandShiftEnter(Office.IRibbonControl control, bool pressed)
+        {
+            Run(() => addIn.SetDontExpandShiftEnter(pressed));
+        }
         public bool GetReflowFrameEnabled(Office.IRibbonControl control)
         {
             try { return addIn.HasSelectedBlockFrame(); }
@@ -81,6 +101,7 @@ namespace LaTeXBlocks.Word
             {
                 ribbonUi?.InvalidateControl(WidthControlId);
                 ribbonUi?.InvalidateControl(ReflowFrameControlId);
+                ribbonUi?.InvalidateControl(DontExpandShiftEnterControlId);
             }
             catch (COMException) { }
         }

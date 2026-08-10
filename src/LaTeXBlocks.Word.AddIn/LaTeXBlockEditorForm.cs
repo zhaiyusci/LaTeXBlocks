@@ -38,7 +38,7 @@ namespace LaTeXBlocks.Word
         private readonly ToolTip statusToolTip = new ToolTip();
         private readonly Action<string> profileChanged;
         private readonly double inheritedFontSizePt;
-        private readonly bool displayMathStyle;
+        private readonly bool mathEditor;
         private readonly double? previewFrameHeightPt;
         private readonly double? previewFrameWidthPt;
         private readonly double naturalWidthSentinelPt;
@@ -66,12 +66,19 @@ namespace LaTeXBlocks.Word
             string windowTitle = null, bool displayMathStyle = false,
             int textColor = LaTeXBlockService.AutomaticTextColor,
             LaTeXBlockStyle style = null, double? outerHeightPt = null,
-            double? outerWidthPt = null, bool lockModeToFixed = false)
+            double? outerWidthPt = null, bool lockModeToFixed = false,
+            LaTeXBlockKind kind = LaTeXBlockKind.Unspecified)
         {
             this.service = service ?? throw new ArgumentNullException(nameof(service));
             this.profileChanged = profileChanged ?? throw new ArgumentNullException(nameof(profileChanged));
             inheritedFontSizePt = Math.Max(1, Math.Min(200, fontSizePt));
-            this.displayMathStyle = displayMathStyle;
+            if (kind == LaTeXBlockKind.Unspecified)
+                kind = mode == LaTeXBlockLayoutMode.Fixed
+                    ? LaTeXBlockKind.LaTeXBlock
+                    : displayMathStyle
+                        ? LaTeXBlockKind.DisplayMath
+                        : LaTeXBlockKind.InlineMath;
+            mathEditor = kind != LaTeXBlockKind.LaTeXBlock;
             this.lockModeToFixed = lockModeToFixed;
             previewFrameHeightPt = outerHeightPt;
             previewFrameWidthPt = outerWidthPt;
@@ -96,7 +103,9 @@ namespace LaTeXBlocks.Word
                 ScrollBars = ScrollBars.Both,
                 WordWrap = false,
                 Font = new Font("Consolas", 11F),
-                Text = source ?? string.Empty,
+                Text = mathEditor && !string.IsNullOrWhiteSpace(source)
+                    ? LaTeXBlockService.NormalizeMathBody(source)
+                    : source ?? string.Empty,
                 Dock = DockStyle.Fill
             };
             widthSlider = new TrackBar
@@ -173,16 +182,18 @@ namespace LaTeXBlocks.Word
                 Margin = new Padding(0, 4, 0, 0)
             };
             modeBox = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 155 };
-            if (displayMathStyle)
+            if (mathEditor)
             {
-                modeBox.Items.Add("Display equation (Auto)");
-                modeBox.SelectedIndex = 0;
+                modeBox.Items.Add("Inline Math");
+                modeBox.Items.Add("Display Math");
+                modeBox.Items.Add("Numbered Math");
+                modeBox.SelectedIndex = kind == LaTeXBlockKind.DisplayMath ? 1 :
+                    kind == LaTeXBlockKind.NumberedMath ? 2 : 0;
             }
             else
             {
-                modeBox.Items.Add("Auto-width formula");
-                modeBox.Items.Add("LaTeX block (Fixed)");
-                modeBox.SelectedIndex = mode == LaTeXBlockLayoutMode.Auto ? 0 : 1;
+                modeBox.Items.Add("LaTeX Block");
+                modeBox.SelectedIndex = 0;
             }
             profileBox = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 145 };
             foreach (var availableProfile in service.Profiles) profileBox.Items.Add(availableProfile);
@@ -238,7 +249,7 @@ namespace LaTeXBlocks.Word
 
             topPanel = new Panel { Dock = DockStyle.Top, Height = 100, Padding = new Padding(12, 6, 12, 0) };
             var primaryRow = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 28, WrapContents = false };
-            primaryRow.Controls.Add(new Label { Text = "Layout:", AutoSize = true, Margin = new Padding(0, 4, 8, 0) });
+            primaryRow.Controls.Add(new Label { Text = "Type:", AutoSize = true, Margin = new Padding(0, 4, 8, 0) });
             primaryRow.Controls.Add(modeBox);
             primaryRow.Controls.Add(new Label { Text = "Global profile:", AutoSize = true, Margin = new Padding(12, 4, 8, 0) });
             primaryRow.Controls.Add(profileBox);
@@ -399,7 +410,16 @@ namespace LaTeXBlocks.Word
             ? naturalWidthSentinelPt
             : (double)widthBox.Value;
         internal bool WidthIsNatural => Mode == LaTeXBlockLayoutMode.Auto;
-        internal LaTeXBlockLayoutMode Mode => modeBox.SelectedIndex == 0 ? LaTeXBlockLayoutMode.Auto : LaTeXBlockLayoutMode.Fixed;
+        internal LaTeXBlockKind Kind => !mathEditor
+            ? LaTeXBlockKind.LaTeXBlock
+            : modeBox.SelectedIndex == 1
+                ? LaTeXBlockKind.DisplayMath
+                : modeBox.SelectedIndex == 2
+                    ? LaTeXBlockKind.NumberedMath
+                    : LaTeXBlockKind.InlineMath;
+        internal LaTeXBlockLayoutMode Mode => Kind == LaTeXBlockKind.LaTeXBlock
+            ? LaTeXBlockLayoutMode.Fixed
+            : LaTeXBlockLayoutMode.Auto;
         internal string Profile => (string)profileBox.SelectedItem;
         internal double FontSizePt => CanEditStyle ? (double)fontSizeBox.Value : inheritedFontSizePt;
         internal LaTeXBlockStyle Style => !CanEditStyle
@@ -480,11 +500,10 @@ namespace LaTeXBlocks.Word
             // frame is user-owned geometry and it is exactly what fixed Blocks
             // reflow. Keep that semantic restriction visible in the editor rather
             // than accepting a mode change that the service must later reject.
-            modeBox.Enabled = !displayMathStyle && !lockModeToFixed;
+            modeBox.Enabled = mathEditor && !lockModeToFixed;
         }
 
-        private bool CanEditStyle => !displayMathStyle &&
-            Mode == LaTeXBlockLayoutMode.Fixed;
+        private bool CanEditStyle => Kind == LaTeXBlockKind.LaTeXBlock;
 
         private static Button CreateColorButton(Color color)
         {
@@ -587,7 +606,8 @@ namespace LaTeXBlocks.Word
             try
             {
                 var render = await service.RenderPreviewAsync(source, width, mode, profile, fontSize,
-                    displayMathStyle, LaTeXBlockService.ToWordColor(textColor), style,
+                    Kind == LaTeXBlockKind.DisplayMath || Kind == LaTeXBlockKind.NumberedMath,
+                    LaTeXBlockService.ToWordColor(textColor), style,
                     CanEditStyle ? previewFrameHeightPt : null,
                     CanEditStyle ? previewFrameWidthPt : null);
                 phase = "Preview update";

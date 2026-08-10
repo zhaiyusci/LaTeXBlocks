@@ -233,7 +233,14 @@ namespace LaTeXBlocks.Word
             double? outerHeightPt, double? outerWidthPt)
         {
             var normalizedSource = NormalizeSourceText(source);
-            var renderSource = displayMathStyle ? PrepareDisplayMathSource(normalizedSource) : normalizedSource;
+            var renderKind = mode == LaTeXBlockLayoutMode.Fixed
+                ? LaTeXBlockKind.LaTeXBlock
+                : displayMathStyle
+                    ? LaTeXBlockKind.DisplayMath
+                    : LaTeXBlockKind.InlineMath;
+            var renderSource = renderKind == LaTeXBlockKind.LaTeXBlock
+                ? normalizedSource
+                : PrepareMathRenderSource(normalizedSource, renderKind);
             // Fixed Content Blocks use the shared PowerPoint/Word style model. TeX
             // owns layout and leading; SVG owns the shell and Office the foreground.
             // Auto formulas and numbered equations deliberately remain on Word's
@@ -308,11 +315,22 @@ namespace LaTeXBlocks.Word
         internal WordInterop.InlineShape InsertRendered(string source, double widthPt,
             LaTeXBlockLayoutMode mode, LaTeXBlockRender render, LaTeXBlockStyle style)
         {
-            return InsertRenderedCore(source, widthPt, mode, render, style);
+            return InsertRenderedCore(source, widthPt, mode, render, style,
+                mode == LaTeXBlockLayoutMode.Fixed
+                    ? LaTeXBlockKind.LaTeXBlock
+                    : LaTeXBlockKind.InlineMath);
+        }
+
+        internal WordInterop.InlineShape InsertRendered(string source, double widthPt,
+            LaTeXBlockLayoutMode mode, LaTeXBlockRender render, LaTeXBlockStyle style,
+            LaTeXBlockKind kind)
+        {
+            return InsertRenderedCore(source, widthPt, mode, render, style, kind);
         }
 
         private WordInterop.InlineShape InsertRenderedCore(string source, double widthPt,
-            LaTeXBlockLayoutMode mode, LaTeXBlockRender render, LaTeXBlockStyle style)
+            LaTeXBlockLayoutMode mode, LaTeXBlockRender render, LaTeXBlockStyle style,
+            LaTeXBlockKind kind)
         {
             EnsureDocument();
             if (render == null) throw new ArgumentNullException(nameof(render));
@@ -322,7 +340,7 @@ namespace LaTeXBlocks.Word
             if (mode != LaTeXBlockLayoutMode.Fixed) style = null;
             var target = application.Selection.Range.Duplicate;
             var metadata = LaTeXBlockMetadata.Create(widthPt, render.DepthPt, mode, render.FontSizePt,
-                LaTeXBlockRole.Content, style);
+                LaTeXBlockRole.Content, style, kind);
             var document = target.Document;
             var undoStarted = false;
             var documentMutated = false;
@@ -330,6 +348,28 @@ namespace LaTeXBlocks.Word
             {
                 application.UndoRecord.StartCustomRecord("Insert LaTeX Block");
                 undoStarted = true;
+                if (kind == LaTeXBlockKind.DisplayMath)
+                {
+                    if (target.Start != target.End)
+                    {
+                        target.Text = string.Empty;
+                        documentMutated = true;
+                    }
+                    target.Collapse(WordInterop.WdCollapseDirection.wdCollapseStart);
+                    var leadingBreak = NeedsManualBreakBefore(target) ? "\v" : string.Empty;
+                    var trailingBreak = NeedsManualBreakAfter(target) ? "\v" : string.Empty;
+                    var formulaPosition = target.Start + leadingBreak.Length;
+                    if (leadingBreak.Length + trailingBreak.Length > 0)
+                    {
+                        target.Text = leadingBreak + trailingBreak;
+                        documentMutated = true;
+                    }
+                    var formulaTarget = document.Range(formulaPosition, formulaPosition);
+                    var displayShape = InsertRenderedAt(formulaTarget, source, mode, render,
+                        metadata, false, () => documentMutated = true);
+                    MoveCaretAfterDisplayFormula(displayShape);
+                    return displayShape;
+                }
                 return InsertRenderedAt(target, source, mode, render, metadata, true,
                     () => documentMutated = true);
             }
@@ -391,7 +431,8 @@ namespace LaTeXBlocks.Word
                 ConfigureNumberedEquationTabs(target.Paragraphs[1], layout);
 
                 var metadata = LaTeXBlockMetadata.Create(widthPt, render.DepthPt, mode, render.FontSizePt,
-                    LaTeXBlockRole.NumberedEquation);
+                    LaTeXBlockRole.NumberedEquation, null,
+                    LaTeXBlockKind.NumberedMath);
                 var leadingBreak = NeedsManualBreakBefore(target) ? "\v" : string.Empty;
                 var trailingBreak = NeedsManualBreakAfter(target) ? "\v" : string.Empty;
                 var scaffoldStart = target.Start;
@@ -457,7 +498,8 @@ namespace LaTeXBlocks.Word
             // geometries. Normalize only after every host-owned format is final.
             shape = NormalizeWordInlineDrawing(shape, svgSize);
             ApplyHostRunTextFormat(shape, metadata, render.TextColor);
-            if (select) MoveCaretAfterInlineFormula(shape, metadata);
+            if (select)
+                MoveCaretAfterInlineFormula(shape, metadata);
             return shape;
         }
 
@@ -466,9 +508,8 @@ namespace LaTeXBlocks.Word
         {
             var size = fontSizePt ?? ResolveFontSize(oldShape.Range, mode, 10);
             var displayMathStyle = TryReadContract(oldShape, out var metadata, out _) &&
-                                   (metadata.Role == LaTeXBlockRole.NumberedEquation ||
-                                    mode == LaTeXBlockLayoutMode.Auto &&
-                                    IsDisplayMathSource(source));
+                                   (metadata.Kind == LaTeXBlockKind.DisplayMath ||
+                                    metadata.Kind == LaTeXBlockKind.NumberedMath);
             var style = metadata != null && metadata.HasExplicitStyle ? metadata.Style : null;
             var textColor = style != null ? ToWordColor(style.TextColor) : ResolveTextColor(oldShape.Range);
             var preserveFixedFrame = metadata != null &&
@@ -545,6 +586,60 @@ namespace LaTeXBlocks.Word
             return "\\(\n\\displaystyle\n" + body + "\n\\)";
         }
 
+        internal static string NormalizeMathBody(string source)
+        {
+            if (string.IsNullOrWhiteSpace(source))
+                throw new ArgumentException("Math source cannot be empty.", nameof(source));
+            var body = NormalizeSourceText(source).Trim();
+            if (TryStripOuter(body, "\\[", "\\]", out var stripped) ||
+                TryStripOuter(body, "\\(", "\\)", out stripped) ||
+                TryStripOuter(body, "$$", "$$", out stripped) ||
+                TryStripOuter(body, "$", "$", out stripped) ||
+                TryStripEnvironment(body, "displaymath", out stripped) ||
+                TryStripEnvironment(body, "equation", out stripped) ||
+                TryStripEnvironment(body, "equation*", out stripped))
+                body = stripped;
+            else if (TryStripEnvironment(body, "align", out stripped) ||
+                     TryStripEnvironment(body, "align*", out stripped))
+                body = "\\begin{aligned}\n" + stripped + "\n\\end{aligned}";
+            else if (TryStripEnvironment(body, "gather", out stripped) ||
+                     TryStripEnvironment(body, "gather*", out stripped))
+                body = "\\begin{gathered}\n" + stripped + "\n\\end{gathered}";
+            else if (TryStripEnvironment(body, "split", out stripped))
+                body = "\\begin{aligned}\n" + stripped + "\n\\end{aligned}";
+            if (string.IsNullOrWhiteSpace(body))
+                throw new ArgumentException("Math source cannot be empty.", nameof(source));
+            return body;
+        }
+
+        internal static string PrepareMathRenderSource(string source,
+            LaTeXBlockKind kind)
+        {
+            if (kind != LaTeXBlockKind.InlineMath &&
+                kind != LaTeXBlockKind.DisplayMath &&
+                kind != LaTeXBlockKind.NumberedMath)
+                throw new ArgumentException("A math rendering requires a math object kind.",
+                    nameof(kind));
+            var body = NormalizeMathBody(source);
+            return kind == LaTeXBlockKind.InlineMath
+                ? "\\(\n" + body + "\n\\)"
+                : "\\(\n\\displaystyle\n" + body + "\n\\)";
+        }
+
+        internal static LaTeXBlockKind ResolveKind(LaTeXBlockMetadata metadata,
+            string source)
+        {
+            if (metadata == null) return LaTeXBlockKind.Unspecified;
+            if (metadata.Kind != LaTeXBlockKind.Unspecified) return metadata.Kind;
+            if (metadata.Role == LaTeXBlockRole.NumberedEquation)
+                return LaTeXBlockKind.NumberedMath;
+            if (metadata.Mode == LaTeXBlockLayoutMode.Fixed)
+                return LaTeXBlockKind.LaTeXBlock;
+            return IsDisplayMathSource(source)
+                ? LaTeXBlockKind.DisplayMath
+                : LaTeXBlockKind.InlineMath;
+        }
+
         internal static bool IsDisplayMathSource(string source)
         {
             if (string.IsNullOrWhiteSpace(source)) return false;
@@ -601,14 +696,174 @@ namespace LaTeXBlocks.Word
             return true;
         }
 
+        internal WordInterop.InlineShape ConvertMathRendered(
+            WordInterop.InlineShape oldShape, string source, double widthPt,
+            LaTeXBlockRender render, LaTeXBlockKind newKind)
+        {
+            if (oldShape == null) throw new ArgumentNullException(nameof(oldShape));
+            if (render == null) throw new ArgumentNullException(nameof(render));
+            if (newKind != LaTeXBlockKind.InlineMath &&
+                newKind != LaTeXBlockKind.DisplayMath &&
+                newKind != LaTeXBlockKind.NumberedMath)
+                throw new ArgumentException("Math objects can convert only to another math kind.",
+                    nameof(newKind));
+            if (!TryReadContract(oldShape, out var previous, out var previousSource))
+                throw new InvalidOperationException("The selected image is not a LaTeX math object.");
+            var previousKind = ResolveKind(previous, previousSource);
+            if (previousKind == LaTeXBlockKind.LaTeXBlock)
+                throw new InvalidOperationException("A LaTeX Block is not a single math object.");
+            if (previousKind == newKind)
+                return UpdateRendered(oldShape, source, widthPt,
+                    LaTeXBlockLayoutMode.Auto, render, true, null, newKind);
+
+            var document = oldShape.Range.Document;
+            var hostRunFormat = WordInlineRunFormatSnapshot.Capture(oldShape.Range);
+            var nativeTextColor = NativeTextColorDescriptor.Automatic;
+            var preserveNativeTextColor = NativeTextColorDescriptor.TryCapture(
+                oldShape.Range, out nativeTextColor);
+            var mutationStarted = false;
+            var undoStarted = false;
+            try
+            {
+                if (newKind == LaTeXBlockKind.NumberedMath)
+                {
+                    var probe = oldShape.Range.Duplicate;
+                    probe.Collapse(WordInterop.WdCollapseDirection.wdCollapseStart);
+                    ValidateNumberedEquationTarget(probe);
+                    ValidateNumberedEquationWidth(render.SvgBytes,
+                        GetNumberedEquationLayout(probe, render.FontSizePt));
+                    EnsureEquationCategory();
+                }
+
+                application.UndoRecord.StartCustomRecord("Convert LaTeX Math");
+                undoStarted = true;
+                var insertionStart = oldShape.Range.Start;
+                if (previousKind == LaTeXBlockKind.NumberedMath)
+                {
+                    var line = NumberedEquationLineRange(oldShape);
+                    insertionStart = line.Start;
+                    mutationStarted = true;
+                    line.Delete();
+                }
+                else
+                {
+                    if (previousKind == LaTeXBlockKind.InlineMath)
+                        RemoveInlineWordJoinerBoundaries(oldShape);
+                    else if (previousKind == LaTeXBlockKind.DisplayMath)
+                        RemoveDisplayMathBreaks(oldShape);
+                    insertionStart = oldShape.Range.Start;
+                    mutationStarted = true;
+                    oldShape.Delete();
+                }
+
+                var svgSize = ReadSvgPhysicalSize(render.SvgBytes);
+                var role = newKind == LaTeXBlockKind.NumberedMath
+                    ? LaTeXBlockRole.NumberedEquation
+                    : LaTeXBlockRole.Content;
+                var metadata = new LaTeXBlockMetadata(previous.Id, widthPt,
+                    render.DepthPt, LaTeXBlockLayoutMode.Auto, render.FontSizePt,
+                    role, svgSize.WidthPt, svgSize.HeightPt, null, newKind);
+                var target = document.Range(insertionStart, insertionStart);
+
+                if (newKind == LaTeXBlockKind.NumberedMath)
+                {
+                    var layout = GetNumberedEquationLayout(target, render.FontSizePt);
+                    ConfigureNumberedEquationTabs(target.Paragraphs[1], layout);
+                    var leadingBreak = NeedsManualBreakBefore(target) ? "\v" : string.Empty;
+                    var trailingBreak = NeedsManualBreakAfter(target) ? "\v" : string.Empty;
+                    var scaffoldStart = target.Start;
+                    document.Range(scaffoldStart, scaffoldStart).Text =
+                        leadingBreak + "\t\t()" + trailingBreak;
+                    var formulaPosition = scaffoldStart + leadingBreak.Length + 1;
+                    var formula = InsertRenderedAt(
+                        document.Range(formulaPosition, formulaPosition), source,
+                        LaTeXBlockLayoutMode.Auto, render, metadata, false);
+                    RestoreConvertedMathRunFormat(formula, metadata, render,
+                        hostRunFormat, preserveNativeTextColor, nativeTextColor);
+                    var fieldPosition = formula.Range.End + 2;
+                    var field = document.Fields.Add(
+                        document.Range(fieldPosition, fieldPosition),
+                        WordInterop.WdFieldType.wdFieldSequence,
+                        EquationSequenceIdentifier + " \\* ARABIC", false);
+                    if (!field.Update())
+                        throw new InvalidOperationException(
+                            "Word could not create the equation number field.");
+                    document.Bookmarks.Add(EquationBookmarkName(metadata.Id), field.Result);
+                    ValidateNumberedEquationPlacement(formula, render.SvgBytes,
+                        render.FontSizePt);
+                    MoveCaretAfterNumberedEquation(field);
+                    return formula;
+                }
+
+                if (newKind == LaTeXBlockKind.DisplayMath)
+                {
+                    var leadingBreak = NeedsManualBreakBefore(target) ? "\v" : string.Empty;
+                    var trailingBreak = NeedsManualBreakAfter(target) ? "\v" : string.Empty;
+                    target.Text = leadingBreak + trailingBreak;
+                    var formulaPosition = insertionStart + leadingBreak.Length;
+                    var formula = InsertRenderedAt(
+                        document.Range(formulaPosition, formulaPosition), source,
+                        LaTeXBlockLayoutMode.Auto, render, metadata, false);
+                    RestoreConvertedMathRunFormat(formula, metadata, render,
+                        hostRunFormat, preserveNativeTextColor, nativeTextColor);
+                    MoveCaretAfterDisplayFormula(formula);
+                    return formula;
+                }
+
+                var inline = InsertRenderedAt(target, source,
+                    LaTeXBlockLayoutMode.Auto, render, metadata, false);
+                RestoreConvertedMathRunFormat(inline, metadata, render,
+                    hostRunFormat, preserveNativeTextColor, nativeTextColor);
+                MoveCaretAfterInlineFormula(inline, metadata);
+                return inline;
+            }
+            catch (Exception exception)
+            {
+                var rollbackFailure = TryRollbackCustomRecord(document, ref undoStarted,
+                    mutationStarted);
+                if (rollbackFailure != null)
+                    throw new InvalidOperationException(
+                        "Word could not convert the LaTeX math object or restore its previous state.",
+                        new AggregateException(exception, rollbackFailure));
+                throw;
+            }
+            finally
+            {
+                hostRunFormat?.Dispose();
+                if (undoStarted)
+                    try { application.UndoRecord.EndCustomRecord(); } catch { }
+            }
+        }
+
+        private static void RestoreConvertedMathRunFormat(
+            WordInterop.InlineShape shape, LaTeXBlockMetadata metadata,
+            LaTeXBlockRender render, WordInlineRunFormatSnapshot hostRunFormat,
+            bool preserveNativeTextColor,
+            NativeTextColorDescriptor nativeTextColor)
+        {
+            hostRunFormat?.Apply(shape.Range);
+            ApplyHostRunFormat(shape, metadata, render.TextColor);
+            if (preserveNativeTextColor) nativeTextColor.ApplyTo(shape.Range);
+        }
+
+        private static void RemoveDisplayMathBreaks(WordInterop.InlineShape shape)
+        {
+            var following = AdjacentCharacter(shape.Range, false);
+            if (following != null && following.Text == "\v") following.Delete();
+            var preceding = AdjacentCharacter(shape.Range, true);
+            if (preceding != null && preceding.Text == "\v") preceding.Delete();
+        }
+
         internal WordInterop.InlineShape UpdateRendered(WordInterop.InlineShape oldShape, string source, double widthPt,
             LaTeXBlockLayoutMode mode, LaTeXBlockRender render, bool selectReplacement = true,
-            LaTeXBlockStyle style = null)
+            LaTeXBlockStyle style = null,
+            LaTeXBlockKind kind = LaTeXBlockKind.Unspecified)
         {
             if (oldShape == null) throw new ArgumentNullException(nameof(oldShape));
             if (render == null) throw new ArgumentNullException(nameof(render));
             if (!TryReadContract(oldShape, out var previous, out _))
                 throw new InvalidOperationException("The selected image is not a LaTeX Block.");
+            if (kind == LaTeXBlockKind.Unspecified) kind = previous.Kind;
             var numbered = previous.Role == LaTeXBlockRole.NumberedEquation;
             var numberedLayout = default(NumberedEquationLayout);
             WordInterop.Field numberedField = null;
@@ -632,7 +887,8 @@ namespace LaTeXBlocks.Word
                         : null)
                 : null;
             var metadata = new LaTeXBlockMetadata(previous.Id, widthPt, render.DepthPt, mode,
-                render.FontSizePt, previous.Role, svgSize.WidthPt, svgSize.HeightPt, styleData);
+                render.FontSizePt, previous.Role, svgSize.WidthPt, svgSize.HeightPt, styleData,
+                kind);
             var previousUsesInlineWordJoinerBoundaries = UsesInlineWordJoinerBoundaries(previous);
             var nativeTextColor = NativeTextColorDescriptor.Automatic;
             var preserveNativeTextColor = !previous.HasExplicitStyle &&
@@ -768,7 +1024,7 @@ namespace LaTeXBlocks.Word
                     var metadata = new LaTeXBlockMetadata(previous.Id, update.WidthPt,
                         update.Render.DepthPt, LaTeXBlockLayoutMode.Auto,
                         update.Render.FontSizePt, previous.Role, svgSize.WidthPt,
-                        svgSize.HeightPt, null);
+                        svgSize.HeightPt, null, previous.Kind);
                     states.Add(new BatchInlineUpdateState(update, range.Start,
                         range.StoryType, update.ParagraphStart, update.ParagraphEnd,
                         metadata, svgSize));
@@ -1124,6 +1380,8 @@ namespace LaTeXBlocks.Word
                 source = shape.AlternativeText;
                 if (string.IsNullOrWhiteSpace(source)) { metadata = null; source = null; return false; }
                 metadata = NormalizeLegacyDisplayFormulaMetadata(metadata, source);
+                if (metadata.Kind == LaTeXBlockKind.Unspecified)
+                    metadata = metadata.WithKind(ResolveKind(metadata, source));
                 return true;
             }
             catch (COMException) { metadata = null; source = null; return false; }
@@ -1148,7 +1406,8 @@ namespace LaTeXBlocks.Word
         internal static LaTeXBlockMetadata NormalizeLegacyDisplayFormulaMetadata(
             LaTeXBlockMetadata metadata, string source)
         {
-            if (metadata == null || metadata.Mode != LaTeXBlockLayoutMode.Fixed ||
+            if (metadata == null || metadata.Kind != LaTeXBlockKind.Unspecified ||
+                metadata.Mode != LaTeXBlockLayoutMode.Fixed ||
                 metadata.Role != LaTeXBlockRole.Content || metadata.HasExplicitStyle ||
                 !IsDisplayMathSource(source))
                 return metadata;
@@ -1159,7 +1418,8 @@ namespace LaTeXBlocks.Word
             // the corrected mode back while preserving identity and source.
             return new LaTeXBlockMetadata(metadata.Id, metadata.WidthPt,
                 metadata.DepthPt, LaTeXBlockLayoutMode.Auto, metadata.FontSizePt,
-                metadata.Role, metadata.FrameWidthPt, metadata.FrameHeightPt);
+                metadata.Role, metadata.FrameWidthPt, metadata.FrameHeightPt, null,
+                LaTeXBlockKind.DisplayMath);
         }
 
         internal static bool TryReadContract(WordInterop.Shape shape, out LaTeXBlockMetadata metadata,
@@ -1177,6 +1437,8 @@ namespace LaTeXBlocks.Word
                 if (!LaTeXBlockMetadata.TryParse(shape.Title, out metadata)) return false;
                 source = shape.AlternativeText;
                 if (string.IsNullOrWhiteSpace(source)) { metadata = null; source = null; return false; }
+                if (metadata.Kind == LaTeXBlockKind.Unspecified)
+                    metadata = metadata.WithKind(ResolveKind(metadata, source));
                 return true;
             }
             catch (COMException) { metadata = null; source = null; return false; }
@@ -1944,7 +2206,10 @@ namespace LaTeXBlocks.Word
         private static void ApplyContractMetadata(WordInterop.InlineShape shape,
             string source, LaTeXBlockMetadata metadata)
         {
-            shape.AlternativeText = NormalizeSourceText(source);
+            var kind = ResolveKind(metadata, source);
+            shape.AlternativeText = kind == LaTeXBlockKind.LaTeXBlock
+                ? NormalizeSourceText(source)
+                : NormalizeMathBody(source);
             shape.Title = metadata.ToString();
             shape.LockAspectRatio = HasIndependentFrameResize(metadata)
                 ? Office.MsoTriState.msoFalse
@@ -2548,10 +2813,9 @@ namespace LaTeXBlocks.Word
             selection.NoProofing = 0;
         }
 
-        private static bool UsesInlineWordJoinerBoundaries(LaTeXBlockMetadata metadata)
+        internal static bool UsesInlineWordJoinerBoundaries(LaTeXBlockMetadata metadata)
         {
-            return metadata != null && metadata.Mode == LaTeXBlockLayoutMode.Auto &&
-                   metadata.Role == LaTeXBlockRole.Content;
+            return metadata != null && metadata.Kind == LaTeXBlockKind.InlineMath;
         }
 
         private static void EnsureInlineWordJoinerBoundaries(WordInterop.InlineShape shape,
@@ -2618,6 +2882,7 @@ namespace LaTeXBlocks.Word
                 var trailingJoiner = AdjacentCharacter(shape.Range, false);
                 if (IsWordJoiner(trailingJoiner))
                 {
+                    ClearPictureOnlyRunFormat(trailingJoiner);
                     MoveCaretAfterRange(trailingJoiner);
                     return;
                 }
@@ -2625,18 +2890,50 @@ namespace LaTeXBlocks.Word
             MoveCaretAfterRange(shape.Range);
         }
 
+        private static void MoveCaretAfterDisplayFormula(WordInterop.InlineShape shape)
+        {
+            var following = AdjacentCharacter(shape.Range, false);
+            if (following != null && following.Text == "\v")
+            {
+                ClearPictureOnlyRunFormat(following);
+                MoveCaretAfterRange(following);
+                return;
+            }
+            MoveCaretAfterRange(shape.Range);
+        }
+
         private static void MoveCaretAfterNumberedEquation(WordInterop.Field field)
         {
-            // A Word field occupies code/result delimiter characters that are not in
-            // paragraph.Text. Result.End + 2 is immediately after the literal closing
-            // parenthesis. Cross one existing manual break as well so consecutive
-            // numbered equations never leave the caret on the preceding display line.
             var document = field.Result.Document;
-            var position = field.Result.End + 2;
-            if (position < document.Content.End && document.Range(position, position + 1).Text == "\v")
-                position++;
+            var paragraphEnd = field.Result.Paragraphs[1].Range.End;
+            var tailStart = field.Result.End;
+            var tailEnd = Math.Min(paragraphEnd, tailStart + 32);
+            var tailText = document.Range(tailStart, tailEnd).Text ?? string.Empty;
+            var closingOffset = tailText.IndexOf(')');
+            if (closingOffset < 0)
+                throw new InvalidOperationException(
+                    "The numbered equation has lost its closing parenthesis.");
+            var position = tailStart + closingOffset + 1;
+            if (position < document.Content.End)
+            {
+                var following = document.Range(position, position + 1);
+                if (following.Text == "\v")
+                {
+                    ClearPictureOnlyRunFormat(following);
+                    position++;
+                }
+            }
             var caret = document.Range(position, position);
             MoveCaretAfterRange(caret);
+        }
+
+        private static void ClearPictureOnlyRunFormat(WordInterop.Range range)
+        {
+            if (range == null) return;
+            range.Font.Position = 0;
+            range.Font.Subscript = 0;
+            range.Font.Superscript = 0;
+            range.NoProofing = 0;
         }
 
         private static WordInterop.Range AdjacentCharacter(WordInterop.Range shapeRange, bool before)
