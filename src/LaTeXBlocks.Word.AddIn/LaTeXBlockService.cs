@@ -238,7 +238,6 @@ namespace LaTeXBlocks.Word
             double? outerHeightPt, double? outerWidthPt,
             LaTeXBlockKind renderKind)
         {
-            var normalizedSource = NormalizeSourceText(source);
             if (renderKind == LaTeXBlockKind.Unspecified)
                 renderKind = mode == LaTeXBlockLayoutMode.Fixed
                     ? LaTeXBlockKind.LaTeXBlock
@@ -246,8 +245,8 @@ namespace LaTeXBlocks.Word
                         ? LaTeXBlockKind.DisplayMath
                         : LaTeXBlockKind.InlineMath;
             var renderSource = renderKind == LaTeXBlockKind.LaTeXBlock
-                ? normalizedSource
-                : PrepareMathRenderSource(normalizedSource, renderKind);
+                ? source
+                : PrepareMathRenderSource(NormalizeSourceText(source), renderKind);
             // Fixed Content Blocks use the shared PowerPoint/Word style model. TeX
             // owns layout and leading; SVG owns the shell and Office the foreground.
             // Auto formulas and numbered equations deliberately remain on Word's
@@ -295,8 +294,13 @@ namespace LaTeXBlocks.Word
                     mode == LaTeXBlockLayoutMode.Auto, fontSizePt)
                 : await renderers.RenderLatestAsync(profile, renderSource, rendererWidthPt,
                     mode == LaTeXBlockLayoutMode.Auto, fontSizePt);
+            var shellStyle = styledFixedContent && style.HasBackgroundFill
+                ? new LaTeXBlockStyle(style.LineSpacing, 0, style.VerticalAlignment,
+                    style.TextColor, false, style.BackgroundColor,
+                    style.BorderThicknessPt, style.BorderColor)
+                : style;
             var finalSvg = styledFixedContent
-                ? LaTeXBlockSvgFrame.Decorate(result.Bytes, style,
+                ? LaTeXBlockSvgFrame.Decorate(result.Bytes, shellStyle,
                     outerWidthPt ?? widthPt, outerHeightPt)
                 : result.Bytes;
             return new LaTeXBlockRender(WriteSvg(finalSvg), finalSvg, result.DepthPt,
@@ -462,7 +466,10 @@ namespace LaTeXBlocks.Word
                 // second Word Undo record.
                 UpdateEquationNumbers(document, false);
                 ValidateNumberedEquationPlacement(shape, render.SvgBytes, render.FontSizePt);
-                MoveCaretAfterNumberedEquation(field);
+                // Updating SEQ fields can leave the original Field RCW with stale
+                // Result boundaries. Reacquire it through the stable equation
+                // bookmark before locating ')' and the owned manual line break.
+                MoveCaretAfterNumberedEquation(document, metadata.Id);
                 return shape;
             }
             catch (Exception exception)
@@ -494,7 +501,7 @@ namespace LaTeXBlocks.Word
             target.Collapse(WordInterop.WdCollapseDirection.wdCollapseStart);
             var insertionPath = PrepareInsertionSvg(render, mode);
             var svgSize = ReadSvgPhysicalSize(render.SvgBytes);
-            // Title is the only durable per-shape metadata Word exposes on an SVG.
+            // The magic header in Alternative Text is the durable object contract.
             // Keep the root SVG's physical frame separate from the TeX layout width:
             // once a fixed block becomes floating, its frame is what native resize
             // gestures alter, while WidthPt remains the TeX measure.
@@ -754,7 +761,7 @@ namespace LaTeXBlocks.Word
                 {
                     var probe = oldShape.Range.Duplicate;
                     probe.Collapse(WordInterop.WdCollapseDirection.wdCollapseStart);
-                    ValidateNumberedEquationTarget(probe);
+                    ValidateNumberedEquationTarget(probe, previous.Id);
                     ValidateNumberedEquationWidth(render.SvgBytes,
                         GetNumberedEquationLayout(probe, render.FontSizePt));
                     EnsureEquationCategory();
@@ -763,7 +770,7 @@ namespace LaTeXBlocks.Word
                 {
                     var probe = oldShape.Range.Duplicate;
                     probe.Collapse(WordInterop.WdCollapseDirection.wdCollapseStart);
-                    ValidateDisplayMathTarget(probe);
+                    ValidateDisplayMathTarget(probe, previous.Id);
                 }
 
                 application.UndoRecord.StartCustomRecord("Convert LaTeX Math");
@@ -823,7 +830,7 @@ namespace LaTeXBlocks.Word
                     UpdateEquationNumbers(document, false);
                     ValidateNumberedEquationPlacement(formula, render.SvgBytes,
                         render.FontSizePt);
-                    MoveCaretAfterNumberedEquation(field);
+                    MoveCaretAfterNumberedEquation(document, metadata.Id);
                     return formula;
                 }
 
@@ -908,7 +915,17 @@ namespace LaTeXBlocks.Word
             if (render == null) throw new ArgumentNullException(nameof(render));
             if (!TryReadContract(oldShape, out var previous, out _))
                 throw new InvalidOperationException("The selected image is not a LaTeX Block.");
-            if (kind == LaTeXBlockKind.Unspecified) kind = previous.Kind;
+            if (kind == LaTeXBlockKind.Unspecified)
+            {
+                if (mode == LaTeXBlockLayoutMode.Fixed)
+                    kind = LaTeXBlockKind.LaTeXBlock;
+                else if (previous.Kind == LaTeXBlockKind.LaTeXBlock)
+                    kind = IsDisplayMathSource(source)
+                        ? LaTeXBlockKind.DisplayMath
+                        : LaTeXBlockKind.InlineMath;
+                else
+                    kind = previous.Kind;
+            }
             var numbered = previous.Role == LaTeXBlockRole.NumberedEquation;
             var numberedLayout = default(NumberedEquationLayout);
             WordInterop.Field numberedField = null;
@@ -1009,7 +1026,7 @@ namespace LaTeXBlocks.Word
                 {
                     try
                     {
-                        if (numbered) MoveCaretAfterNumberedEquation(numberedField);
+                        if (numbered) MoveCaretAfterNumberedEquation(document, metadata.Id);
                         else if (metadata.Kind == LaTeXBlockKind.DisplayMath)
                             MoveCaretAfterDisplayFormula(replacement);
                         else MoveCaretAfterInlineFormula(replacement, metadata);
@@ -1180,7 +1197,9 @@ namespace LaTeXBlocks.Word
                         // InsertXML reconstruction resets it to black even though the
                         // drawing XML and w:rPr colour are preserved. Replay the value
                         // captured from the old object; never infer it from Font.Color.
-                        ApplyGraphicFill(candidate, state.GraphicFillColor);
+                        if (candidateMetadata.Kind != LaTeXBlockKind.LaTeXBlock)
+                            ApplySvgForegroundFill(candidate,
+                                state.SvgForegroundFillColor);
                         restoredTargets++;
                     }
                     if (restoredTargets != states.Count)
@@ -1428,12 +1447,12 @@ namespace LaTeXBlocks.Word
                 // several picture metadata properties return E_NOTIMPL on those types.
                 // Never probe Title/AlternativeText until the host object is a picture.
                 if (!IsSupportedInlineShapeType(shape.Type)) return false;
-                if (!LaTeXBlockMetadata.TryParse(shape.Title, out metadata)) return false;
-                source = shape.AlternativeText;
+                if (!LaTeXBlockMetadata.TryParse(shape.AlternativeText,
+                        out metadata, out source)) return false;
+                var observedDepthPt = Math.Max(0, -(double)shape.Range.Font.Position);
+                metadata = metadata.WithObservedState(shape.Width, shape.Width,
+                    shape.Height, observedDepthPt);
                 if (string.IsNullOrWhiteSpace(source)) { metadata = null; source = null; return false; }
-                metadata = NormalizeLegacyDisplayFormulaMetadata(metadata, source);
-                if (metadata.Kind == LaTeXBlockKind.Unspecified)
-                    metadata = metadata.WithKind(ResolveKind(metadata, source));
                 return true;
             }
             catch (COMException) { metadata = null; source = null; return false; }
@@ -1455,25 +1474,6 @@ namespace LaTeXBlocks.Word
             return null;
         }
 
-        internal static LaTeXBlockMetadata NormalizeLegacyDisplayFormulaMetadata(
-            LaTeXBlockMetadata metadata, string source)
-        {
-            if (metadata == null || metadata.Kind != LaTeXBlockKind.Unspecified ||
-                metadata.Mode != LaTeXBlockLayoutMode.Fixed ||
-                metadata.Role != LaTeXBlockRole.Content || metadata.HasExplicitStyle ||
-                !IsDisplayMathSource(source))
-                return metadata;
-            // Paste From LaTeX used to persist unnumbered display formulas as
-            // unstyled Fixed Content. Current user-sized Blocks carry an explicit
-            // style, so this old inline contract can be safely interpreted as the
-            // natural-size Auto formula it was meant to be. The next update writes
-            // the corrected mode back while preserving identity and source.
-            return new LaTeXBlockMetadata(metadata.Id, metadata.WidthPt,
-                metadata.DepthPt, LaTeXBlockLayoutMode.Auto, metadata.FontSizePt,
-                metadata.Role, metadata.FrameWidthPt, metadata.FrameHeightPt, null,
-                LaTeXBlockKind.DisplayMath);
-        }
-
         internal static bool TryReadContract(WordInterop.Shape shape, out LaTeXBlockMetadata metadata,
             out string source)
         {
@@ -1486,11 +1486,11 @@ namespace LaTeXBlocks.Word
                 // block just because it exposes an AlternativeText property. SVGs
                 // imported by current Word use the otherwise unnamed type 28.
                 if (!IsSupportedFloatingShapeType(shape.Type)) return false;
-                if (!LaTeXBlockMetadata.TryParse(shape.Title, out metadata)) return false;
-                source = shape.AlternativeText;
+                if (!LaTeXBlockMetadata.TryParse(shape.AlternativeText,
+                        out metadata, out source)) return false;
+                metadata = metadata.WithObservedState(shape.Width, shape.Width,
+                    shape.Height);
                 if (string.IsNullOrWhiteSpace(source)) { metadata = null; source = null; return false; }
-                if (metadata.Kind == LaTeXBlockKind.Unspecified)
-                    metadata = metadata.WithKind(ResolveKind(metadata, source));
                 return true;
             }
             catch (COMException) { metadata = null; source = null; return false; }
@@ -1994,7 +1994,8 @@ namespace LaTeXBlocks.Word
             return rootTag.Insert(insertion, " " + replacement);
         }
 
-        internal static void ValidateNumberedEquationTarget(WordInterop.Range target)
+        internal static void ValidateNumberedEquationTarget(WordInterop.Range target,
+            Guid? replacedObjectId = null)
         {
             if (target == null) throw new ArgumentNullException(nameof(target));
             if (target.Start != target.End)
@@ -2007,41 +2008,17 @@ namespace LaTeXBlocks.Word
                 WordInterop.WdLineSpacing.wdLineSpaceExactly)
                 throw new InvalidOperationException(
                     "A same-paragraph display equation cannot expand a line with Exact line spacing. Use Single, At least, or Multiple line spacing first.");
-            ValidateParagraphTabOwnership(target.Paragraphs[1]);
-            ValidateParagraphTabStops(target.Paragraphs[1]);
-            ValidateEquationInsertionPoint(target);
+            ValidateEquationInsertionPoint(target, replacedObjectId);
         }
 
-        private static void ValidateDisplayMathTarget(WordInterop.Range target)
+        private static void ValidateDisplayMathTarget(WordInterop.Range target,
+            Guid? replacedObjectId = null)
         {
             if (target == null) throw new ArgumentNullException(nameof(target));
             if (target.Start != target.End)
                 throw new InvalidOperationException(
                     "Place a collapsed insertion point where the display math belongs.");
-            ValidateParagraphTabOwnership(target.Paragraphs[1]);
-            ValidateParagraphTabStops(target.Paragraphs[1]);
-            ValidateEquationInsertionPoint(target);
-        }
-
-        private static void ValidateParagraphTabOwnership(WordInterop.Paragraph paragraph)
-        {
-            var range = paragraph.Range;
-            var paragraphEnd = range.End;
-            var search = range.Duplicate;
-            search.Find.ClearFormatting();
-            while (search.Find.Execute(FindText: "\t", MatchCase: false, MatchWholeWord: false,
-                       MatchWildcards: false, Forward: true, Wrap: WordInterop.WdFindWrap.wdFindStop,
-                       Format: false))
-            {
-                var tabStart = search.Start;
-                var belongsToMath = IsNumberedShapeAt(range.Document, tabStart + 1) ||
-                                    IsNumberedShapeAt(range.Document, tabStart - 1) ||
-                                    IsDisplayShapeAt(range.Document, tabStart + 1);
-                if (!belongsToMath)
-                    throw new InvalidOperationException(
-                        "This paragraph already uses tabs for ordinary content. Display and numbered math own their paragraph's math tab stops.");
-                search.SetRange(search.End, paragraphEnd);
-            }
+            ValidateEquationInsertionPoint(target, replacedObjectId);
         }
 
         private static bool IsNumberedShapeAt(WordInterop.Document document, int position)
@@ -2053,69 +2030,15 @@ namespace LaTeXBlocks.Word
                    metadata.Role == LaTeXBlockRole.NumberedEquation;
         }
 
-        private static bool IsDisplayShapeAt(WordInterop.Document document, int position)
-        {
-            if (position < 0 || position >= document.Content.End) return false;
-            var candidate = document.Range(position, position + 1);
-            if (candidate.InlineShapes.Count != 1) return false;
-            return TryReadContract(candidate.InlineShapes[1], out var metadata, out _) &&
-                   metadata.Kind == LaTeXBlockKind.DisplayMath;
-        }
-
-        private static void ValidateParagraphTabStops(WordInterop.Paragraph paragraph)
-        {
-            var numberedShapes = 0;
-            var displayShapes = 0;
-            foreach (WordInterop.InlineShape shape in paragraph.Range.InlineShapes)
-                if (TryReadContract(shape, out var metadata, out _))
-                {
-                    if (metadata.Role == LaTeXBlockRole.NumberedEquation)
-                        numberedShapes++;
-                    else if (metadata.Kind == LaTeXBlockKind.DisplayMath)
-                        displayShapes++;
-                }
-
-            var tabs = paragraph.Range.ParagraphFormat.TabStops;
-            var customTabs = 0;
-            var hasCenter = false;
-            var hasRight = false;
-            for (var index = 1; index <= tabs.Count; index++)
-            {
-                if (!tabs[index].CustomTab) continue;
-                customTabs++;
-                hasCenter |= tabs[index].Alignment == WordInterop.WdTabAlignment.wdAlignTabCenter;
-                hasRight |= tabs[index].Alignment == WordInterop.WdTabAlignment.wdAlignTabRight;
-            }
-
-            if (customTabs == 0)
-            {
-                if (numberedShapes > 0 || displayShapes > 0)
-                    throw new InvalidOperationException(
-                        "The existing display-math paragraph has lost its tab stops.");
-                return;
-            }
-            if (numberedShapes == 0 && displayShapes == 0)
-                throw new InvalidOperationException(
-                    "This paragraph already has custom tab stops. Display and numbered math must own their tab layout.");
-            if (numberedShapes > 0)
-            {
-                if (customTabs != 2 || !hasCenter || !hasRight)
-                    throw new InvalidOperationException(
-                        "The existing numbered-equation paragraph has conflicting tab stops.");
-            }
-            else if (customTabs != 1 || !hasCenter || hasRight)
-            {
-                throw new InvalidOperationException(
-                    "The existing display-math paragraph has conflicting tab stops.");
-            }
-        }
-
-        private static void ValidateEquationInsertionPoint(WordInterop.Range target)
+        private static void ValidateEquationInsertionPoint(WordInterop.Range target,
+            Guid? replacedObjectId = null)
         {
             foreach (WordInterop.InlineShape shape in target.Paragraphs[1].Range.InlineShapes)
             {
                 if (!TryReadContract(shape, out var metadata, out _) ||
                     metadata.Role != LaTeXBlockRole.NumberedEquation) continue;
+                if (replacedObjectId.HasValue && metadata.Id == replacedObjectId.Value)
+                    continue;
                 var line = NumberedEquationLineRange(shape);
                 if (target.Start > line.Start && target.Start < line.End)
                     throw new InvalidOperationException(
@@ -2273,16 +2196,6 @@ namespace LaTeXBlocks.Word
             }
             var target = shape.Range.Duplicate;
             target.Collapse(WordInterop.WdCollapseDirection.wdCollapseStart);
-            ValidateParagraphTabOwnership(target.Paragraphs[1]);
-            var tabs = target.Paragraphs[1].Range.ParagraphFormat.TabStops;
-            var hasCustomTab = false;
-            for (var index = 1; index <= tabs.Count; index++)
-                if (tabs[index].CustomTab)
-                {
-                    hasCustomTab = true;
-                    break;
-                }
-            if (hasCustomTab) ValidateParagraphTabStops(target.Paragraphs[1]);
             ConfigureTabsForDisplayInsertion(target);
             target.Text = "\t";
         }
@@ -2377,10 +2290,11 @@ namespace LaTeXBlocks.Word
             string source, LaTeXBlockMetadata metadata)
         {
             var kind = ResolveKind(metadata, source);
-            shape.AlternativeText = kind == LaTeXBlockKind.LaTeXBlock
+            var storedSource = kind == LaTeXBlockKind.LaTeXBlock
                 ? NormalizeSourceText(source)
                 : NormalizeMathBody(source);
-            shape.Title = metadata.ToString();
+            shape.AlternativeText = metadata.Serialize(storedSource);
+            shape.Title = string.Empty;
             shape.LockAspectRatio = HasIndependentFrameResize(metadata)
                 ? Office.MsoTriState.msoFalse
                 : Office.MsoTriState.msoTrue;
@@ -2390,9 +2304,8 @@ namespace LaTeXBlocks.Word
             LaTeXBlockMetadata metadata, int textColor)
         {
             ApplyHostRunTextFormat(shape, metadata, textColor);
-            if (metadata.Mode == LaTeXBlockLayoutMode.Auto ||
-                metadata.HasExplicitStyle)
-                ApplyGraphicFill(shape, textColor);
+            if (metadata.Kind != LaTeXBlockKind.LaTeXBlock)
+                ApplySvgForegroundFill(shape, textColor);
         }
 
         private static void ApplyHostRunTextFormat(WordInterop.InlineShape shape,
@@ -2415,7 +2328,9 @@ namespace LaTeXBlocks.Word
             // This is the colour actually used by the completed render: native Word
             // Font Color for Auto/legacy objects, or durable style colour for a styled
             // Fixed Block. Alternative Text remains exactly the author-written source.
-            shape.Range.Font.Color = (WordInterop.WdColor)NormalizeTextColor(textColor);
+            if (metadata.Kind != LaTeXBlockKind.LaTeXBlock)
+                shape.Range.Font.Color =
+                    (WordInterop.WdColor)NormalizeTextColor(textColor);
             ApplyBaselinePosition(shape, metadata);
             // InsertXML used by NormalizeWordInlineDrawing rebuilds the DrawingML
             // object and may restore Word's default aspect lock. Fixed Content Blocks
@@ -2427,7 +2342,12 @@ namespace LaTeXBlocks.Word
                 shape.LockAspectRatio = Office.MsoTriState.msoFalse;
         }
 
-        internal static void ApplyGraphicFill(WordInterop.InlineShape shape,
+        // Office calls this property "Graphics Fill", but for an SVG it replaces
+        // only paint that the SVG leaves unspecified.  It is therefore the Block's
+        // foreground/text colour, not LaTeXBlockStyle.BackgroundColor.  The latter
+        // is emitted as an explicit rectangle by LaTeXBlockSvgFrame and must never
+        // flow through this native Office property.
+        internal static void ApplySvgForegroundFill(WordInterop.InlineShape shape,
             int textColor)
         {
             if (shape == null) throw new ArgumentNullException(nameof(shape));
@@ -2436,11 +2356,21 @@ namespace LaTeXBlocks.Word
             try
             {
                 fill = shape.Fill;
-                fill.Visible = Office.MsoTriState.msoTrue;
-                fill.Solid();
                 foreground = fill.ForeColor;
                 var color = NormalizeTextColor(textColor);
-                foreground.RGB = color == AutomaticTextColor ? 0 : color;
+                var targetRgb = color == AutomaticTextColor ? 0 : color;
+                var visible = fill.Visible == Office.MsoTriState.msoTrue;
+                var solid = fill.Type == Office.MsoFillType.msoFillSolid;
+                if (visible && solid &&
+                    NormalizeTextColor(foreground.RGB) == targetRgb)
+                    return;
+
+                // Existing formula drawings already have a visible solid fill. Do
+                // not call Solid() again: Word rebuilds the fill state before RGB is
+                // assigned, which can expose an intermediate/default paint frame.
+                if (!visible) fill.Visible = Office.MsoTriState.msoTrue;
+                if (!solid) fill.Solid();
+                foreground.RGB = targetRgb;
             }
             finally
             {
@@ -2449,14 +2379,15 @@ namespace LaTeXBlocks.Word
             }
         }
 
-        internal bool TryApplyGraphicFillsBatch(
+        internal bool TryApplySvgForegroundFillsBatch(
             IList<LaTeXBlockColorUpdate> updates)
         {
             if (updates == null) throw new ArgumentNullException(nameof(updates));
             if (updates.Count == 0) return false;
             foreach (var update in updates)
                 if (update?.Shape == null ||
-                    !TryReadContract(update.Shape, out _, out _))
+                    !TryReadContract(update.Shape, out var metadata, out _) ||
+                    metadata.Kind == LaTeXBlockKind.LaTeXBlock)
                     return false;
 
             var undoStarted = false;
@@ -2466,7 +2397,14 @@ namespace LaTeXBlocks.Word
                     "Update LaTeX Block Graphic Fills");
                 undoStarted = true;
                 foreach (var update in updates)
-                    ApplyGraphicFill(update.Shape, update.TargetTextColor);
+                {
+                    if (update.TargetNativeTextColor.HasValue &&
+                        (!NativeTextColorDescriptor.TryCapture(update.Shape.Range,
+                             out var liveTextColor) ||
+                         !liveTextColor.Equals(update.TargetNativeTextColor.Value)))
+                        update.TargetNativeTextColor.Value.ApplyTo(update.Shape.Range);
+                    ApplySvgForegroundFill(update.Shape, update.TargetTextColor);
+                }
                 return true;
             }
             finally
@@ -3072,29 +3010,24 @@ namespace LaTeXBlocks.Word
             MoveCaretAfterRange(shape.Range);
         }
 
-        private static void MoveCaretAfterNumberedEquation(WordInterop.Field field)
+        private static void MoveCaretAfterNumberedEquation(WordInterop.Document document,
+            Guid id)
         {
-            var document = field.Result.Document;
-            var paragraphEnd = field.Result.Paragraphs[1].Range.End;
-            var tailStart = field.Result.End;
-            var tailEnd = Math.Min(paragraphEnd, tailStart + 32);
-            var tailText = document.Range(tailStart, tailEnd).Text ?? string.Empty;
-            var closingOffset = tailText.IndexOf(')');
-            if (closingOffset < 0)
+            var bookmarkName = EquationBookmarkName(id);
+            if (document == null || !document.Bookmarks.Exists(bookmarkName))
                 throw new InvalidOperationException(
-                    "The numbered equation has lost its closing parenthesis.");
-            var position = tailStart + closingOffset + 1;
-            if (position < document.Content.End)
+                    "The numbered equation has lost its number bookmark.");
+            // The bookmark covers the current SEQ result. Word places the field-end
+            // marker and literal ')' in the next two character positions.
+            var position = document.Bookmarks[bookmarkName].Range.End + 2;
+            if (position > document.Content.End) position = document.Content.End;
+            if (position < document.Content.End &&
+                document.Range(position, position + 1).Text == "\v")
             {
-                var following = document.Range(position, position + 1);
-                if (following.Text == "\v")
-                {
-                    ClearPictureOnlyRunFormat(following);
-                    position++;
-                }
+                ClearPictureOnlyRunFormat(document.Range(position, position + 1));
+                position++;
             }
-            var caret = document.Range(position, position);
-            MoveCaretAfterRange(caret);
+            MoveCaretAfterRange(document.Range(position, position));
         }
 
         private static void ClearPictureOnlyRunFormat(WordInterop.Range range)
@@ -3253,7 +3186,9 @@ namespace LaTeXBlocks.Word
                 formats[metadata.Id] = new BatchInlineXmlFormat(state.SvgSize,
                     state.Metadata.FontSizePt, state.Metadata.DepthPt,
                     properties.Success ? properties.Value : "<w:rPr></w:rPr>",
-                    state.Metadata, state.Update.Source);
+                    state.Metadata, state.Metadata.Kind == LaTeXBlockKind.LaTeXBlock
+                        ? NormalizeSourceText(state.Update.Source)
+                        : NormalizeMathBody(state.Update.Source));
             }
             if (formats.Count != states.Count)
                 throw new InvalidDataException(
@@ -3337,8 +3272,8 @@ namespace LaTeXBlocks.Word
                 {
                     var documentProperties = run.SelectSingleNode(".//wp:docPr",
                         namespaces) as XmlElement;
-                    var title = documentProperties?.GetAttribute("title");
-                    if (!LaTeXBlockMetadata.TryParse(title, out var oldMetadata) ||
+                    var alternativeText = documentProperties?.GetAttribute("descr");
+                    if (!LaTeXBlockMetadata.TryParse(alternativeText, out var oldMetadata) ||
                         !targets.TryGetValue(oldMetadata.Id, out var state) ||
                         !formats.TryGetValue(oldMetadata.Id, out var format))
                         continue;
@@ -3415,14 +3350,16 @@ namespace LaTeXBlocks.Word
             var documentProperties = run.SelectSingleNode(".//wp:docPr", namespaces)
                 as XmlElement ?? throw new InvalidDataException(
                     "Word inline SVG has no wp:docPr element.");
-            documentProperties.SetAttribute("title", format.Metadata.ToString());
-            documentProperties.SetAttribute("descr", format.Source);
+            documentProperties.SetAttribute("title", string.Empty);
+            documentProperties.SetAttribute("descr",
+                format.Metadata.Serialize(format.Source));
             var pictureProperties = run.SelectSingleNode(".//pic:cNvPr", namespaces)
                 as XmlElement;
             if (pictureProperties != null)
             {
-                pictureProperties.SetAttribute("title", format.Metadata.ToString());
-                pictureProperties.SetAttribute("descr", format.Source);
+                pictureProperties.SetAttribute("title", string.Empty);
+                pictureProperties.SetAttribute("descr",
+                    format.Metadata.Serialize(format.Source));
             }
 
             var owner = run.OwnerDocument ?? throw new InvalidDataException(
@@ -3475,11 +3412,12 @@ namespace LaTeXBlocks.Word
             out LaTeXBlockMetadata metadata)
         {
             metadata = null;
-            var title = Regex.Match(xml,
-                "<wp:docPr\\b[^>]*\\btitle=\"(?<title>[^\"]*)\"[^>]*/>",
+            var description = Regex.Match(xml,
+                "<wp:docPr\\b[^>]*\\bdescr=\"(?<description>[^\"]*)\"[^>]*/>",
                 RegexOptions.CultureInvariant);
-            return title.Success && LaTeXBlockMetadata.TryParse(
-                WebUtility.HtmlDecode(title.Groups["title"].Value), out metadata);
+            return description.Success && LaTeXBlockMetadata.TryParse(
+                WebUtility.HtmlDecode(description.Groups["description"].Value),
+                out metadata, out _);
         }
 
         private static bool TryReadWordInlineBatchId(string xml, out Guid id)
@@ -3650,9 +3588,10 @@ namespace LaTeXBlocks.Word
             if (!documentProperties.Success)
                 throw new InvalidDataException("Word inline SVG has no wp:docPr element.");
             var normalizedDocumentProperties = SetXmlStringAttribute(
-                documentProperties.Value, "title", format.Metadata.ToString());
+                documentProperties.Value, "title", string.Empty);
             normalizedDocumentProperties = SetXmlStringAttribute(
-                normalizedDocumentProperties, "descr", format.Source);
+                normalizedDocumentProperties, "descr",
+                format.Metadata.Serialize(format.Source));
             patched = patched.Remove(documentProperties.Index, documentProperties.Length)
                 .Insert(documentProperties.Index, normalizedDocumentProperties);
 
@@ -3661,10 +3600,10 @@ namespace LaTeXBlocks.Word
             if (picturePropertiesMetadata.Success)
             {
                 var normalizedPictureMetadata = SetXmlStringAttribute(
-                    picturePropertiesMetadata.Value, "title",
-                    format.Metadata.ToString());
+                    picturePropertiesMetadata.Value, "title", string.Empty);
                 normalizedPictureMetadata = SetXmlStringAttribute(
-                    normalizedPictureMetadata, "descr", format.Source);
+                    normalizedPictureMetadata, "descr",
+                    format.Metadata.Serialize(format.Source));
                 patched = patched.Remove(picturePropertiesMetadata.Index,
                         picturePropertiesMetadata.Length)
                     .Insert(picturePropertiesMetadata.Index,
@@ -3938,7 +3877,7 @@ namespace LaTeXBlocks.Word
             internal WordInlineRunFormatSnapshot HostRunFormat { get; private set; }
             internal NativeTextColorDescriptor NativeTextColor { get; private set; }
             internal bool PreserveNativeTextColor { get; private set; }
-            internal int GraphicFillColor { get; private set; }
+            internal int SvgForegroundFillColor { get; private set; }
 
             internal void CaptureHostFormat()
             {
@@ -3949,12 +3888,12 @@ namespace LaTeXBlocks.Word
                 PreserveNativeTextColor = NativeTextColorDescriptor.TryCapture(
                     Update.Range, out var textColor);
                 NativeTextColor = textColor;
-                GraphicFillColor = CaptureGraphicFillColor(Update.Shape,
+                SvgForegroundFillColor = CaptureSvgForegroundFillColor(Update.Shape,
                     Update.Render.TextColor);
             }
         }
 
-        private static int CaptureGraphicFillColor(WordInterop.InlineShape shape,
+        private static int CaptureSvgForegroundFillColor(WordInterop.InlineShape shape,
             int fallbackColor)
         {
             if (shape == null) return NormalizeTextColor(fallbackColor);
@@ -4014,14 +3953,17 @@ namespace LaTeXBlocks.Word
     internal sealed class LaTeXBlockColorUpdate
     {
         internal LaTeXBlockColorUpdate(WordInterop.InlineShape shape,
-            int targetTextColor)
+            int targetTextColor,
+            LaTeXBlockService.NativeTextColorDescriptor? targetNativeTextColor = null)
         {
             Shape = shape ?? throw new ArgumentNullException(nameof(shape));
             TargetTextColor = LaTeXBlockService.NormalizeTextColor(targetTextColor);
+            TargetNativeTextColor = targetNativeTextColor;
         }
 
         internal WordInterop.InlineShape Shape { get; }
         internal int TargetTextColor { get; }
+        internal LaTeXBlockService.NativeTextColorDescriptor? TargetNativeTextColor { get; }
     }
 
     internal sealed class LaTeXBlockRender

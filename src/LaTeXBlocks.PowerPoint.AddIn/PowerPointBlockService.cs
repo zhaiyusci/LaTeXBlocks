@@ -12,15 +12,8 @@ namespace LaTeXBlocks.PowerPoint
 {
     internal sealed class PowerPointBlockService
     {
-        internal const string KindTag = "LATEXBLOCKS_KIND";
-        internal const string KindValue = "LATEX_BLOCK";
         internal const string SvgWidthTag = "LATEXBLOCKS_SVG_WIDTH_PT";
         internal const string SvgHeightTag = "LATEXBLOCKS_SVG_HEIGHT_PT";
-        // Older releases wrote a serialized default style tag for every Block,
-        // even though a default-valued editor state still used the bare legacy
-        // SVG route. This separate marker records the newer, literal meaning:
-        // an editor-accepted default is real 1.20× TeX leading plus an SVG shell.
-        internal const string StyleAppliedTag = "LATEXBLOCKS_TEX_STYLE_APPLIED";
         private readonly PowerPointInterop.Application application;
         private readonly IStemTeXBackend renderers;
         private readonly string cacheDirectory;
@@ -113,7 +106,6 @@ namespace LaTeXBlocks.PowerPoint
             double? outerHeightPt, double? outerWidthPt, bool committed,
             bool styleWasExplicit)
         {
-            source = NormalizeSourceText(source);
             if (string.IsNullOrWhiteSpace(source))
                 throw new ArgumentException("LaTeX source cannot be empty.", nameof(source));
             // The 30–450 pt range belongs to the editor/Ribbon controls. Existing
@@ -126,10 +118,8 @@ namespace LaTeXBlocks.PowerPoint
                 throw new ArgumentOutOfRangeException(nameof(fontSizePt));
 
             style = style ?? LaTeXBlockStyle.Default;
-            // TeX owns glyph and paragraph layout, leading, and vertical placement.
-            // The final SVG owns the outer shell; Office Graphics Fill owns the
-            // inherited default foreground. Do not ask TeX \fbox / \colorbox to
-            // paint a full frame: preview coordinates can lie outside the viewport.
+            // A fixed LaTeX Block owns text and background paint in TeX. Office
+            // colour APIs are intentionally absent from this path.
             var styleIsApplied = styleWasExplicit || !style.IsDefault;
             var authoredFrameWidthPt = outerWidthPt ?? widthPt;
             var contentWidthPt = styleIsApplied
@@ -158,9 +148,14 @@ namespace LaTeXBlocks.PowerPoint
                     false, fontSizePt)
                 : await renderers.RenderLatestAsync(profile, renderSource, rendererWidthPt,
                     false, fontSizePt);
+            var shellStyle = styleIsApplied && style.HasBackgroundFill
+                ? new LaTeXBlockStyle(style.LineSpacing, 0, style.VerticalAlignment,
+                    style.TextColor, false, style.BackgroundColor,
+                    style.BorderThicknessPt, style.BorderColor)
+                : style;
             var finalSvg = !styleIsApplied
                 ? result.Bytes
-                : LaTeXBlockSvgFrame.Decorate(result.Bytes, style,
+                : LaTeXBlockSvgFrame.Decorate(result.Bytes, shellStyle,
                     authoredFrameWidthPt, outerHeightPt);
             return new LaTeXBlockRender(WriteSvg(finalSvg), finalSvg, result.DepthPt,
                 fontSizePt, styleIsApplied);
@@ -268,7 +263,8 @@ namespace LaTeXBlocks.PowerPoint
             var oldName = oldShape.Name;
             var oldZ = TryGetZOrder(oldShape);
             var metadata = new LaTeXBlockMetadata(previous.Id, widthPt, render.DepthPt,
-                LaTeXBlockLayoutMode.Fixed, render.FontSizePt, LaTeXBlockRole.Content);
+                LaTeXBlockLayoutMode.Fixed, render.FontSizePt, LaTeXBlockRole.Content,
+                0, 0, null, LaTeXBlockKind.LaTeXBlock);
 
             try { application.StartNewUndoEntry(); } catch { }
             PowerPointInterop.Shape replacement = null;
@@ -339,16 +335,14 @@ namespace LaTeXBlocks.PowerPoint
             if (shape == null) return false;
             try
             {
-                if (!string.Equals(shape.Tags[KindTag], KindValue,
-                        StringComparison.OrdinalIgnoreCase)) return false;
-                if (!LaTeXBlockMetadata.TryParse(shape.Title, out metadata) ||
+                if (!IsSupportedPictureType(shape.Type)) return false;
+                if (!LaTeXBlockMetadata.TryParse(shape.AlternativeText,
+                        out metadata, out source) ||
+                    metadata.Kind != LaTeXBlockKind.LaTeXBlock ||
                     metadata.Role != LaTeXBlockRole.Content ||
-                    metadata.Mode != LaTeXBlockLayoutMode.Fixed)
-                {
-                    metadata = null;
-                    return false;
-                }
-                source = NormalizeSourceText(shape.AlternativeText);
+                    metadata.Mode != LaTeXBlockLayoutMode.Fixed) return false;
+                metadata = metadata.WithObservedState(shape.Width, shape.Width,
+                    shape.Height);
                 if (string.IsNullOrWhiteSpace(source))
                 {
                     metadata = null;
@@ -365,12 +359,24 @@ namespace LaTeXBlocks.PowerPoint
             }
         }
 
+        private static bool IsSupportedPictureType(Office.MsoShapeType type)
+        {
+            // msoGraphic/msoLinkedGraphic were added after the Office PIA version
+            // referenced by this project. Current SVG pictures report 28 or 29.
+            return type == Office.MsoShapeType.msoPicture ||
+                   type == Office.MsoShapeType.msoLinkedPicture ||
+                   (int)type == 28 || (int)type == 29;
+        }
+
         internal static LaTeXBlockStyle ReadStyle(PowerPointInterop.Shape shape)
         {
             if (shape == null) return LaTeXBlockStyle.Default;
             try
             {
-                return LaTeXBlockStyle.ReadFromTag(shape.Tags[LaTeXBlockStyle.TagName]);
+                return LaTeXBlockMetadata.TryParse(shape.AlternativeText,
+                           out var metadata, out _)
+                    ? metadata.Style
+                    : LaTeXBlockStyle.Default;
             }
             catch (COMException)
             {
@@ -389,8 +395,9 @@ namespace LaTeXBlocks.PowerPoint
             if (shape == null) return false;
             try
             {
-                return string.Equals(shape.Tags[StyleAppliedTag], "1",
-                    StringComparison.Ordinal);
+                return LaTeXBlockMetadata.TryParse(shape.AlternativeText,
+                           out var metadata, out _) &&
+                    metadata.HasExplicitStyle;
             }
             catch (COMException)
             {
@@ -476,8 +483,12 @@ namespace LaTeXBlocks.PowerPoint
         {
             if (shape == null) throw new ArgumentNullException(nameof(shape));
             if (metadata == null) throw new ArgumentNullException(nameof(metadata));
-            var intrinsicWidth = ReadPositiveTag(shape, SvgWidthTag, metadata.WidthPt);
-            var intrinsicHeight = ReadPositiveTag(shape, SvgHeightTag, shape.Height);
+            var intrinsicWidth = metadata.FrameWidthPt > 0
+                ? metadata.FrameWidthPt
+                : metadata.WidthPt;
+            var intrinsicHeight = metadata.FrameHeightPt > 0
+                ? metadata.FrameHeightPt
+                : shape.Height;
             var expectedWidth = intrinsicWidth;
             var expectedHeight = intrinsicHeight;
             if (!(expectedWidth > 0) || !(expectedHeight > 0))
@@ -529,8 +540,12 @@ namespace LaTeXBlocks.PowerPoint
         {
             if (shape == null) throw new ArgumentNullException(nameof(shape));
             if (metadata == null) throw new ArgumentNullException(nameof(metadata));
-            var intrinsicWidth = ReadPositiveTag(shape, SvgWidthTag, metadata.WidthPt);
-            var intrinsicHeight = ReadPositiveTag(shape, SvgHeightTag, shape.Height);
+            var intrinsicWidth = metadata.FrameWidthPt > 0
+                ? metadata.FrameWidthPt
+                : metadata.WidthPt;
+            var intrinsicHeight = metadata.FrameHeightPt > 0
+                ? metadata.FrameHeightPt
+                : shape.Height;
             var snapshot = ShapeGeometrySnapshot.Capture(shape);
             try
             {
@@ -781,41 +796,26 @@ namespace LaTeXBlocks.PowerPoint
             // feed the same frame-update path; committed SVGs are framed to exactly
             // this geometry instead of retaining a visual zoom state.
             shape.LockAspectRatio = Office.MsoTriState.msoFalse;
-            shape.AlternativeText = NormalizeSourceText(source);
-            shape.Title = metadata.ToString();
-            shape.Tags.Add(KindTag, KindValue);
-            shape.Tags.Add(LaTeXBlockStyle.TagName,
-                (style ?? LaTeXBlockStyle.Default).ToString());
+            // The portable contract and source share one TeX-comment envelope.
+            // Office may normalize CR/CRLF to LF while saving without changing
+            // TeX line or paragraph semantics.
+            var persistedMetadata = metadata.WithFrameSize(svgWidthPt, svgHeightPt);
             if (styleIsApplied)
-                shape.Tags.Add(StyleAppliedTag, "1");
-            shape.Tags.Add(SvgWidthTag,
-                svgWidthPt.ToString("R", CultureInfo.InvariantCulture));
-            shape.Tags.Add(SvgHeightTag,
-                svgHeightPt.ToString("R", CultureInfo.InvariantCulture));
-            if (styleIsApplied)
-                ApplyGraphicFill(shape, (style ?? LaTeXBlockStyle.Default).TextColor);
+                persistedMetadata = persistedMetadata.WithStyle(
+                    style ?? LaTeXBlockStyle.Default);
+            shape.AlternativeText = persistedMetadata.Serialize(source);
+            shape.Title = string.Empty;
             shape.Name = name;
         }
 
-        private static void ApplyGraphicFill(PowerPointInterop.Shape shape,
-            System.Drawing.Color color)
+        internal static string ToOfficeAlternativeText(string source)
         {
-            if (shape == null) throw new ArgumentNullException(nameof(shape));
-            PowerPointInterop.FillFormat fill = null;
-            PowerPointInterop.ColorFormat foreground = null;
-            try
-            {
-                fill = shape.Fill;
-                fill.Visible = Office.MsoTriState.msoTrue;
-                fill.Solid();
-                foreground = fill.ForeColor;
-                foreground.RGB = color.R | (color.G << 8) | (color.B << 16);
-            }
-            finally
-            {
-                if (foreground != null) Marshal.ReleaseComObject(foreground);
-                if (fill != null) Marshal.ReleaseComObject(fill);
-            }
+            return source;
+        }
+
+        internal static string FromOfficeAlternativeText(string value)
+        {
+            return LaTeXBlockMetadata.ReadSource(value);
         }
 
         internal static double ReadPositiveTag(PowerPointInterop.Shape shape, string name,
@@ -823,9 +823,13 @@ namespace LaTeXBlocks.PowerPoint
         {
             try
             {
-                if (double.TryParse(shape.Tags[name], NumberStyles.Float,
-                        CultureInfo.InvariantCulture, out var value) && value > 0 &&
-                    !double.IsNaN(value) && !double.IsInfinity(value)) return value;
+                var value = string.Equals(name, SvgWidthTag, StringComparison.Ordinal)
+                    ? shape.Width
+                    : string.Equals(name, SvgHeightTag, StringComparison.Ordinal)
+                        ? shape.Height
+                        : 0;
+                if (value > 0 && !double.IsNaN(value) && !double.IsInfinity(value))
+                    return value;
             }
             catch (COMException) { }
             return fallback;

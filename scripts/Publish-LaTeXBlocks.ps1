@@ -1,6 +1,6 @@
 param(
     [ValidatePattern('^\d+\.\d+\.\d+$')]
-    [string]$Version = '0.2.107',
+    [string]$Version = '0.2.121',
     [string]$StemTeXSourceDir
 )
 
@@ -10,7 +10,11 @@ $project = Join-Path $root 'src\LaTeXBlocks.Word.AddIn\LaTeXBlocks.Word.AddIn.cs
 $powerPointProject = Join-Path $root 'src\LaTeXBlocks.PowerPoint.AddIn\LaTeXBlocks.PowerPoint.AddIn.csproj'
 $publishDir = Join-Path $root 'src\LaTeXBlocks.Word.AddIn\bin\Release\app.publish'
 $powerPointPublishDir = Join-Path $root 'src\LaTeXBlocks.PowerPoint.AddIn\bin\Release\app.publish'
+$wordBuildDir = Join-Path $root 'src\LaTeXBlocks.Word.AddIn\bin\Release'
+$powerPointBuildDir = Join-Path $root 'src\LaTeXBlocks.PowerPoint.AddIn\bin\Release'
 $stagingDir = Join-Path $root 'dist\staging'
+$wordLocalDir = Join-Path $stagingDir 'Word'
+$powerPointLocalDir = Join-Path $stagingDir 'PowerPoint'
 $outputDir = Join-Path $root 'dist\release'
 $installer = Join-Path $outputDir "LaTeXBlocks-Setup-$Version.exe"
 $checksumPath = $installer + '.sha256'
@@ -85,20 +89,34 @@ if ($LASTEXITCODE -ne 0) { throw "VSTO publish failed with exit code $LASTEXITCO
 if ($LASTEXITCODE -ne 0) { throw "PowerPoint VSTO publish failed with exit code $LASTEXITCODE." }
 
 foreach ($requiredPublishOutput in @(
-    (Join-Path $publishDir 'setup.exe'),
-    (Join-Path $publishDir 'LaTeXBlocks.Word.AddIn.vsto'),
-    (Join-Path $powerPointPublishDir 'LaTeXBlocks.PowerPoint.AddIn.vsto')
+    (Join-Path $wordBuildDir 'LaTeXBlocks.Word.AddIn.vsto'),
+    (Join-Path $wordBuildDir 'LaTeXBlocks.Word.AddIn.dll.manifest'),
+    (Join-Path $powerPointBuildDir 'LaTeXBlocks.PowerPoint.AddIn.vsto'),
+    (Join-Path $powerPointBuildDir 'LaTeXBlocks.PowerPoint.AddIn.dll.manifest')
 )) {
     if (-not (Test-Path -LiteralPath $requiredPublishOutput)) {
         throw "VSTO publish did not produce: $requiredPublishOutput"
     }
 }
 
+# Office's |vstolocal loader consumes the flat build layout, not ClickOnce's
+# versioned app.publish tree. Stage only the signed local manifests and their
+# sibling payloads; the unified installer owns deployment and upgrades.
+foreach ($layout in @(
+    [pscustomobject]@{ Source = $wordBuildDir; Destination = $wordLocalDir },
+    [pscustomobject]@{ Source = $powerPointBuildDir; Destination = $powerPointLocalDir }
+)) {
+    New-Item -ItemType Directory -Path $layout.Destination -Force | Out-Null
+    Get-ChildItem -LiteralPath $layout.Source -File |
+        Where-Object { $_.Extension -ne '.pdb' } |
+        Copy-Item -Destination $layout.Destination
+}
+
 [void](Export-Certificate -Cert $certificate -FilePath $certificatePath -Force)
 
 $iss = Join-Path $root 'installer\LaTeXBlocks.iss'
-& $iscc "/DMyAppVersion=$Version" "/DSourceDir=$publishDir" `
-    "/DPowerPointSourceDir=$powerPointPublishDir" "/DStemTeXSourceDir=$StemTeXSourceDir" `
+& $iscc "/DMyAppVersion=$Version" "/DSourceDir=$wordLocalDir" `
+    "/DPowerPointSourceDir=$powerPointLocalDir" "/DStemTeXSourceDir=$StemTeXSourceDir" `
     "/DCertPath=$certificatePath" "/DVcRedistPath=$($vcRedist.FullName)" `
     "/DVcMajor=$($vcRedist.VersionInfo.FileMajorPart)" "/DVcMinor=$($vcRedist.VersionInfo.FileMinorPart)" `
     "/DVcBuild=$($vcRedist.VersionInfo.FileBuildPart)" "/DVcRevision=$($vcRedist.VersionInfo.FilePrivatePart)" `

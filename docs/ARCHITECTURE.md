@@ -35,9 +35,8 @@ render host and any processes it owns without making Word or PowerPoint wait for
 | --- | --- | --- |
 | Visual object | SVG `InlineShape`, or a floating SVG `Shape` for a fixed Content Block | Positioned SVG shape |
 | Text integration | Inline formulas, fixed blocks, and numbered equation lines | Free-standing blocks only |
-| Source | SVG Alternative Text (`InlineShape` or `Shape`) | Shape Alternative Text |
-| Identity | Compact metadata in `Title` | Metadata in `Title` plus a dedicated shape tag |
-| Block decoration | Fixed Content Block style in compact Title metadata: TeX renders typography; the SVG layer renders the outer shell | Versioned shape style tag plus an explicit-style marker: TeX renders typography; the SVG layer renders the outer shell |
+| Source and identity | Magic header plus TeX source in SVG Alternative Text (`InlineShape` or `Shape`) | The same magic-header envelope in Shape Alternative Text |
+| Block decoration | Fixed Content Block style in the magic header: TeX renders typography; the SVG layer renders the outer shell | The same declared style fields in the magic header |
 | Layout | Baseline, paragraph, tabs, document line layout, and the fixed Content Block frame contract below | Position plus one native host frame; every native size change queues TeX reflow |
 
 The shared rendering and metadata code does not imply shared host layout code. Word-specific baseline, U+2060,
@@ -94,10 +93,10 @@ appropriate host UI path.
 The visual SVG and its source are one semantic object, not an image plus a duplicate hidden-text record.
 
 - The SVG is portable display output.
-- Alternative Text is the authoritative TeX source, normalized to LF line endings.
-- Title metadata stores only identity and rendering/layout facts needed to edit the object.
+- Alternative Text contains the versioned magic header followed by the authoritative TeX source; see [MAGIC_HEADER.md](MAGIC_HEADER.md).
+- Title is empty after a committed operation. No Title/JSON or shape-tag compatibility format is read.
 - For Word inline and numbered formulas, the drawing run's native `Font.Color` remains the authoritative text color.
-  Fixed Content Blocks instead persist a declarative block style in their Title metadata; their editor is the
+  Fixed Content Blocks instead persist a declarative block style in their magic header; their editor is the
   authoritative color/leading/padding/vertical-placement UI. Neither route copies visual settings into Alternative
   Text.
 - Both hosts share one style model. Before a styled fixed-block preview or committed render, the service subtracts
@@ -107,10 +106,9 @@ The visual SVG and its source are one semantic object, not an image plus a dupli
   gives the outer text lines a stable typographic height/depth so lowercase-only content cannot collapse to x-height;
   standalone display math receives no paragraph or line-box injection. The SVG root places that returned box at the padding origin, paints the background and inside border, and
   clips the authored outer frame. It performs no second vertical-placement calculation, never rewrites Alternative
-  Text, and does not rely on Office Fill/Line formatting for a
+  source portion, and does not rely on Office Fill/Line formatting for a
   block's visible decoration. An explicit style is meaningful even at its apparent defaults: 1.20× leading is authored
-  in TeX. Legacy shapes with no Word `style=` payload or no PowerPoint explicit-style marker remain on the compatible
-  bare route until edited.
+  in TeX.
 - A successful edit creates and annotates a replacement SVG before removing the old visual object.
 
 The detailed Word representation is normative in [OBJECT_MODEL.md](OBJECT_MODEL.md). PowerPoint's deliberately

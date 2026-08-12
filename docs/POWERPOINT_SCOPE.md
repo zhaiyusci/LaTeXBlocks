@@ -94,10 +94,10 @@ only the background and inside border and clips the finished SVG; it performs no
 treating a TeX `\\fbox` as the outer PowerPoint frame, whose paint can otherwise lie outside
 dvisvgm's SVG viewport.
 
-The separate `LATEXBLOCKS_TEX_STYLE_APPLIED=1` marker distinguishes an editor-confirmed default style from a default
-style tag written by older releases. The former literally uses the editor's 1.20× leading and an SVG shell; the latter
-remains a compatible bare SVG until the user edits it. Non-default legacy style tags already opt into the styled route,
-and their `valign=top|middle|bottom` value remains part of the version-one style contract and is restored as authored.
+The shared versioned magic header at the start of `AlternativeText` stores block
+identity, layout width, font size, and optional style values. The TeX source starts
+after the end marker and preserves its own line structure. `Title` remains empty.
+Text and background colours are distinct named fields.
 
 New auto-height blocks fit their content, so vertical placement has no spare height to distribute. Once a block has a
 fixed native frame height, TeX receives the corresponding inner height and places its content at the selected Top,
@@ -106,10 +106,9 @@ edge (or center), and the outer SVG viewport only clips the result; it never sca
 aligns the content again. The line-spacing control applies to ordinary paragraph leading. It deliberately does not redefine
 the row spacing of math environments such as `align` or `gather`; those have their own TeX layout controls.
 
-The PowerPoint tag is host-specific, but the declared style model is shared with Word's fixed Content Block editor.
-Word persists its compact equivalent in Title metadata because InlineShape and floating Shape do not share a
-PowerPoint-like Tags collection. Word inline formulas and numbered equations deliberately do not use this UI or
-style shell.
+The declared style model is shared with Word's fixed Content Block editor and uses
+the same magic-header fields in both hosts. Word inline formulas and numbered
+equations deliberately do not use this UI or style shell.
 
 ## Shared infrastructure
 

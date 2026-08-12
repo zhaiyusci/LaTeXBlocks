@@ -157,12 +157,9 @@ namespace LaTeXBlocks.Word
             return true;
         }
 
-        // Word has no Shape.Tags collection that works across both InlineShape and
-        // floating Shape. Its compact Title metadata is semicolon-delimited, so the
-        // verbose PowerPoint tag representation above cannot be embedded there
-        // directly. Keep the Word payload deliberately small and delimiter-safe.
-        // The value is not an author-facing format; it is a durable bridge between
-        // the same style value object and Word's per-picture metadata contract.
+        // Keep this compact representation as the in-memory bridge used by
+        // LaTeXBlockMetadata.StyleData. The persisted magic-header contract
+        // in both hosts and exposes the style as named fields.
         internal string ToMetadataValue()
         {
             return "1," + FormatDecimal(LineSpacing) + "," +
@@ -267,6 +264,9 @@ namespace LaTeXBlocks.Word
             tex.AppendLine("\\hangindent=0pt\\hangafter=1\\parshape=0%");
             tex.AppendLine("\\everypar{}%");
             tex.AppendLine("\\setbox0=\\vbox{%");
+            // Fixed LaTeX Blocks own their paint in TeX. This wrapper is not used
+            // by the three formula kinds, whose host-colour behaviour is unchanged.
+            tex.AppendLine("\\color[HTML]{" + ToHex(TextColor) + "}%");
             // A standalone display already owns a vertical TeX list. Do not insert
             // *anything* which opens a paragraph before or after it: \noindent,
             // \color and \par can all change a tight preview's display geometry.
@@ -274,9 +274,9 @@ namespace LaTeXBlocks.Word
                 StemTeXRenderer.StartsWithFullDisplayOrPageWidthEnvironment(source);
             if (standaloneDisplay)
             {
-                // Office Graphics Fill supplies the inherited default foreground.
-                // Explicit colours authored in TeX remain child-level overrides.
-                tex.AppendLine(source);
+                // Explicit colours authored in TeX remain local overrides.
+                tex.Append(source);
+                tex.AppendLine("%");
             }
             else
             {
@@ -289,9 +289,13 @@ namespace LaTeXBlocks.Word
                 // shell does not infer or add any vertical offset.
                 tex.AppendLine("\\setbox\\strutbox=\\hbox{\\vrule height .7\\baselineskip depth .3\\baselineskip width 0pt}%");
                 tex.AppendLine("\\noindent\\strut%");
-                // A wrapper newline must not become a trailing TeX space. Preserve
-                // every author-entered space, trimming only terminal line endings.
-                tex.Append(source.TrimEnd('\r', '\n'));
+                // Preserve the author source byte-for-byte, including terminal and
+                // repeated line endings. The wrapper's percent is outside the
+                // source: when the source has no terminal newline it prevents our
+                // following newline becoming TeX space; when it does, it simply
+                // occupies the next wrapper line without deleting the authored
+                // newline or paragraph break.
+                tex.Append(source);
                 tex.AppendLine("%");
                 tex.AppendLine("\\ifhmode\\strut\\fi");
                 tex.AppendLine("\\par");
@@ -320,8 +324,21 @@ namespace LaTeXBlocks.Word
                 tex.AppendLine("\\setbox2=\\box0%");
             }
             if (hasFixedWidth)
-                tex.AppendLine("\\noindent\\hbox to " +
-                    FormatDecimal(contentWidthPt.Value) + "pt{\\box2\\hss}\\par");
+            {
+                var contentBox = "\\hbox to " + FormatDecimal(contentWidthPt.Value) +
+                    "pt{\\box2\\hss}";
+                if (HasBackgroundFill)
+                {
+                    tex.AppendLine("\\setlength{\\fboxsep}{" +
+                        FormatDecimal(ToTeXLengthPt(PaddingPt)) + "pt}%");
+                    tex.AppendLine("\\noindent\\colorbox[HTML]{" +
+                        ToHex(BackgroundColor) + "}{" + contentBox + "}\\par");
+                }
+                else
+                {
+                    tex.AppendLine("\\noindent" + contentBox + "\\par");
+                }
+            }
             else
                 tex.AppendLine("\\noindent\\box2\\par");
             tex.AppendLine("\\endgroup");

@@ -322,18 +322,24 @@ namespace LaTeXBlocks.WordSmoke
                 Assert(!LaTeXBlockService.IsSupportedInlineShapeType(
                         WordInterop.WdInlineShapeType.wdInlineShapeEmbeddedOLEObject),
                     "Embedded OLE objects such as MathType must never be probed as LaTeX Blocks.");
-                var legacyTitle = LaTeXBlockMetadata.Prefix + "id=" + Guid.NewGuid().ToString("D") +
-                    ";width=360;depth=0;mode=fixed;size=10";
-                Assert(LaTeXBlockMetadata.TryParse(legacyTitle, out var legacyMetadata) &&
-                    legacyMetadata.Role == LaTeXBlockRole.Content,
-                    "Metadata written before the role field no longer defaults to ordinary content.");
+                Assert(!LaTeXBlockMetadata.TryParse(
+                        "LaTeXBlocks/1;id=" + Guid.NewGuid().ToString("D") +
+                        ";width=360;depth=0;mode=fixed;size=10", out _),
+                    "The removed semicolon metadata format was still accepted.");
                 var framedMetadata = new LaTeXBlockMetadata(Guid.NewGuid(), 180, 2.5,
                     LaTeXBlockLayoutMode.Fixed, 14, LaTeXBlockRole.Content,
-                    182.75, 48.25);
-                Assert(LaTeXBlockMetadata.TryParse(framedMetadata.ToString(), out var reparsedFrameMetadata) &&
-                       Math.Abs(reparsedFrameMetadata.FrameWidthPt - 182.75) < 0.001 &&
-                       Math.Abs(reparsedFrameMetadata.FrameHeightPt - 48.25) < 0.001,
-                    "Floating frame geometry did not round-trip through Word metadata.");
+                    182.75, 48.25, null, LaTeXBlockKind.LaTeXBlock);
+                var boundarySource = "\nFirst paragraph.\n\nSecond paragraph.\n";
+                var framedEnvelope = framedMetadata.Serialize(boundarySource);
+                Assert(LaTeXBlockMetadata.TryParse(framedEnvelope,
+                           out var reparsedFrameMetadata, out var reparsedBoundarySource) &&
+                       reparsedBoundarySource == boundarySource &&
+                       reparsedFrameMetadata.DepthPt == 0 &&
+                       reparsedFrameMetadata.FrameWidthPt == 0 &&
+                       reparsedFrameMetadata.FrameHeightPt == 0 &&
+                       framedEnvelope.IndexOf("depth-pt", StringComparison.Ordinal) < 0 &&
+                       framedEnvelope.IndexOf("frame-width", StringComparison.Ordinal) < 0,
+                    "Magic Header did not preserve source boundaries or exclude runtime geometry.");
                 var styledBlockStyle = new LaTeXBlockStyle(1.45, 8.5,
                     LaTeXBlockVerticalAlignment.Middle,
                     System.Drawing.Color.FromArgb(0x12, 0x34, 0x56), true,
@@ -342,11 +348,22 @@ namespace LaTeXBlocks.WordSmoke
                 var styledMetadata = LaTeXBlockMetadata.Create(180, 2.5,
                     LaTeXBlockLayoutMode.Fixed, 14, LaTeXBlockRole.Content,
                     styledBlockStyle).WithFrameSize(182.75, 48.25);
-                Assert(LaTeXBlockMetadata.TryParse(styledMetadata.ToString(),
-                        out var reparsedStyledMetadata) &&
+                var styledEnvelope = styledMetadata.Serialize("Styled source");
+                Assert(LaTeXBlockMetadata.TryParse(styledEnvelope,
+                        out var reparsedStyledMetadata, out var reparsedStyledSource) &&
+                       reparsedStyledSource == "Styled source" &&
                        reparsedStyledMetadata.HasExplicitStyle &&
-                       reparsedStyledMetadata.Style.Equals(styledBlockStyle),
-                    "A fixed Block style did not round-trip through Word Title metadata.");
+                       reparsedStyledMetadata.Style.Equals(styledBlockStyle) &&
+                       styledEnvelope.StartsWith("% !latexblocks 1\r\n",
+                           StringComparison.Ordinal) &&
+                       styledEnvelope.IndexOf("% background-color: #F0EED0",
+                           StringComparison.Ordinal) >= 0,
+                    "A fixed Block style did not round-trip through its Magic Header.");
+                Assert(!LaTeXBlockMetadata.TryParse(
+                           "{\"version\":1,\"type\":\"latex-block\"}", out _) &&
+                       !LaTeXBlockMetadata.TryParse(
+                           "% !latexblocks 1\n% kind: inline-math\n", out _),
+                    "A legacy or incomplete metadata contract was still accepted.");
                 var bottomMetadataStyle = LaTeXBlockStyle.ReadFromMetadataValue(
                     "1,1.45,8.5,b,123456,F0EED0,1.25,654321");
                 Assert(styledBlockStyle.ToMetadataValue().StartsWith("1,1.45,8.5,m,",
@@ -384,9 +401,9 @@ namespace LaTeXBlocks.WordSmoke
                 var styledSource = styledBlockStyle.WrapSource("\\[E=mc^2\\]", 14);
                 Assert(styledSource.IndexOf("\\colorbox", StringComparison.Ordinal) < 0 &&
                        styledSource.IndexOf("\\fbox", StringComparison.Ordinal) < 0 &&
-                       styledSource.IndexOf("\\color{latexblocksforeground}",
-                           StringComparison.Ordinal) < 0,
-                    "The Word display Block style moved paragraph decoration into TeX.");
+                       styledSource.IndexOf("\\color[HTML]{123456}",
+                           StringComparison.Ordinal) >= 0,
+                    "The Word display Block did not define its foreground in TeX.");
                 var fixedWordBoxSource = styledBlockStyle.WrapSource(
                     "First paragraph.\\par Second paragraph.", 14, true, 160, 42);
                 var topWordBoxSource = new LaTeXBlockStyle(1.2, 0,
@@ -398,6 +415,8 @@ namespace LaTeXBlocks.WordSmoke
                 Assert(fixedWordBoxSource.IndexOf("\\setlength{\\parindent}{0pt}",
                            StringComparison.Ordinal) >= 0 &&
                        fixedWordBoxSource.IndexOf("\\setlength{\\hsize}{160pt}",
+                           StringComparison.Ordinal) >= 0 &&
+                       fixedWordBoxSource.IndexOf("\\colorbox[HTML]{F0EED0}",
                            StringComparison.Ordinal) >= 0 &&
                        fixedWordBoxSource.IndexOf("\\setbox2=\\vbox to 42pt",
                            StringComparison.Ordinal) >= 0 &&
@@ -521,8 +540,10 @@ namespace LaTeXBlocks.WordSmoke
                 var displayKindMetadata = LaTeXBlockMetadata.Create(360, 2,
                     LaTeXBlockLayoutMode.Auto, 11, LaTeXBlockRole.Content, null,
                     LaTeXBlockKind.DisplayMath);
-                Assert(LaTeXBlockMetadata.TryParse(inlineKindMetadata.ToString(),
-                           out var parsedInlineKind) &&
+                Assert(LaTeXBlockMetadata.TryParse(
+                           inlineKindMetadata.Serialize("a+b"),
+                           out var parsedInlineKind, out var parsedInlineSource) &&
+                       parsedInlineSource == "a+b" &&
                        parsedInlineKind.Kind == LaTeXBlockKind.InlineMath &&
                        LaTeXBlockService.UsesInlineWordJoinerBoundaries(
                            parsedInlineKind) &&
@@ -555,21 +576,6 @@ namespace LaTeXBlocks.WordSmoke
                        LaTeXBlockService.ResolveImportedFormulaMode(LaTeXContentKind.DisplayMath) ==
                            LaTeXBlockLayoutMode.Auto,
                     "Display math was confused with a user-sized Fixed Block.");
-                var legacyDisplayMetadata = LaTeXBlockMetadata.Create(360, 2,
-                    LaTeXBlockLayoutMode.Fixed, 14, LaTeXBlockRole.Content);
-                var normalizedLegacyDisplay =
-                    LaTeXBlockService.NormalizeLegacyDisplayFormulaMetadata(
-                        legacyDisplayMetadata, "\\[E=mc^2\\]");
-                var styledDisplayBlock = LaTeXBlockMetadata.Create(360, 2,
-                    LaTeXBlockLayoutMode.Fixed, 14, LaTeXBlockRole.Content,
-                    new LaTeXBlockStyle(1.2, 3,
-                        LaTeXBlockVerticalAlignment.Top));
-                Assert(normalizedLegacyDisplay.Mode == LaTeXBlockLayoutMode.Auto &&
-                       normalizedLegacyDisplay.Id == legacyDisplayMetadata.Id &&
-                       ReferenceEquals(styledDisplayBlock,
-                           LaTeXBlockService.NormalizeLegacyDisplayFormulaMetadata(
-                               styledDisplayBlock, "\\[E=mc^2\\]")),
-                    "Legacy display formulas were not promoted without also changing a styled Block.");
                 const string commentedNumberedSource =
                     "\\begin {align}\r\nE&=mc^2 % exact source comment\r\n\\end {align}";
                 var canonicalCommentedNumberedSource =
@@ -670,7 +676,6 @@ namespace LaTeXBlocks.WordSmoke
                 {
                     RunMixedSelectionFontSizeSmoke(word, service, profile,
                         0x0000ff, 0x00ff0000);
-                    RunLegacyDisplayPersistenceSmoke(word, service, profile);
                     RunInterleavedNumberedDisplayPersistenceSmoke(word, service,
                         profile);
                     Console.WriteLine("Word mixed Font Size-only smoke passed.");
@@ -951,11 +956,14 @@ namespace LaTeXBlocks.WordSmoke
                 word.Selection.NoProofing = 0;
 
                 var inserted = service.InsertBlock(source, 360, LaTeXBlockLayoutMode.Auto, profile);
-                Assert(inserted.AlternativeText == source, "Alternative Text is not the exact TeX source.");
-                Assert(LaTeXBlockMetadata.TryParse(inserted.Title, out var firstMetadata), "Title metadata is invalid.");
-                Assert(firstMetadata.DepthPt > 0, "TeX depth was not stored in block metadata.");
-                Assert(Math.Abs(firstMetadata.DepthPt - autoSvg11.DepthPt) < 0.01 &&
-                    Math.Abs(firstMetadata.FontSizePt - 11) < 0.001,
+                Assert(LaTeXBlockMetadata.ReadSource(inserted.AlternativeText) ==
+                           LaTeXBlockService.NormalizeMathBody(source),
+                    "Alternative Text is not the normalized formula body.");
+                Assert(inserted.Title == string.Empty,
+                    "Committed metadata was unexpectedly copied into Title.");
+                Assert(LaTeXBlockMetadata.TryParse(inserted.AlternativeText, out var firstMetadata),
+                    "Magic-header metadata is invalid or Title was not cleared.");
+                Assert(Math.Abs(firstMetadata.FontSizePt - 11) < 0.001,
                     "The inline formula was not rerendered at Word's 11 pt insertion font.");
                 var compensatedSvg = Encoding.UTF8.GetString(LaTeXBlockService.ApplyFractionalBaselineCompensation(
                     autoSvg11.Bytes, autoSvg11.DepthPt, 1));
@@ -965,7 +973,7 @@ namespace LaTeXBlocks.WordSmoke
                 Assert(inserted.Width < 100, "Auto-width formula retained the fixed typesetting canvas width.");
                 Assert(Math.Abs((double)inserted.Range.Font.Size - firstMetadata.FontSizePt) < 0.001,
                     "The inserted formula's Word run size does not match its TeX design size.");
-                Assert(inserted.Range.Font.Position == -(int)Math.Round(firstMetadata.DepthPt, MidpointRounding.AwayFromZero),
+                Assert(inserted.Range.Font.Position == -(int)Math.Round(autoSvg11.DepthPt, MidpointRounding.AwayFromZero),
                     "Word baseline compensation does not equal the rounded TeX depth.");
                 AssertInlineWordJoinerBoundary(inserted, 2, "Inserted inline formula");
                 Assert(word.Selection.Start == word.Selection.End && word.Selection.Start == inserted.Range.End + 1 &&
@@ -980,9 +988,11 @@ namespace LaTeXBlocks.WordSmoke
                     "Text typed after an inline formula inherited the picture run's baseline or no-proof formatting.");
                 var inlineExport = WordSelectionLaTeXExporter.Export(document.Range(
                     inserted.Range.Start - 1, runningText.End));
-                Assert(inlineExport == source + " running" &&
+                Assert(inlineExport == "\\(" +
+                           LaTeXBlockService.NormalizeMathBody(source) +
+                           "\\) running" &&
                     inlineExport.IndexOf(WordJoiner, StringComparison.Ordinal) < 0,
-                    "Selected Word text did not export the inline Block as its exact LaTeX source.");
+                    "Selected Word text did not export the inline formula canonically.");
                 document.Range(0, 0).Select();
                 var hostSizeBeforeSelection = (double)inserted.Range.Font.Size;
                 inserted.Range.Select();
@@ -997,7 +1007,7 @@ namespace LaTeXBlocks.WordSmoke
                 end.Select();
                 const string fixedBlockSource = "\\[x^2\\]";
                 var fixedBlock = service.InsertBlock(fixedBlockSource, 180, LaTeXBlockLayoutMode.Fixed, alternateProfile);
-                Assert(LaTeXBlockMetadata.TryParse(fixedBlock.Title, out var fixedMetadata) &&
+                Assert(LaTeXBlockService.TryReadContract(fixedBlock, out var fixedMetadata, out _) &&
                     fixedMetadata.Mode == LaTeXBlockLayoutMode.Fixed, "Fixed-width block mode was not persisted.");
                 Assert(fixedBlock.Width > 150, "Fixed-width block lost its requested canvas width.");
                 Assert(fixedBlock.LockAspectRatio == Microsoft.Office.Core.MsoTriState.msoFalse,
@@ -1026,8 +1036,8 @@ namespace LaTeXBlocks.WordSmoke
                 fixedBlock = service.UpdateRendered(fixedBlock, fixedBlockSource,
                     expectedInlineLayoutWidth, LaTeXBlockLayoutMode.Fixed,
                     inlineReflowFrameRender, false);
-                Assert(LaTeXBlockMetadata.TryParse(fixedBlock.Title,
-                        out var reflowedInlineMetadata) &&
+                Assert(LaTeXBlockService.TryReadContract(fixedBlock,
+                        out var reflowedInlineMetadata, out _) &&
                        Math.Abs(fixedBlock.Width - requestedInlineFrameWidthPt) < 0.05 &&
                        Math.Abs(fixedBlock.Height - requestedInlineFrameHeightPt) < 0.05 &&
                        Math.Abs(reflowedInlineMetadata.WidthPt - expectedInlineLayoutWidth) < 0.01 &&
@@ -1043,8 +1053,10 @@ namespace LaTeXBlocks.WordSmoke
                 document = word.Documents.Open(documentPath, ReadOnly: false);
                 Assert(document.InlineShapes.Count == 2, "The SVG objects did not survive save and reopen.");
                 var reopened = document.InlineShapes[1];
-                Assert(reopened.AlternativeText == source, "Exact TeX source did not survive save and reopen.");
-                Assert(LaTeXBlockMetadata.TryParse(reopened.Title, out var reopenedMetadata) && reopenedMetadata.Id == stableId,
+                Assert(LaTeXBlockMetadata.ReadSource(reopened.AlternativeText) ==
+                           LaTeXBlockService.NormalizeMathBody(source),
+                    "The normalized formula body did not survive save and reopen.");
+                Assert(LaTeXBlockService.TryReadContract(reopened, out var reopenedMetadata, out _) && reopenedMetadata.Id == stableId,
                     "Block identity did not survive save and reopen.");
                 Assert(reopened.Range.Font.Position == -(int)Math.Round(reopenedMetadata.DepthPt, MidpointRounding.AwayFromZero),
                     "Baseline compensation did not survive save and reopen.");
@@ -1058,10 +1070,13 @@ namespace LaTeXBlocks.WordSmoke
                     "Could not establish the missing-baseline update fixture.");
                 var updated = service.UpdateBlock(reopened, updatedSource, 420, LaTeXBlockLayoutMode.Auto, profile, 14);
                 Assert(document.InlineShapes.Count == 2, "Update changed the document's SVG count.");
-                Assert(updated.AlternativeText == updatedSource, "Update did not replace the authoritative TeX source.");
-                Assert(LaTeXBlockMetadata.TryParse(updated.Title, out var updatedMetadata) && updatedMetadata.Id == stableId,
+                Assert(LaTeXBlockMetadata.ReadSource(updated.AlternativeText) ==
+                           LaTeXBlockService.NormalizeMathBody(updatedSource),
+                    "Update did not replace the normalized formula body.");
+                Assert(LaTeXBlockService.TryReadContract(updated, out var updatedMetadata, out _) && updatedMetadata.Id == stableId,
                     "Update changed the block identity.");
-                Assert(Math.Abs(updatedMetadata.WidthPt - 420) < 0.001, "Update did not persist the new typesetting width.");
+                Assert(Math.Abs(updatedMetadata.WidthPt - updated.Width) < 0.05,
+                    "Auto-width metadata did not reflect the observed SVG width.");
                 Assert(Math.Abs(updatedMetadata.FontSizePt - 14) < 0.001,
                     "Update did not rerender and persist the requested TeX font size.");
                 Assert(Math.Abs((double)updated.Range.Font.Size - updatedMetadata.FontSizePt) < 0.001,
@@ -1086,10 +1101,12 @@ namespace LaTeXBlocks.WordSmoke
                 document = null;
 
                 document = word.Documents.Open(documentPath, ReadOnly: true);
-                Assert(document.InlineShapes.Count == 2 && document.InlineShapes[1].AlternativeText == updatedSource,
+                Assert(document.InlineShapes.Count == 2 &&
+                       LaTeXBlockMetadata.ReadSource(document.InlineShapes[1].AlternativeText) ==
+                           LaTeXBlockService.NormalizeMathBody(updatedSource),
                     "Updated block did not survive the second reopen.");
                 var reopenedUpdated = document.InlineShapes[1];
-                Assert(LaTeXBlockMetadata.TryParse(reopenedUpdated.Title, out var reopenedUpdatedMetadata) &&
+                Assert(LaTeXBlockService.TryReadContract(reopenedUpdated, out var reopenedUpdatedMetadata, out _) &&
                     Math.Abs((double)reopenedUpdated.Range.Font.Size - reopenedUpdatedMetadata.FontSizePt) < 0.001 &&
                     reopenedUpdated.Range.Font.Position ==
                     -(int)Math.Round(reopenedUpdatedMetadata.DepthPt, MidpointRounding.AwayFromZero),
@@ -1111,11 +1128,7 @@ namespace LaTeXBlocks.WordSmoke
                     "A numbered equation was allowed to replace an expanded selection.");
                 document.Content.Text = "Alpha\tbeta";
                 document.Range(5, 5).Select();
-                var ordinaryTabRejected = false;
-                try { LaTeXBlockService.ValidateNumberedEquationTarget(word.Selection.Range); }
-                catch (InvalidOperationException) { ordinaryTabRejected = true; }
-                Assert(ordinaryTabRejected,
-                    "Numbered-equation tab stops were allowed to overwrite an ordinary tab layout.");
+                LaTeXBlockService.ValidateNumberedEquationTarget(word.Selection.Range);
                 document.Content.Text = "Alpha beta";
                 document.Content.Font.Name = "Times New Roman";
                 document.Content.Font.Size = 11;
@@ -1135,11 +1148,7 @@ namespace LaTeXBlocks.WordSmoke
                 document.Paragraphs[1].Range.ParagraphFormat.TabStops.Add(90,
                     WordInterop.WdTabAlignment.wdAlignTabLeft, WordInterop.WdTabLeader.wdTabLeaderSpaces);
                 document.Range(5, 5).Select();
-                var customStopsRejected = false;
-                try { LaTeXBlockService.ValidateNumberedEquationTarget(word.Selection.Range); }
-                catch (InvalidOperationException) { customStopsRejected = true; }
-                Assert(customStopsRejected,
-                    "Numbered-equation insertion was allowed to erase an existing custom tab layout.");
+                LaTeXBlockService.ValidateNumberedEquationTarget(word.Selection.Range);
                 document.Paragraphs[1].Range.ParagraphFormat.TabStops.ClearAll();
                 document.Range(5, 5).Select();
                 LaTeXBlockService.ValidateNumberedEquationTarget(word.Selection.Range);
@@ -1152,11 +1161,12 @@ namespace LaTeXBlocks.WordSmoke
                 var firstNumbered = service.InsertNumberedRendered(numberedSource, numberedWidth,
                     LaTeXBlockLayoutMode.Auto, numberedRender);
                 Console.WriteLine("Numbered equation: first insertion returned.");
-                Assert(LaTeXBlockMetadata.TryParse(firstNumbered.Title, out var firstNumberedMetadata) &&
+                Assert(LaTeXBlockMetadata.TryParse(firstNumbered.AlternativeText, out var firstNumberedMetadata) &&
                     firstNumberedMetadata.Role == LaTeXBlockRole.NumberedEquation &&
                     firstNumberedMetadata.Mode == LaTeXBlockLayoutMode.Auto,
                     "The natural-width numbered-equation contract was not stored in SVG metadata.");
-                Assert(firstNumbered.AlternativeText == numberedSource,
+                Assert(LaTeXBlockMetadata.ReadSource(firstNumbered.AlternativeText) ==
+                           LaTeXBlockService.NormalizeMathBody(numberedSource),
                     "The display-style render wrapper leaked into Alternative Text.");
                 var expectedNumberedCaret = document.Fields[1].Result.End + 2;
                 if (expectedNumberedCaret < document.Content.End &&
@@ -1164,7 +1174,11 @@ namespace LaTeXBlocks.WordSmoke
                     expectedNumberedCaret++;
                 Assert(word.Selection.Start == word.Selection.End && word.Selection.Start == expectedNumberedCaret &&
                     word.Selection.Font.Position == 0 && word.Selection.NoProofing == 0,
-                    "Numbered-equation insertion left the picture selected or the caret before its line break.");
+                    "Numbered-equation insertion left the picture selected or the caret before its line break. " +
+                    "Selection=" + word.Selection.Start + "/" + word.Selection.End +
+                    ", expected=" + expectedNumberedCaret +
+                    ", position=" + word.Selection.Font.Position +
+                    ", noProofing=" + word.Selection.NoProofing + ".");
                 Assert(firstNumbered.Width < 100,
                     "The numbered equation retained a fixed-width display canvas.");
                 Assert(document.Tables.Count == 0 && document.InlineShapes.Count == 1 &&
@@ -1181,7 +1195,9 @@ namespace LaTeXBlocks.WordSmoke
                     firstParagraphText.IndexOf("\t(1)\v beta", StringComparison.Ordinal) >= 0,
                     "The numbered equation does not use the expected manual-break/tab scaffold.");
                 var numberedExport = WordSelectionLaTeXExporter.Export(document.Content);
-                Assert(numberedExport == "Alpha\n" + numberedSource + "\n beta",
+                Assert(numberedExport == "Alpha\n\\[" +
+                           LaTeXBlockService.NormalizeMathBody(numberedSource) +
+                           "\\]\n beta",
                     "A numbered equation exported its Word tab, parentheses, or SEQ-field scaffold.");
                 AssertEquationTabStops(document.Paragraphs[1]);
                 var insertedParagraphFormat = document.Paragraphs[1].Range.ParagraphFormat;
@@ -1212,14 +1228,16 @@ namespace LaTeXBlocks.WordSmoke
                     LaTeXBlockLayoutMode.Auto, profile, 11, true);
                 var secondNumbered = service.InsertNumberedRendered(commentedNumberedSource, numberedWidth,
                     LaTeXBlockLayoutMode.Auto, secondNumberedRender);
-                Assert(LaTeXBlockMetadata.TryParse(secondNumbered.Title, out var secondNumberedMetadata) &&
+                Assert(LaTeXBlockMetadata.TryParse(secondNumbered.AlternativeText, out var secondNumberedMetadata) &&
                     secondNumberedMetadata.Role == LaTeXBlockRole.NumberedEquation &&
-                    secondNumbered.AlternativeText == canonicalCommentedNumberedSource,
+                    LaTeXBlockMetadata.ReadSource(secondNumbered.AlternativeText) ==
+                        LaTeXBlockService.NormalizeMathBody(
+                            canonicalCommentedNumberedSource),
                     "The second equation did not receive numbered metadata.");
                 document.Range(document.Content.End - 1, document.Content.End - 1).Select();
                 var thirdNumbered = service.InsertNumberedRendered(numberedSource, numberedWidth,
                     LaTeXBlockLayoutMode.Auto, numberedRender);
-                Assert(LaTeXBlockMetadata.TryParse(thirdNumbered.Title, out var thirdNumberedMetadata) &&
+                Assert(LaTeXBlockMetadata.TryParse(thirdNumbered.AlternativeText, out var thirdNumberedMetadata) &&
                     thirdNumberedMetadata.Role == LaTeXBlockRole.NumberedEquation,
                     "The third equation did not receive numbered metadata.");
                 Assert(service.UpdateEquationNumbers(document) == 3,
@@ -1244,12 +1262,14 @@ namespace LaTeXBlocks.WordSmoke
                 }
                 catch (InvalidOperationException) { oversizedUpdateRejected = true; }
                 Assert(oversizedUpdateRejected && document.Tables.Count == 0 && document.InlineShapes.Count == 3 &&
-                    firstNumbered.AlternativeText == numberedSource && EquationNumberText(document.Fields[1]) == "1",
+                    LaTeXBlockMetadata.ReadSource(firstNumbered.AlternativeText) ==
+                        LaTeXBlockService.NormalizeMathBody(numberedSource) &&
+                    EquationNumberText(document.Fields[1]) == "1",
                     "An oversized edit damaged or replaced the previous numbered equation.");
 
                 var updatedNumbered = service.UpdateBlock(firstNumbered, "\\[E=h\\nu\\]", numberedWidth,
                     LaTeXBlockLayoutMode.Auto, profile, 11);
-                Assert(LaTeXBlockMetadata.TryParse(updatedNumbered.Title, out var updatedNumberedMetadata) &&
+                Assert(LaTeXBlockMetadata.TryParse(updatedNumbered.AlternativeText, out var updatedNumberedMetadata) &&
                     updatedNumberedMetadata.Role == LaTeXBlockRole.NumberedEquation,
                     "Editing a numbered equation discarded its numbered role.");
                 Assert(document.Tables.Count == 0 && EquationNumberText(document.Fields[1]) == "1" &&
@@ -1278,7 +1298,7 @@ namespace LaTeXBlocks.WordSmoke
                     EquationNumberText(document.Fields[3]) == "3",
                     "Equation number results did not survive save and reopen.");
                 var reopenedNumbered = document.InlineShapes[1];
-                Assert(LaTeXBlockMetadata.TryParse(reopenedNumbered.Title, out var reopenedNumberedMetadata) &&
+                Assert(LaTeXBlockMetadata.TryParse(reopenedNumbered.AlternativeText, out var reopenedNumberedMetadata) &&
                     reopenedNumberedMetadata.Role == LaTeXBlockRole.NumberedEquation,
                     "The numbered role did not survive save and reopen.");
                 AssertEquationTabStops(document.Paragraphs[1]);
@@ -1296,7 +1316,9 @@ namespace LaTeXBlocks.WordSmoke
                 Assert(document.Bookmarks.Exists(firstBookmarkName) && document.Bookmarks.Exists(secondBookmarkName) &&
                     document.Bookmarks.Exists(thirdBookmarkName),
                     "Equation bookmarks did not survive save and reopen.");
-                Assert(document.InlineShapes[2].AlternativeText == canonicalCommentedNumberedSource,
+                Assert(LaTeXBlockMetadata.ReadSource(document.InlineShapes[2].AlternativeText) ==
+                           LaTeXBlockService.NormalizeMathBody(
+                               canonicalCommentedNumberedSource),
                     "Word lost the canonical multiline/commented TeX source on save and reopen.");
 
                 var referenceTargets = service.GetEquationReferenceTargets(document);
@@ -1306,7 +1328,9 @@ namespace LaTeXBlocks.WordSmoke
                        referenceTargets[2].Id == thirdNumberedMetadata.Id &&
                        referenceTargets[1].BookmarkName == secondBookmarkName &&
                        referenceTargets[1].Number == "2" &&
-                       referenceTargets[1].Source == canonicalCommentedNumberedSource,
+                       referenceTargets[1].Source ==
+                           LaTeXBlockService.NormalizeMathBody(
+                               canonicalCommentedNumberedSource),
                     "The bookmark-backed equation-reference picker did not enumerate the three equations in document order.");
                 document.Range(document.Content.End - 1, document.Content.End - 1).Select();
                 var referenceField = service.InsertEquationReference(referenceTargets[1]);
@@ -1435,7 +1459,8 @@ namespace LaTeXBlocks.WordSmoke
             var shape = service.InsertRendered(source, 360,
                 LaTeXBlockLayoutMode.Auto, render);
             Assert(LaTeXBlockService.TryReadContract(shape, out var metadata,
-                       out var storedSource) && storedSource == source,
+                       out var storedSource) && storedSource ==
+                           LaTeXBlockService.NormalizeMathBody(source),
                 "The baseline probe did not create a valid formula contract.");
             var expectedPosition = -(int)Math.Round(metadata.DepthPt,
                 MidpointRounding.AwayFromZero);
@@ -1452,7 +1477,7 @@ namespace LaTeXBlocks.WordSmoke
             {
                 new LaTeXBlockColorUpdate(shape, targetColor)
             };
-            Assert(service.TryApplyGraphicFillsBatch(updates),
+            Assert(service.TryApplySvgForegroundFillsBatch(updates),
                 "The colour-only baseline probe did not use Graphics Fill.");
             WordInterop.InlineShape restored = null;
             foreach (WordInterop.InlineShape candidate in document.InlineShapes)
@@ -1570,8 +1595,83 @@ namespace LaTeXBlocks.WordSmoke
                    CountCustomTabs(convertedInline.Range.Paragraphs[1]) == 0,
                 "Converting Display Math to Inline Math left its centering scaffold behind.");
 
+            RunCompleteMathConversionMatrix(word, document, service, profile,
+                widthPt, fontSizePt);
             RunMathConversionNumberingProbe(word, document, service, profile,
                 widthPt, fontSizePt);
+        }
+
+        private static void RunCompleteMathConversionMatrix(
+            WordInterop.Application word, WordInterop.Document document,
+            LaTeXBlockService service, string profile, double widthPt,
+            double fontSizePt)
+        {
+            const string source = "q^2";
+            document.Range(0, document.Content.End - 1).Delete();
+            document.Paragraphs[1].Range.ParagraphFormat.TabStops.ClearAll();
+            document.Range(0, 0).Text = "before after";
+            document.Range(6, 6).Select();
+            var initialRender = service.RenderPreview(source, widthPt,
+                LaTeXBlockLayoutMode.Auto, profile, fontSizePt, false,
+                renderKind: LaTeXBlockKind.InlineMath);
+            var shape = service.InsertRendered(source, widthPt,
+                LaTeXBlockLayoutMode.Auto, initialRender, null,
+                LaTeXBlockKind.InlineMath);
+            AssertConvertedMathState(shape, LaTeXBlockKind.InlineMath, source);
+
+            var sequence = new[]
+            {
+                LaTeXBlockKind.DisplayMath,
+                LaTeXBlockKind.NumberedMath,
+                LaTeXBlockKind.DisplayMath,
+                LaTeXBlockKind.InlineMath,
+                LaTeXBlockKind.NumberedMath,
+                LaTeXBlockKind.InlineMath
+            };
+            foreach (var kind in sequence)
+            {
+                var render = service.RenderPreview(source, widthPt,
+                    LaTeXBlockLayoutMode.Auto, profile, fontSizePt,
+                    kind != LaTeXBlockKind.InlineMath, renderKind: kind);
+                shape = service.ConvertMathRendered(shape, source, widthPt,
+                    render, kind);
+                AssertConvertedMathState(shape, kind, source);
+            }
+        }
+
+        private static void AssertConvertedMathState(WordInterop.InlineShape shape,
+            LaTeXBlockKind expectedKind, string expectedSource)
+        {
+            Assert(LaTeXBlockService.TryReadContract(shape, out var metadata,
+                       out var source) && metadata.Kind == expectedKind &&
+                   metadata.Role == (expectedKind == LaTeXBlockKind.NumberedMath
+                       ? LaTeXBlockRole.NumberedEquation : LaTeXBlockRole.Content) &&
+                   source == expectedSource && shape.Title == string.Empty,
+                "A math conversion did not persist the requested kind, role, source, or empty Title.");
+            var document = shape.Range.Document;
+            if (expectedKind == LaTeXBlockKind.InlineMath)
+            {
+                AssertInlineWordJoinerBoundary(shape, 2, "Converted Inline Math");
+                Assert(document.Fields.Count == 0 &&
+                       CountCustomTabs(shape.Range.Paragraphs[1]) == 0,
+                    "Converting to Inline Math left display/numbered scaffolding.");
+                return;
+            }
+            if (expectedKind == LaTeXBlockKind.DisplayMath)
+            {
+                AssertDisplayCenteredByTab(shape);
+                Assert(document.Fields.Count == 0 &&
+                       CountCustomTabs(shape.Range.Paragraphs[1]) == 1,
+                    "Converting to Display Math left numbering or conflicting tabs.");
+                return;
+            }
+            Assert(document.Range(shape.Range.Start - 1, shape.Range.Start).Text == "\t" &&
+                   document.Range(shape.Range.End, shape.Range.End + 1).Text == "\t" &&
+                   document.Fields.Count == 1 &&
+                   document.Bookmarks.Exists(
+                       LaTeXBlockService.EquationBookmarkName(metadata.Id)) &&
+                   CountCustomTabs(shape.Range.Paragraphs[1]) == 2,
+                "Converting to Numbered Math did not establish its tab/field/bookmark scaffold.");
         }
 
         private static void AssertDisplayCenteredByTab(WordInterop.InlineShape display)
@@ -1815,9 +1915,12 @@ namespace LaTeXBlocks.WordSmoke
                 Assert(LaTeXBlockService.TryReadContract(shape, out var metadata, out var source) &&
                        source == "\\[E=mc^2\\]" && metadata.HasExplicitStyle &&
                        metadata.Style.Equals(style) && shape.Range.Font.Position == 0 &&
-                       shape.Fill.ForeColor.RGB ==
-                           LaTeXBlockService.ToWordColor(style.TextColor),
-                    "Inserting a styled Word Block lost its source, style, or Graphics Fill.");
+                       shape.Title == string.Empty &&
+                       shape.AlternativeText.IndexOf("% text-color: #0055AA",
+                           StringComparison.Ordinal) >= 0 &&
+                       shape.AlternativeText.IndexOf("% background-color: #FFFAE8",
+                           StringComparison.Ordinal) >= 0,
+                    "Inserting a styled Word Block lost its source or magic-header style.");
                 // Fixed Content has no surrounding-text baseline. Damage the old
                 // character position so Update must restore the mode-owned zero.
                 shape.Range.Font.Position = 9;
@@ -1830,16 +1933,21 @@ namespace LaTeXBlocks.WordSmoke
                 shape = service.UpdateRendered(shape, source, resizedWidth,
                     LaTeXBlockLayoutMode.Fixed, resized, false, style);
                 var decoratedText = Encoding.UTF8.GetString(resized.SvgBytes);
-                Assert(LaTeXBlockService.TryReadContract(shape, out metadata, out source) &&
-                       metadata.Style.Equals(style) &&
+                var resizedHasContract = LaTeXBlockService.TryReadContract(shape,
+                    out metadata, out source);
+                var frameCount = CountOccurrences(decoratedText,
+                    "data-latexblocks-frame='1'");
+                var borderCount = CountOccurrences(decoratedText,
+                    "data-latexblocks-border='1'");
+                Assert(resizedHasContract && metadata.Style.Equals(style) &&
                        Math.Abs(shape.Width - resizedWidth) < 0.05 &&
                        Math.Abs(shape.Height - resizedHeight) < 0.05 &&
-                       shape.Range.Font.Position == 0 &&
-                       shape.Fill.ForeColor.RGB ==
-                           LaTeXBlockService.ToWordColor(style.TextColor) &&
-                       CountOccurrences(decoratedText, "data-latexblocks-frame='1'") == 1 &&
-                       CountOccurrences(decoratedText, "data-latexblocks-border='1'") == 1,
-                    "A Word fixed-Block resize did not repaint exactly one persistent SVG style shell.");
+                       shape.Range.Font.Position == 0 && frameCount == 1 && borderCount == 1,
+                    "A Word fixed-Block resize did not retain its magic-header style, frame, or one SVG shell. " +
+                    "contract=" + resizedHasContract + ", width=" + shape.Width +
+                    ", height=" + shape.Height + ", position=" +
+                    shape.Range.Font.Position + ", frame=" + frameCount +
+                    ", border=" + borderCount + ".");
                 // The async native-resize completion deliberately does not pass a
                 // separate style argument: it must recover durable Title data from
                 // the current object and retain exactly one SVG shell.
@@ -1944,11 +2052,15 @@ namespace LaTeXBlocks.WordSmoke
                     LaTeXBlockLayoutMode.Auto, profile, initialFontSizePt);
                 var inline = service.InsertBlock(inlineSource, 360,
                     LaTeXBlockLayoutMode.Auto, profile);
-                Assert(LaTeXBlockService.TryReadContract(inline,
-                           out var inlineMetadataBeforeColorRefresh, out _) &&
-                       inline.AlternativeText == inlineSource &&
-                       LaTeXBlockService.TextColorsEqual((int)inline.Range.Font.Color, wordRed),
-                    "An inline formula did not preserve its raw TeX source and native Word text color.");
+                var inlineHasContract = LaTeXBlockService.TryReadContract(inline,
+                    out var inlineMetadataBeforeColorRefresh, out _);
+                Assert(inlineHasContract,
+                    "An inline formula did not retain a valid magic-header contract.");
+                Assert(LaTeXBlockMetadata.ReadSource(inline.AlternativeText) ==
+                           LaTeXBlockService.NormalizeMathBody(inlineSource),
+                    "An inline formula did not preserve its normalized TeX body.");
+                Assert(LaTeXBlockService.TextColorsEqual((int)inline.Range.Font.Color, wordRed),
+                    "An inline formula did not preserve its native Word text color.");
                 var inlineRedSvg = service.RenderPreview(inlineSource, 360,
                     LaTeXBlockLayoutMode.Auto, profile, initialFontSizePt, false, wordRed);
                 Assert(Convert.ToBase64String(automaticRender.SvgBytes) ==
@@ -1971,7 +2083,7 @@ namespace LaTeXBlocks.WordSmoke
                 var graphicStart = inline.Range.Start;
                 var graphicEnd = inline.Range.End;
                 var graphicPosition = (double)inline.Range.Font.Position;
-                LaTeXBlockService.ApplyGraphicFill(inline, wordBlue);
+                LaTeXBlockService.ApplySvgForegroundFill(inline, wordBlue);
                 Assert(IsExactlySelectedInlineShape(word, inline) &&
                        inline.Range.Start == graphicStart &&
                        inline.Range.End == graphicEnd &&
@@ -2198,7 +2310,8 @@ namespace LaTeXBlocks.WordSmoke
 
                 document = word.Documents.Open(documentPath, ReadOnly: false);
                 var reopenedInline = document.InlineShapes[1];
-                Assert(reopenedInline.AlternativeText == inlineSource &&
+                Assert(LaTeXBlockMetadata.ReadSource(reopenedInline.AlternativeText) ==
+                           LaTeXBlockService.NormalizeMathBody(inlineSource) &&
                        Math.Abs((double)reopenedInline.Range.Font.Size -
                            movedAwayFontSizePt) < 0.001 &&
                        LaTeXBlockService.TextColorsEqual((int)reopenedInline.Range.Font.Color,
@@ -2216,38 +2329,22 @@ namespace LaTeXBlocks.WordSmoke
                 document.Content.Font.Size = 14;
                 document.Range(0, 0).Select();
                 word.Selection.Font.Color = (WordInterop.WdColor)wordRed;
-                var display = service.InsertBlock(displaySource, 300,
-                    LaTeXBlockLayoutMode.Fixed, profile);
-                Assert(display.AlternativeText == displaySource &&
-                       LaTeXBlockService.TextColorsEqual((int)display.Range.Font.Color, wordRed),
-                    "A fixed-width display formula did not inherit Word's text color.");
+                var fixedTeXStyle = new LaTeXBlockStyle(1.2, 0,
+                    LaTeXBlockVerticalAlignment.Top,
+                    System.Drawing.Color.FromArgb(0, 0, 255));
+                var fixedRender = service.RenderPreview(displaySource, 300,
+                    LaTeXBlockLayoutMode.Fixed, profile, 14, false, wordRed,
+                    fixedTeXStyle, null, 300, LaTeXBlockKind.LaTeXBlock);
+                var display = service.InsertRendered(displaySource, 300,
+                    LaTeXBlockLayoutMode.Fixed, fixedRender, fixedTeXStyle,
+                    LaTeXBlockKind.LaTeXBlock);
+                Assert(LaTeXBlockMetadata.ReadSource(display.AlternativeText) == displaySource,
+                    "A fixed LaTeX Block did not preserve its author source.");
                 Assert(LaTeXBlockService.TryReadContract(display,
-                           out var fixedColorMetadata, out _),
-                    "The external fixed-Block color fixture lost its contract.");
-                var fixedColorStart = display.Range.Start;
-                var fixedColorWidth = display.Width;
-                var fixedColorHeight = display.Height;
-                display.Range.Font.Color = (WordInterop.WdColor)wordBlue;
-                var fixedFillApplied = service.TryApplyGraphicFillsBatch(
-                           new List<LaTeXBlockColorUpdate>
-                           {
-                               new LaTeXBlockColorUpdate(display, wordBlue)
-                           });
-                var fixedFontColor = (int)display.Range.Font.Color;
-                var fixedFillColor = (int)display.Fill.ForeColor.RGB;
-                Assert(fixedFillApplied &&
-                       LaTeXBlockService.TextColorsEqual(fixedFontColor, wordBlue) &&
-                       LaTeXBlockService.TextColorsEqual(fixedFillColor, wordBlue) &&
-                       display.Range.Start == fixedColorStart &&
-                       Math.Abs(display.Width - fixedColorWidth) < 0.01 &&
-                       Math.Abs(display.Height - fixedColorHeight) < 0.01 &&
-                       LaTeXBlockService.TryReadContract(display,
-                           out var recoloredFixedMetadata, out var recoloredFixedSource) &&
-                       recoloredFixedMetadata.Id == fixedColorMetadata.Id &&
-                       recoloredFixedSource == displaySource,
-                    "An external fixed-Block color change did not remain a Graphics Fill operation. " +
-                    "Applied=" + fixedFillApplied + ", Font.Color=" + fixedFontColor +
-                    ", Fill=" + fixedFillColor + ".");
+                           out var fixedColorMetadata, out _) &&
+                       fixedColorMetadata.Kind == LaTeXBlockKind.LaTeXBlock &&
+                       fixedColorMetadata.Style.Equals(fixedTeXStyle),
+                    "The TeX-coloured fixed Block lost its magic-header style contract.");
                 document.Close(WordInterop.WdSaveOptions.wdDoNotSaveChanges);
                 Release(document);
                 document = null;
@@ -2259,7 +2356,8 @@ namespace LaTeXBlocks.WordSmoke
                 word.Selection.Font.Color = (WordInterop.WdColor)wordRed;
                 var numbered = service.InsertNumberedBlock(displaySource, 360,
                     LaTeXBlockLayoutMode.Auto, profile);
-                Assert(numbered.AlternativeText == displaySource &&
+                Assert(LaTeXBlockMetadata.ReadSource(numbered.AlternativeText) ==
+                           LaTeXBlockService.NormalizeMathBody(displaySource) &&
                        LaTeXBlockService.TextColorsEqual((int)numbered.Range.Font.Color, wordRed),
                     "A numbered display formula did not inherit Word's text color.");
                 Assert(LaTeXBlockService.TryReadContract(numbered,
@@ -2269,12 +2367,13 @@ namespace LaTeXBlocks.WordSmoke
                 var numberedColorWidth = numbered.Width;
                 var numberedColorHeight = numbered.Height;
                 numbered.Range.Font.Color = (WordInterop.WdColor)wordBlue;
-                Assert(service.TryApplyGraphicFillsBatch(
+                Assert(service.TryApplySvgForegroundFillsBatch(
                            new List<LaTeXBlockColorUpdate>
                            {
                                new LaTeXBlockColorUpdate(numbered, wordBlue)
                            }) &&
-                       numbered.AlternativeText == displaySource &&
+                       LaTeXBlockMetadata.ReadSource(numbered.AlternativeText) ==
+                           LaTeXBlockService.NormalizeMathBody(displaySource) &&
                        LaTeXBlockService.TextColorsEqual(
                            (int)numbered.Range.Font.Color, wordBlue) &&
                        LaTeXBlockService.TextColorsEqual(
@@ -2286,7 +2385,8 @@ namespace LaTeXBlocks.WordSmoke
                            out var recoloredNumberedMetadata,
                            out var recoloredNumberedSource) &&
                        recoloredNumberedMetadata.Id == numberedColorMetadata.Id &&
-                       recoloredNumberedSource == displaySource,
+                       recoloredNumberedSource ==
+                           LaTeXBlockService.NormalizeMathBody(displaySource),
                     "An external numbered-formula color change replaced or moved its Office object instead of using Graphics Fill.");
                 Console.WriteLine("Word: text color insertion, refresh, and persistence passed.");
             }
@@ -2350,10 +2450,12 @@ namespace LaTeXBlocks.WordSmoke
                     LaTeXBlockLayoutMode.Auto, secondRender);
 
                 Assert(LaTeXBlockService.TryReadContract(first, out var firstMetadata,
-                           out var firstStoredSource) && firstStoredSource == firstSource,
+                           out var firstStoredSource) && firstStoredSource ==
+                               LaTeXBlockService.NormalizeMathBody(firstSource),
                     "The mixed-selection fixture did not create its first automatic formula.");
                 Assert(LaTeXBlockService.TryReadContract(second, out var secondMetadata,
-                           out var secondStoredSource) && secondStoredSource == secondSource,
+                           out var secondStoredSource) && secondStoredSource ==
+                               LaTeXBlockService.NormalizeMathBody(secondSource),
                     "The mixed-selection fixture did not create two valid automatic formulas.");
 
                 // Give the two formula runs deliberately different sentinels. A color
@@ -2401,13 +2503,30 @@ namespace LaTeXBlocks.WordSmoke
                            LaTeXBlockService.ResolveTextColor(second.Range), changedColor),
                     "Word did not apply Font Color to both formulas while preserving the mixed range selection.");
 
-                Assert(service.TryApplyGraphicFillsBatch(
+                // Word is inconsistent here for some palette colours and document
+                // structures: a mixed-range command can leave an individual drawing
+                // character at its previous Font.Color. The add-in must treat the
+                // selection's resolved colour as the command target and reconcile all
+                // captured formulas, not copy this partial host result.
+                second.Range.Font.Color = (WordInterop.WdColor)initialColor;
+
+                Assert(service.TryApplySvgForegroundFillsBatch(
                         new List<LaTeXBlockColorUpdate>
                         {
                             new LaTeXBlockColorUpdate(first, changedColor),
                             new LaTeXBlockColorUpdate(second, changedColor)
                         }),
                     "The mixed-selection color change did not use Graphics Fill.");
+
+                Assert(LaTeXBlockService.TextColorsEqual(
+                           LaTeXBlockService.ResolveTextColor(first.Range), changedColor) &&
+                       LaTeXBlockService.TextColorsEqual(
+                           LaTeXBlockService.ResolveTextColor(second.Range), initialColor) &&
+                       LaTeXBlockService.TextColorsEqual(
+                           (int)first.Fill.ForeColor.RGB, changedColor) &&
+                       LaTeXBlockService.TextColorsEqual(
+                           (int)second.Fill.ForeColor.RGB, changedColor),
+                    "Graphics Fill synchronization rewrote Word's native character colors or missed a formula drawing.");
 
                 // Word already owns the selected runs' Font.Color. Graphics Fill
                 // updates only the two formula drawings, so the mixed selection and
@@ -2425,9 +2544,10 @@ namespace LaTeXBlocks.WordSmoke
                     firstMetadata.DepthPt, firstBold, firstItalic, firstUnderline,
                     firstNoProofing, firstHighlight, "First mixed-selection formula");
                 AssertAutoFormatRefreshState(second, secondMetadata.Id, secondSource, 360,
-                    fontSizePt, changedColor,
+                    fontSizePt, initialColor,
                     secondMetadata.DepthPt, secondBold, secondItalic, secondUnderline,
-                    secondNoProofing, secondHighlight, "Second mixed-selection formula");
+                    secondNoProofing, secondHighlight, "Second mixed-selection formula",
+                    changedColor);
                 Assert(first.Range.Font.Name == "Arial" &&
                        Math.Abs((double)first.Range.Font.Spacing - 1.25) < 0.001 &&
                        first.Range.LanguageID == WordInterop.WdLanguageID.wdEnglishUS &&
@@ -2466,6 +2586,42 @@ namespace LaTeXBlocks.WordSmoke
                     "First mixed-selection formula", false);
                 AssertInlineWordJoinerBoundary(second, 4,
                     "Second mixed-selection formula", false);
+
+                word.Selection.Font.TextColor.ObjectThemeColor =
+                    WordInterop.WdThemeColorIndex.wdThemeColorAccent1;
+                word.Selection.Font.TextColor.TintAndShade = 0.8f;
+                var firstThemeBefore =
+                    LaTeXBlockService.NativeTextColorDescriptor.Automatic;
+                var secondThemeBefore =
+                    LaTeXBlockService.NativeTextColorDescriptor.Automatic;
+                Assert(LaTeXBlockService.NativeTextColorDescriptor.TryCapture(
+                           first.Range, out firstThemeBefore) &&
+                       LaTeXBlockService.NativeTextColorDescriptor.TryCapture(
+                           second.Range, out secondThemeBefore) &&
+                       firstThemeBefore.Kind == LaTeXBlockService.NativeTextColorKind.Theme &&
+                       secondThemeBefore.Equals(firstThemeBefore),
+                    "Word did not apply one native theme color to the formula runs.");
+                var resolvedThemeColor = LaTeXBlockService.ResolveTextColor(first.Range);
+                second.Range.Font.Color = (WordInterop.WdColor)initialColor;
+                Assert(service.TryApplySvgForegroundFillsBatch(
+                        new List<LaTeXBlockColorUpdate>
+                        {
+                            new LaTeXBlockColorUpdate(first, resolvedThemeColor,
+                                firstThemeBefore),
+                            new LaTeXBlockColorUpdate(second, resolvedThemeColor,
+                                firstThemeBefore)
+                        }) &&
+                       LaTeXBlockService.NativeTextColorDescriptor.TryCapture(
+                           first.Range, out var firstThemeAfter) &&
+                       LaTeXBlockService.NativeTextColorDescriptor.TryCapture(
+                           second.Range, out var secondThemeAfter) &&
+                       firstThemeAfter.Equals(firstThemeBefore) &&
+                       secondThemeAfter.Equals(firstThemeBefore) &&
+                       LaTeXBlockService.TextColorsEqual(
+                           (int)first.Fill.ForeColor.RGB, resolvedThemeColor) &&
+                       LaTeXBlockService.TextColorsEqual(
+                           (int)second.Fill.ForeColor.RGB, resolvedThemeColor),
+                    "Graphics Fill synchronization downgraded a Word theme color to direct RGB.");
                 Console.WriteLine("Word: mixed text/formula Font Color refresh passed.");
             }
             finally
@@ -2525,11 +2681,11 @@ namespace LaTeXBlocks.WordSmoke
                     LaTeXBlockLayoutMode.Auto, secondRender);
                 Assert(LaTeXBlockService.TryReadContract(first,
                            out var firstMetadata, out var firstStoredSource) &&
-                       firstStoredSource == firstSource,
+                       firstStoredSource == LaTeXBlockService.NormalizeMathBody(firstSource),
                     "The cross-paragraph Font Size fixture did not create its first formula.");
                 Assert(LaTeXBlockService.TryReadContract(second,
                            out var secondMetadata, out var secondStoredSource) &&
-                       secondStoredSource == secondSource,
+                       secondStoredSource == LaTeXBlockService.NormalizeMathBody(secondSource),
                     "The cross-paragraph Font Size fixture did not create its second formula.");
 
                 first.Range.Font.Color = (WordInterop.WdColor)firstColor;
@@ -2542,7 +2698,7 @@ namespace LaTeXBlocks.WordSmoke
                 first.Range.Font.Spacing = 1.25f;
                 first.Range.Font.Position = 7;
                 first.Range.Font.Subscript = -1;
-                LaTeXBlockService.ApplyGraphicFill(first, firstColor);
+                LaTeXBlockService.ApplySvgForegroundFill(first, firstColor);
 
                 second.Range.Font.Color = (WordInterop.WdColor)secondColor;
                 second.Range.Font.Bold = secondBold;
@@ -2554,7 +2710,7 @@ namespace LaTeXBlocks.WordSmoke
                 second.Range.Font.Scaling = 105;
                 second.Range.Font.Position = -6;
                 second.Range.Font.Superscript = -1;
-                LaTeXBlockService.ApplyGraphicFill(second, secondColor);
+                LaTeXBlockService.ApplySvgForegroundFill(second, secondColor);
 
                 var secondParagraph = second.Range.Paragraphs[1].Range;
                 var selectionStart = first.Range.Paragraphs[1].Range.Start;
@@ -2706,7 +2862,7 @@ namespace LaTeXBlocks.WordSmoke
                     false, LaTeXBlockService.AutomaticTextColor);
                 var legacy = service.InsertRendered(displaySource, 360,
                     LaTeXBlockLayoutMode.Fixed, render);
-                Assert(LaTeXBlockMetadata.TryParse(legacy.Title,
+                Assert(LaTeXBlockMetadata.TryParse(legacy.AlternativeText,
                            out var rawMetadata) &&
                        rawMetadata.Mode == LaTeXBlockLayoutMode.Fixed,
                     "The legacy display fixture was not persisted as Fixed.");
@@ -3036,7 +3192,7 @@ namespace LaTeXBlocks.WordSmoke
                     LaTeXBlockLayoutMode.Fixed, profile, 14);
                 var inline = service.InsertRendered(source, 180,
                     LaTeXBlockLayoutMode.Fixed, initialRender);
-                Assert(LaTeXBlockMetadata.TryParse(inline.Title, out var beforeMetadata),
+                Assert(LaTeXBlockService.TryReadContract(inline, out var beforeMetadata, out _),
                     "The fixed block did not receive its metadata before becoming floating.");
 
                 // A fixed Block starts as an InlineShape, and Word still lets a
@@ -3058,7 +3214,7 @@ namespace LaTeXBlocks.WordSmoke
                     requestedInlineFrameWidthPt, requestedInlineFrameHeightPt);
                 inline = service.UpdateRendered(inline, source, expectedInlineLayoutWidth,
                     LaTeXBlockLayoutMode.Fixed, inlineReflowFrameRender, false);
-                Assert(LaTeXBlockMetadata.TryParse(inline.Title, out var inlineReflowMetadata) &&
+                Assert(LaTeXBlockService.TryReadContract(inline, out var inlineReflowMetadata, out _) &&
                        Math.Abs(inline.Width - requestedInlineFrameWidthPt) < 0.05 &&
                        Math.Abs(inline.Height - requestedInlineFrameHeightPt) < 0.05 &&
                        Math.Abs(inlineReflowMetadata.WidthPt - expectedInlineLayoutWidth) < 0.01 &&
@@ -3092,7 +3248,8 @@ namespace LaTeXBlocks.WordSmoke
                        document.Shapes.Count == 1 && document.InlineShapes.Count == 0,
                     "Changing Wrap Text did not produce Word's expected floating Shape selection.");
                 Assert(service.TryGetSelectedFloatingBlock(out var selected, out var floatingMetadata) &&
-                       floatingMetadata.Id == beforeMetadata.Id && selected.AlternativeText == source,
+                       floatingMetadata.Id == beforeMetadata.Id &&
+                       LaTeXBlockMetadata.ReadSource(selected.AlternativeText) == source,
                     "A selected floating LaTeX Block was not recognized by its metadata contract.");
 
                 var updateRender = service.RenderPreview(updatedSource, 180,
@@ -3110,7 +3267,8 @@ namespace LaTeXBlocks.WordSmoke
                        updatedMetadata.Id == beforeMetadata.Id && updatedText == updatedSource,
                     "Updating a floating block lost its Shape contract or changed it back to inline.");
                 Assert(service.TryGetSelectedFloatingBlock(out var reselected, out var reselectedMetadata) &&
-                       reselectedMetadata.Id == beforeMetadata.Id && reselected.AlternativeText == updatedSource,
+                       reselectedMetadata.Id == beforeMetadata.Id &&
+                       LaTeXBlockMetadata.ReadSource(reselected.AlternativeText) == updatedSource,
                     "Updating a floating block did not leave its replacement selected for another edit.");
                 Console.WriteLine("Floating block placement: wrap=" + (int)updated.WrapFormat.Type +
                     ", rel=" + (int)updated.RelativeHorizontalPosition + "/" +
@@ -3349,8 +3507,8 @@ namespace LaTeXBlocks.WordSmoke
                     LaTeXBlockLayoutMode.Auto, updatedRender);
                 AssertExactSvgDrawingExtents(shape, updatedRender.SvgBytes,
                     "Updated inline formula");
-                Assert(shape.AlternativeText == "$x^2$",
-                    "Updating the inline formula lost the authoritative TeX source.");
+                Assert(LaTeXBlockMetadata.ReadSource(shape.AlternativeText) == "x^2",
+                    "Updating the inline formula lost its normalized TeX body.");
                 AssertInlineWordJoinerBoundary(shape, 2, "Updated inline formula");
                 Assert(word.Selection.Start == shape.Range.End + 1,
                     "Update left the insertion caret before the trailing U+2060.");
@@ -3540,6 +3698,7 @@ namespace LaTeXBlocks.WordSmoke
                     unchecked((int)wordProcessId));
                 monitor.SetInteractionContext(true);
                 var commits = 0;
+                var fontColorAtCommit = int.MinValue;
                 var interactionGate = new object();
                 var begunInteractions = new HashSet<long>();
                 var completedInteractions = new HashSet<long>();
@@ -3576,7 +3735,10 @@ namespace LaTeXBlocks.WordSmoke
                         }
                     }
                     if (args.Phase == WordFormatInteractionPhase.Committed)
+                    {
+                        fontColorAtCommit = (int)word.Selection.Font.Color;
                         Interlocked.Increment(ref commits);
+                    }
                 };
                 Func<long> getSingleActivePaletteInteraction = () =>
                 {
@@ -3848,12 +4010,16 @@ namespace LaTeXBlocks.WordSmoke
                 // reliable swatch Invoke. Exercise the real mouse-up confirmation that
                 // turns only the same candidate's paired down/up into a semantic commit.
                 var commitsBeforeClick = Volatile.Read(ref commits);
+                fontColorAtCommit = int.MinValue;
                 ClickAt(swatchBounds.Left + swatchBounds.Width / 2,
                     swatchBounds.Top + swatchBounds.Height / 2);
                 WaitFor(() => Volatile.Read(ref commits) == commitsBeforeClick + 1,
                     8000,
                     "A Font Color palette swatch was not observed through WinEvent/MSAA (" +
                     monitor.DiagnosticStateForTest + ").");
+                Assert(fontColorAtCommit != int.MinValue &&
+                       fontColorAtCommit == (int)word.Selection.Font.Color,
+                    "The palette commit was delivered before Word applied its native colour.");
                 var quietTimer = Stopwatch.StartNew();
                 while (quietTimer.ElapsedMilliseconds < 2000)
                 {
@@ -3956,26 +4122,27 @@ namespace LaTeXBlocks.WordSmoke
             double expectedFontSizePt, int expectedTextColor,
             double expectedDepthPt, int expectedBold, int expectedItalic,
             WordInterop.WdUnderline expectedUnderline, int expectedNoProofing,
-            WordInterop.WdColorIndex expectedHighlight, string context)
+            WordInterop.WdColorIndex expectedHighlight, string context,
+            int? expectedFillColor = null)
         {
             var expectedPosition = -(int)Math.Round(expectedDepthPt,
                 MidpointRounding.AwayFromZero);
             var hasContract = LaTeXBlockService.TryReadContract(shape,
                 out var metadata, out var source);
+            var expectedStoredSource = LaTeXBlockService.NormalizeMathBody(expectedSource);
             var valid = hasContract &&
-                   metadata.Id == expectedId && source == expectedSource &&
+                   metadata.Id == expectedId && source == expectedStoredSource &&
                    metadata.Role == LaTeXBlockRole.Content &&
                    metadata.Mode == LaTeXBlockLayoutMode.Auto &&
-                   Math.Abs(metadata.WidthPt - expectedWidthPt) < 0.001 &&
                    Math.Abs(metadata.FontSizePt - expectedFontSizePt) < 0.001 &&
-                   Math.Abs(metadata.DepthPt - expectedDepthPt) < 0.01 &&
-                   shape.AlternativeText == expectedSource &&
+                   LaTeXBlockMetadata.ReadSource(shape.AlternativeText) == expectedStoredSource &&
                    Math.Abs((double)shape.Range.Font.Size - expectedFontSizePt) < 0.001 &&
                    Math.Abs((double)shape.Range.Font.SizeBi - expectedFontSizePt) < 0.001 &&
                    LaTeXBlockService.TextColorsEqual((int)shape.Range.Font.Color,
                        expectedTextColor) &&
                    LaTeXBlockService.TextColorsEqual(
-                       (int)shape.Fill.ForeColor.RGB, expectedTextColor) &&
+                       (int)shape.Fill.ForeColor.RGB,
+                       expectedFillColor ?? expectedTextColor) &&
                    shape.Range.Font.Position == expectedPosition &&
                    shape.Range.Font.Subscript == 0 &&
                    shape.Range.Font.Superscript == 0 &&
@@ -4110,6 +4277,7 @@ namespace LaTeXBlocks.WordSmoke
         {
             if (!condition) throw new InvalidOperationException(message);
         }
+
 
         private static void RunShutdownProbe(StemTeXBackend renderer, string profile)
         {

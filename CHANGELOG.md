@@ -5,6 +5,84 @@ Word-and-PowerPoint package line.
 
 ## [Unreleased]
 
+## [0.2.121] — 2026-08-12
+
+### Word
+
+- Removed the second fixed wait after a Font Color palette commit and reduced the monitor boundary to the next
+  scheduler turn, so SVG formula paint no longer trails Word's native text colour by roughly 175 ms.
+- Existing visible solid Graphics Fill now changes through one RGB assignment without rebuilding the fill through
+  `Solid()`, avoiding an intermediate/default paint frame.
+
+## [0.2.120] — 2026-08-12
+
+### Word
+
+- Font Color synchronization now leaves Word's native character colour untouched and updates only an SVG formula's
+  Graphics Fill. Theme colours therefore retain their theme slot and tint instead of being downgraded to direct RGB.
+- Avoided redundant Graphics Fill writes, `ScreenUpdating` toggles, and unrelated ribbon invalidation in the
+  colour-only path, preventing the delayed redraw visible with light theme colours.
+
+## [0.2.119] — 2026-08-12
+
+### Word
+
+- Fixed mixed-range Font Color commands updating only some formulas. The committed selection colour is now the single
+  target for every captured Inline, Display, and Numbered Math object; each drawing character and its SVG Graphics
+  Fill are reconciled even when Word applies the native colour inconsistently across the selected pictures.
+
+## [0.2.118] — 2026-08-12
+
+### Word
+
+- Fixed Numbered Math conversion to Display Math or another math kind being rejected because the conversion validator
+  treated the source object's own numbered-equation scaffold as an external conflict.
+- Added a complete Inline/Display/Numbered conversion matrix that verifies all six directions, including magic-header
+  kind/role/source, inline boundaries, display tabs, numbered SEQ fields, and equation bookmarks.
+
+## [0.2.117] — 2026-08-12
+
+### Word
+
+- Display Math and Numbered Math now unconditionally take ownership of their paragraph's custom tab-stop layout.
+  Existing custom stops no longer block insertion; the add-in clears them and installs its center/right math stops.
+
+## [0.2.116] — 2026-08-12
+
+### Word and PowerPoint
+
+- Replaced Title/JSON and PowerPoint tag persistence with one shared TeX magic-header envelope in `AlternativeText`.
+  The source begins after `% !end-latexblocks`, retains meaningful blank lines, and is separated from metadata without
+  escaping or flattening its LaTeX text. Committed objects keep `Title` empty. Only the new format is recognized.
+- Fixed Word's Flat OPC SVG-media refresh path to locate the new `descr` contract while preserving native Graphics
+  Fill, and derived non-persisted baseline/frame state from the live Office object.
+
+## [0.2.115] — 2026-08-12
+
+### Word and PowerPoint
+
+- Fixed styled Blocks becoming solid or invisible after insertion. Fixed
+  `LaTeXBlock` objects now define foreground and background through TeX only and do
+  not use Office colour/fill APIs; Inline, Display, and Numbered Math retain their
+  existing host-colour behavior. PowerPoint keeps searchable LaTeX directly in
+  `AlternativeText`; Office may normalize CR/CRLF to LF but preserves line count,
+  blank lines, Unicode, and terminal newlines. Identity, layout, SVG dimensions, and
+  explicitly separate text/background style fields now share one versioned JSON
+  object in `Title`. Word and PowerPoint use the same metadata schema; old
+  semicolon Titles and PowerPoint metadata Tags are not read.
+  The fixed-Block TeX wrapper passes the stored source without trimming boundary
+  newlines, preserving paragraph-break semantics.
+  The editor's Fill label is now Background.
+- The unified installer now registers the Word and PowerPoint VSTO manifests
+  directly instead of installing them as two independent ClickOnce products.
+  Programs and Features therefore exposes one LaTeX Blocks entry, owned by the
+  stable installer AppId, while upgrades remove registrations created by the old
+  packaging path.
+- Fixed the unified installer's local VSTO layout. The installer now packages
+  each project's signed flat Release layout—the same layout used by development
+  registration—rather than the ClickOnce `app.publish` tree, allowing Word and
+  PowerPoint to load via `|vstolocal` without separate ClickOnce products.
+
 ## [0.2.107] — 2026-08-10
 
 ### Word

@@ -1,5 +1,8 @@
 # Word Object Model
 
+The shared Word/PowerPoint persistence envelope is specified normatively in
+[`MAGIC_HEADER.md`](MAGIC_HEADER.md).
+
 This is the normative representation and layout contract for the Word host. PowerPoint uses only a separate
 free-standing block model; none of the Word inline-formula rules below apply there. See
 [POWERPOINT_SCOPE.md](POWERPOINT_SCOPE.md) and [ARCHITECTURE.md](ARCHITECTURE.md) for the host boundary.
@@ -17,34 +20,25 @@ content object; it does not add a container or a second copy of the TeX source.
 | Concern | Word representation | Rule |
 | --- | --- | --- |
 | Display | Embedded SVG image bytes | Portable output; Word does not need StemTeX to display an existing block. |
-| Authoritative source | `InlineShape.AlternativeText` or floating `Shape.AlternativeText` | TeX source only, with Word-stable LF line endings. No AsciiMath, normalized terms, prefixes, or duplicate metadata. |
-| Identification | `InlineShape.Title` or floating `Shape.Title` | Versioned, compact metadata only. |
+| Source and identification | `InlineShape.AlternativeText` or floating `Shape.AlternativeText` | The versioned magic header followed by the TeX source. `Title` is empty. |
 | Placement | Word `InlineShape` range; optionally a floating `Shape` for fixed content | Word remains responsible for layout, anchoring, and document persistence. An auto-width content formula alone has one U+2060 WORD JOINER immediately before and after its image; a numbered equation uses same-paragraph manual breaks and tab stops. |
 | Equation number | Word `SEQ LaTeXBlockEq` field | Native searchable text, updated explicitly in document order. The matching Word Caption Label declares the category, while the stable bookmark remains the individual target. |
 | Equation reference target | Word bookmark over the `SEQ` result | Name is derived from the stable SVG ID. |
 
-Version 1 metadata is:
-
-```text
-LaTeXBlocks/1;id=<guid>;width=<points>;depth=<points>;mode=<auto|fixed>;size=<points>;role=<content|numbered-equation>[;framewidth=<points>;frameheight=<points>;style=<compact-style>]
-```
-
-Word rewrites CRLF in Alternative Text to LF when a DOCX is saved. LaTeX Blocks therefore canonicalizes CRLF and bare
-CR to LF before rendering and storage; all other source characters are preserved. This keeps the authoritative source
-stable across save/reopen without changing TeX comment boundaries.
+The exact version 1 grammar and fields are defined in [MAGIC_HEADER.md](MAGIC_HEADER.md).
+The parser separates the envelope at `% !end-latexblocks`; the remaining text is
+author source, not metadata. Office may normalize the physical newline encoding,
+but LaTeX Blocks does not collapse, trim, or otherwise reinterpret source lines.
 
 The stable ID survives edits. Width is the StemTeX typesetting constraint, not a DPI value and not a raster-image
 scale. For a natural-width single-baseline source, depth is measured from an invisible dvisvgm marker at the TeX
 baseline to the SVG viewport bottom. It includes the standard minimum `\strutbox` depth, or a larger natural content
-depth when required. `framewidth` and `frameheight`, when present, are the authored physical SVG root for a floating
-fixed block; they are deliberately distinct from the TeX measure. `style`, when present, is a delimiter-safe compact
-serialization of the shared Block style (leading, padding, vertical placement, text/fill/border colors, and border
-width). It appears only for a fixed ordinary Content Block; it never replaces TeX source in Alternative Text.
-The version-one Word style payload's fourth `t/m/b` slot stores Top/Middle/Bottom vertical placement. Current writers
-emit the selected value, and readers restore all three values; retaining this version-one layout keeps existing Blocks
-compatible without a metadata-version change.
-Metadata written before `role`, frame fields, or `style` continues to parse as ordinary `content` with the historical
-unstyled rendering route.
+depth when required. `frameWidthPt` and `frameHeightPt` are the authored physical SVG
+root and remain distinct from the TeX measure but are observed from the Office
+object rather than persisted in the header. `style`, when present, uses named
+fields for leading, padding, vertical placement, text/background/border colours, and
+border width. It appears only for a fixed ordinary Content Block. No old
+Title/JSON, semicolon, or shape-tag metadata format is accepted.
 
 For a fixed-width block, the saved `width` remains an absolute TeX layout width in points. The primary Word controls
 therefore use exact points as well: 30–2000 pt, a 0.5 pt step, one decimal place, and a 360 pt default. The wider
@@ -289,7 +283,7 @@ contract because Word cannot address the internal SVG rows as separate native fi
 
 ## Edit transaction
 
-1. Read source from Alternative Text and metadata from Title.
+1. Parse metadata and source from the Alternative Text magic-header envelope.
 2. Render the proposed source before modifying Word.
 3. Insert and fully annotate the replacement SVG immediately before the old shape.
 4. Delete the old shape only after the replacement is valid.

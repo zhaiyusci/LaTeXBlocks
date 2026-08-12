@@ -178,9 +178,10 @@ namespace LaTeXBlocks.PowerPointSmoke
                        metadata.Mode == LaTeXBlockLayoutMode.Fixed &&
                        Math.Abs(metadata.FontSizePt - 27.5) < 0.01,
                     "The inserted PowerPoint block lost its source, role, layout, or TeX size.");
-                Assert(string.Equals(block.Tags[PowerPointBlockService.KindTag],
-                           PowerPointBlockService.KindValue, StringComparison.OrdinalIgnoreCase),
-                    "The inserted PowerPoint block lost its explicit identity tag.");
+                Assert(block.Title == string.Empty &&
+                       LaTeXBlockMetadata.TryParse(block.AlternativeText,
+                           out _, out var insertedSource) && insertedSource == source,
+                    "The inserted PowerPoint block did not persist its Magic Header and source.");
                 Assert(!PowerPointBlockService.IsStyleApplied(block),
                     "A legacy default PowerPoint block was not kept on the compatible bare SVG route.");
                 Assert(Math.Abs(block.Width - PowerPointBlockService.ReadSvgWidthPt(
@@ -212,29 +213,24 @@ namespace LaTeXBlocks.PowerPointSmoke
                     "An explicitly accepted default PowerPoint style did not create its SVG viewport.");
                 var explicitDefaultBlock = service.InsertRendered(source, 288,
                     explicitDefaultRender, explicitDefaultStyle, true);
-                Assert(PowerPointBlockService.IsStyleApplied(explicitDefaultBlock) &&
-                       string.Equals(explicitDefaultBlock.Tags[
-                            PowerPointBlockService.StyleAppliedTag], "1", StringComparison.Ordinal),
+                Assert(PowerPointBlockService.IsStyleApplied(explicitDefaultBlock),
                     "An explicitly accepted default PowerPoint style was not persisted separately from legacy defaults.");
-                explicitDefaultBlock.Tags.Delete(PowerPointBlockService.StyleAppliedTag);
-                explicitDefaultBlock.Tags.Add(LaTeXBlockStyle.TagName,
-                    "LaTeXBlocksStyle/1;leading=1.2;padding=0;valign=bottom;" +
-                    "text=000000;fill=none;border=0;bordercolor=000000");
-                Assert(PowerPointBlockService.IsStyleApplied(explicitDefaultBlock) &&
-                       PowerPointBlockService.ReadStyle(explicitDefaultBlock)
-                           .VerticalAlignment == LaTeXBlockVerticalAlignment.Bottom,
-                    "A pre-marker PowerPoint style lost its persisted vertical alignment or applied-style semantics.");
                 explicitDefaultBlock.Delete();
                 Release(explicitDefaultBlock);
                 // TeX owns content colour and leading. The SVG owns padding, fill,
                 // and border; PowerPoint still receives one
                 // ordinary picture whose author-facing source remains unchanged.
-                const string styledSource = "First styled line.\\par Second styled line with $E=mc^2$.";
+                const string styledSource =
+                    "First styled line.\\par\r\n\r\n第二行 with $E=mc^2$.\nfinal line\r\n";
                 var styledStyle = new LaTeXBlockStyle(1.5, 8,
                     LaTeXBlockVerticalAlignment.Middle,
                     Color.FromArgb(24, 55, 102),
                     true, Color.FromArgb(241, 245, 255), 1.25,
                     Color.FromArgb(51, 98, 162));
+                var multilineOfficeSource = PowerPointBlockService.ToOfficeAlternativeText(
+                    styledSource);
+                Assert(multilineOfficeSource == styledSource,
+                    "PowerPoint source normalization changed author LaTeX.");
                 Assert(LaTeXBlockStyle.ReadFromTag(styledStyle.ToString()).Equals(styledStyle) &&
                        styledStyle.ToString().IndexOf("valign=middle", StringComparison.Ordinal) >= 0 &&
                        LaTeXBlockStyle.ReadFromTag("LaTeXBlocksStyle/1;leading=1.5;" +
@@ -262,10 +258,30 @@ namespace LaTeXBlocks.PowerPointSmoke
                        styledWrapper.IndexOf("\\fbox", StringComparison.Ordinal) < 0 &&
                        styledWrapper.IndexOf("\\colorbox", StringComparison.Ordinal) < 0 &&
                        styledWrapper.IndexOf("\\vbox to ", StringComparison.Ordinal) < 0 &&
-                       styledWrapper.IndexOf(styledSource, StringComparison.Ordinal) >= 0,
+                       styledWrapper.IndexOf(styledSource + "%\r\n",
+                           StringComparison.Ordinal) >= 0,
                     "The PowerPoint TeX wrapper did not establish stable outer text-line metrics.");
                 var fixedBoxWrapper = styledStyle.WrapSource(styledSource, inheritedSize,
                     true, 200, 80);
+                Assert(fixedBoxWrapper.IndexOf("\\color[HTML]{183766}",
+                           StringComparison.Ordinal) >= 0 &&
+                       fixedBoxWrapper.IndexOf("\\colorbox[HTML]{F1F5FF}",
+                           StringComparison.Ordinal) >= 0 &&
+                       fixedBoxWrapper.IndexOf(styledSource + "%\r\n",
+                           StringComparison.Ordinal) >= 0,
+                    "A fixed PowerPoint Block did not pass its exact source and colours to TeX.");
+                foreach (var exactSource in new[]
+                {
+                    "one line", "one line\n", "one line\nnext line",
+                    "first paragraph\n\nsecond paragraph\n", "mixed\r\n\r\nend\n"
+                })
+                {
+                    var exactWrapper = styledStyle.WrapSource(exactSource, inheritedSize,
+                        true, 200, 80);
+                    Assert(exactWrapper.IndexOf(exactSource + "%\r\n",
+                               StringComparison.Ordinal) >= 0,
+                        "The TeX wrapper changed an authored line ending or paragraph break.");
+                }
                 var topBoxWrapper = new LaTeXBlockStyle(1.2, 0,
                     LaTeXBlockVerticalAlignment.Top).WrapSource(styledSource, inheritedSize,
                         true, 200, 80);
@@ -333,8 +349,9 @@ namespace LaTeXBlocks.PowerPointSmoke
                     "A display-style Block changed size merely because typographic text-line metrics were enabled.");
                 var displayRoot = Regex.Match(Encoding.UTF8.GetString(styledDisplayRender.SvgBytes),
                     "<svg\\b[^>]*>", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant).Value;
-                Assert(displayRoot.IndexOf("fill='#000000'", StringComparison.OrdinalIgnoreCase) < 0,
-                    "A standalone display embedded its host foreground in the SVG.");
+                Assert(displayRoot.IndexOf("data-latexblocks-foreground",
+                           StringComparison.OrdinalIgnoreCase) < 0,
+                    "A standalone PowerPoint display retained the removed host-colour marker.");
                 var styledRender = service.RenderPreviewAsync(styledSource, 288, profile,
                     inheritedSize, styledStyle, 126).GetAwaiter().GetResult();
                 Assert(styledRender.SvgBytes.Length > 0,
@@ -346,9 +363,9 @@ namespace LaTeXBlocks.PowerPointSmoke
                     "A styled SVG block did not make its requested PowerPoint frame.");
                 var styledSvg = Encoding.UTF8.GetString(styledRender.SvgBytes);
                 Assert(styledSvg.IndexOf("#f1f5ff", StringComparison.OrdinalIgnoreCase) >= 0 &&
-                       styledSvg.IndexOf("#183766", StringComparison.OrdinalIgnoreCase) < 0 &&
+                       styledSvg.IndexOf("#183766", StringComparison.OrdinalIgnoreCase) >= 0 &&
                        styledSvg.IndexOf("#3362a2", StringComparison.OrdinalIgnoreCase) >= 0,
-                    "The styled SVG did not keep foreground external while retaining fill and border colors.");
+                    "The styled SVG did not retain distinct foreground, background, and border colors.");
                 Assert(styledSvg.IndexOf("data-latexblocks-frame='1'",
                            StringComparison.Ordinal) >= 0 &&
                        styledSvg.IndexOf("data-latexblocks-border='1'",
@@ -427,24 +444,25 @@ namespace LaTeXBlocks.PowerPointSmoke
                 var styledBlock = service.InsertRendered(styledSource, 288, styledRender,
                     styledStyle);
                 Assert(PowerPointBlockService.TryReadContract(styledBlock, out _,
-                           out var storedStyledSource) && storedStyledSource == styledSource &&
+                       out var storedStyledSource) && storedStyledSource == styledSource &&
                        PowerPointBlockService.ReadStyle(styledBlock).Equals(styledStyle) &&
-                       string.Equals(styledBlock.Tags[LaTeXBlockStyle.TagName],
-                           styledStyle.ToString(), StringComparison.Ordinal) &&
-                       styledBlock.Fill.ForeColor.RGB ==
-                           (styledStyle.TextColor.R | styledStyle.TextColor.G << 8 |
-                            styledStyle.TextColor.B << 16),
-                    "A TeX-styled PowerPoint block did not retain its source/style or apply Graphics Fill.");
+                       styledBlock.Title == string.Empty &&
+                       styledBlock.AlternativeText.IndexOf(
+                           "% text-color: #183766", StringComparison.Ordinal) >= 0 &&
+                       styledBlock.AlternativeText.IndexOf(
+                           "% background-color: #F1F5FF", StringComparison.Ordinal) >= 0 &&
+                       PowerPointBlockService.FromOfficeAlternativeText(
+                           styledBlock.AlternativeText) == styledSource,
+                    "A TeX-styled PowerPoint block did not retain its source/style independently of Office fill.");
                 var styledUpdatedRender = service.RenderPreviewAsync(styledSource, 288,
                     profile, inheritedSize, styledStyle, 150, 330).GetAwaiter().GetResult();
                 styledBlock = service.UpdateRendered(styledBlock, styledSource, 288,
                     styledUpdatedRender, false, 150, 330, styledStyle);
-                Assert(PowerPointBlockService.ReadStyle(styledBlock).Equals(styledStyle) &&
-                       styledBlock.AlternativeText == styledSource &&
-                       styledBlock.Fill.ForeColor.RGB ==
-                           (styledStyle.TextColor.R | styledStyle.TextColor.G << 8 |
-                            styledStyle.TextColor.B << 16),
-                    "An SVG-styled PowerPoint block lost its style, source, or Graphics Fill during a re-render.");
+                Assert(PowerPointBlockService.ReadStyle(styledBlock).Equals(styledStyle),
+                    "An SVG-styled PowerPoint block lost its style during a re-render.");
+                Assert(PowerPointBlockService.FromOfficeAlternativeText(
+                           styledBlock.AlternativeText) == styledSource,
+                    "An SVG-styled PowerPoint block lost its source during a re-render.");
                 AssertHostFrameGeometry(styledBlock, 330, 150,
                     "A styled PowerPoint host-frame update");
                 var styledBlockId = Guid.Empty;
@@ -472,7 +490,6 @@ namespace LaTeXBlocks.PowerPointSmoke
                 // and otherwise consume AfterShapeSizeChange first. Temporarily hide only
                 // this test shape from that production handler while capturing a gesture;
                 // each captured gesture is then committed through UpdateRendered below.
-                block.Tags.Delete(PowerPointBlockService.KindTag);
                 PowerPointFrameUpdate horizontalFrame = null;
                 try
                 {
@@ -495,8 +512,6 @@ namespace LaTeXBlocks.PowerPointSmoke
                 }
                 finally
                 {
-                    block.Tags.Add(PowerPointBlockService.KindTag,
-                        PowerPointBlockService.KindValue);
                 }
 
                 var horizontalRender = service.RenderPreviewAsync(source,
@@ -517,7 +532,6 @@ namespace LaTeXBlocks.PowerPointSmoke
                 // exact frame. The SVG is not scaled; its viewport clips overflow.
                 var requestedShortWidth = Math.Max(1, horizontalNaturalWidth / 2.0);
                 PowerPointFrameUpdate shortWidthFrame = null;
-                block.Tags.Delete(PowerPointBlockService.KindTag);
                 try
                 {
                     var originalBlockWidth = block.Width;
@@ -536,8 +550,6 @@ namespace LaTeXBlocks.PowerPointSmoke
                 }
                 finally
                 {
-                    block.Tags.Add(PowerPointBlockService.KindTag,
-                        PowerPointBlockService.KindValue);
                 }
                 var shortWidthRender = service.RenderPreviewAsync(source, metadata.WidthPt,
                     profile, metadata.FontSizePt).GetAwaiter().GetResult();
@@ -545,6 +557,8 @@ namespace LaTeXBlocks.PowerPointSmoke
                     shortWidthRender.SvgBytes);
                 block = service.UpdateRendered(block, source, metadata.WidthPt, shortWidthRender,
                     false, shortWidthFrame.FrameHeightPt, shortWidthFrame.FrameWidthPt);
+                Assert(PowerPointBlockService.TryReadContract(block, out metadata, out _),
+                    "The narrow frame update lost its block contract.");
                 AssertHostFrameGeometry(block, shortWidthFrame.FrameWidthPt,
                     shortWidthFrame.FrameHeightPt,
                     "A too-narrow host-frame update");
@@ -563,7 +577,6 @@ namespace LaTeXBlocks.PowerPointSmoke
                 var verticalNaturalHeight = PowerPointBlockService.ReadSvgHeightPt(verticalRender.SvgBytes);
                 var requestedVerticalHeight = Math.Max(verticalNaturalHeight + 42, block.Height + 42);
                 PowerPointFrameUpdate verticalFrame = null;
-                block.Tags.Delete(PowerPointBlockService.KindTag);
                 try
                 {
                     var originalBlockWidth = block.Width;
@@ -579,11 +592,11 @@ namespace LaTeXBlocks.PowerPointSmoke
                 }
                 finally
                 {
-                    block.Tags.Add(PowerPointBlockService.KindTag,
-                        PowerPointBlockService.KindValue);
                 }
                 block = service.UpdateRendered(block, source, metadata.WidthPt, verticalRender,
                     false, verticalFrame.FrameHeightPt, verticalFrame.FrameWidthPt);
+                Assert(PowerPointBlockService.TryReadContract(block, out metadata, out _),
+                    "The vertical frame update lost its block contract.");
                 AssertHostFrameGeometry(block, verticalFrame.FrameWidthPt,
                     verticalFrame.FrameHeightPt,
                     "A vertical host-frame update");
@@ -592,7 +605,6 @@ namespace LaTeXBlocks.PowerPointSmoke
 
                 var shortFrameHeight = Math.Max(1, verticalNaturalHeight / 2.0);
                 PowerPointFrameUpdate shortFrame = null;
-                block.Tags.Delete(PowerPointBlockService.KindTag);
                 try
                 {
                     block.Height = (float)shortFrameHeight;
@@ -605,8 +617,6 @@ namespace LaTeXBlocks.PowerPointSmoke
                 }
                 finally
                 {
-                    block.Tags.Add(PowerPointBlockService.KindTag,
-                        PowerPointBlockService.KindValue);
                 }
                 var shortRender = service.RenderPreviewAsync(source, metadata.WidthPt, profile,
                     metadata.FontSizePt).GetAwaiter().GetResult();
@@ -629,7 +639,6 @@ namespace LaTeXBlocks.PowerPointSmoke
                 PowerPointFrameUpdate cornerFrame = null;
                 var requestedCornerWidth = block.Width * 1.15f;
                 var requestedCornerHeight = block.Height + 48;
-                block.Tags.Delete(PowerPointBlockService.KindTag);
                 try
                 {
                     block.Width = requestedCornerWidth;
@@ -644,8 +653,6 @@ namespace LaTeXBlocks.PowerPointSmoke
                 }
                 finally
                 {
-                    block.Tags.Add(PowerPointBlockService.KindTag,
-                        PowerPointBlockService.KindValue);
                 }
                 var cornerRender = service.RenderPreviewAsync(source, metadata.WidthPt,
                     profile, metadata.FontSizePt).GetAwaiter().GetResult();
@@ -661,8 +668,8 @@ namespace LaTeXBlocks.PowerPointSmoke
 
                 var ordinarySvg = slide.Shapes.AddShape(Office.MsoAutoShapeType.msoShapeRectangle,
                     18, 18, 18, 18);
-                ordinarySvg.AlternativeText = source;
-                ordinarySvg.Title = metadata.ToString();
+                ordinarySvg.AlternativeText = metadata.Serialize(source);
+                ordinarySvg.Title = string.Empty;
                 Assert(!PowerPointBlockService.TryReadContract(ordinarySvg, out _, out _),
                     "An ordinary shape without the explicit LaTeX Block tag was misidentified.");
 
@@ -758,10 +765,8 @@ namespace LaTeXBlocks.PowerPointSmoke
                        PowerPointBlockService.TryReadContract(reopenedStyled,
                            out var reopenedStyledMetadata, out var reopenedStyledSource) &&
                        reopenedStyledMetadata.Id == styledBlockId &&
-                       reopenedStyledSource == styledSource &&
-                       PowerPointBlockService.ReadStyle(reopenedStyled).Equals(styledStyle) &&
-                       string.Equals(reopenedStyled.Tags[LaTeXBlockStyle.TagName],
-                           styledStyle.ToString(), StringComparison.Ordinal),
+                       reopenedStyledSource == NormalizeOfficeLineEndings(styledSource) &&
+                       PowerPointBlockService.ReadStyle(reopenedStyled).Equals(styledStyle),
                     "A TeX-styled PowerPoint block did not preserve raw source and style after PPTX save/reopen.");
                 Release(reopened);
                 Release(reopenedStyled);
@@ -793,6 +798,11 @@ namespace LaTeXBlocks.PowerPointSmoke
         private static void Assert(bool condition, string message)
         {
             if (!condition) throw new InvalidOperationException(message);
+        }
+
+        private static string NormalizeOfficeLineEndings(string value)
+        {
+            return value?.Replace("\r\n", "\n").Replace('\r', '\n');
         }
 
         private static void AssertHostFrameGeometry(PowerPointInterop.Shape shape,

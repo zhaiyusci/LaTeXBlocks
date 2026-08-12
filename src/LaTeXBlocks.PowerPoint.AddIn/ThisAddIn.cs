@@ -134,7 +134,8 @@ namespace LaTeXBlocks.PowerPoint
             EnsureBackendAvailable();
             if (!Blocks.TryGetSelectedBlock(out var shape, out var metadata))
                 throw new InvalidOperationException("Select a LaTeX Block first.");
-            var source = shape.AlternativeText;
+            var source = PowerPointBlockService.FromOfficeAlternativeText(
+                shape.AlternativeText);
             var style = PowerPointBlockService.ReadStyle(shape);
             var frameHeightPt = PowerPointBlockService.ReadFrameHeightPt(shape);
             var frameWidthPt = PowerPointBlockService.ReadFrameWidthPt(shape);
@@ -208,7 +209,8 @@ namespace LaTeXBlocks.PowerPoint
             long? nativeFrameGestureSequence = null)
         {
             var key = PowerPointBlockService.GetShapeKey(shape);
-            var source = PowerPointBlockService.NormalizeSourceText(shape.AlternativeText);
+            var source = PowerPointBlockService.FromOfficeAlternativeText(
+                shape.AlternativeText);
             var style = PowerPointBlockService.ReadStyle(shape);
             var styleIsApplied = PowerPointBlockService.IsStyleApplied(shape);
             var profile = currentProfile ?? Renderers.DefaultAvailableProfile;

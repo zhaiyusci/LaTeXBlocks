@@ -15,7 +15,7 @@ Git submodule of this repository; see [StemTeX integration](docs/STEMTEX_INTEGRA
 | Fixed-width LaTeX block | Yes | Yes — positioned slide shape |
 | Numbered display equation | Yes — Word-native `SEQ` field and tab stops | No |
 | Edit source on the visual object | Yes | Yes |
-| Source storage | SVG `AlternativeText` | Shape `AlternativeText` |
+| Source storage | Magic header plus TeX source in SVG `AlternativeText`; empty `Title` | Magic header plus TeX source in Shape `AlternativeText`; empty `Title` |
 | Host font-size integration | Selection-aware inline refresh | Snapshot text size at insertion; explicit block-size control thereafter |
 | Text-color integration | Native Word Font Color for inline and numbered formulas; persistent per-Block text color for fixed Blocks | Persistent per-block text-color control |
 | Block styling | Fixed Blocks: line spacing, padding, Top/Middle/Bottom vertical placement, text/fill/border color, and border width | Line spacing, padding, Top/Middle/Bottom vertical placement, text/fill/border color, and border width |

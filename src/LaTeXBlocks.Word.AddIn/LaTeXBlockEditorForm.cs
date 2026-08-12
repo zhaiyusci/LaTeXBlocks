@@ -218,7 +218,7 @@ namespace LaTeXBlocks.Word
             borderColorButton = CreateColorButton(borderColor);
             backgroundFillCheck = new CheckBox
             {
-                Text = "Fill",
+                Text = "Background",
                 AutoSize = true,
                 Checked = style.HasBackgroundFill,
                 Margin = new Padding(10, 4, 2, 0)

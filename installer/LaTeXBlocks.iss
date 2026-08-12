@@ -1,14 +1,14 @@
 #ifndef MyAppVersion
-#define MyAppVersion "0.2.107"
+#define MyAppVersion "0.2.121"
 #endif
 #ifndef SourceDir
-  #error SourceDir must point to the ClickOnce publish directory
+  #error SourceDir must point to the Word local VSTO directory
 #endif
 #ifndef StemTeXSourceDir
   #error StemTeXSourceDir must point to a staged StemTeX distribution
 #endif
 #ifndef PowerPointSourceDir
-  #error PowerPointSourceDir must point to the PowerPoint ClickOnce publish directory
+  #error PowerPointSourceDir must point to the PowerPoint local VSTO directory
 #endif
 #ifndef CertPath
   #error CertPath must point to the public publisher certificate
@@ -85,25 +85,33 @@ Root: HKCU; Subkey: "Software\Microsoft\Office\PowerPoint\Addins\LaTeXBlocks.Pow
 Filename: "{sys}\certutil.exe"; Parameters: "-user -f -addstore Root ""{tmp}\LaTeXBlocks-publisher.cer"""; StatusMsg: "Trusting the LaTeX Blocks development publisher..."; Flags: runhidden waituntilterminated
 Filename: "{sys}\certutil.exe"; Parameters: "-user -f -addstore TrustedPublisher ""{tmp}\LaTeXBlocks-publisher.cer"""; StatusMsg: "Registering the LaTeX Blocks publisher..."; Flags: runhidden waituntilterminated
 Filename: "{tmp}\vc_redist.x64.exe"; Parameters: "/install /quiet /norestart"; Verb: "runas"; StatusMsg: "Installing the Microsoft Visual C++ x64 runtime..."; Check: NeedsVCRuntime; Flags: shellexec waituntilterminated
-Filename: "{app}\setup.exe"; Parameters: "/q /norestart"; WorkingDir: "{app}"; StatusMsg: "Installing required Microsoft components..."; Check: NeedsBootstrapper; Flags: waituntilterminated
-Filename: "{code:GetVstoInstallerPath}"; Parameters: "/Uninstall ""{code:GetManifestUri}"" /Silent"; StatusMsg: "Removing an earlier LaTeX Blocks registration..."; Flags: runhidden waituntilterminated
-Filename: "{code:GetVstoInstallerPath}"; Parameters: "/Install ""{code:GetManifestUri}"" /Silent"; StatusMsg: "Registering LaTeX Blocks with Microsoft Word..."; Flags: runhidden waituntilterminated; AfterInstall: RegisterInstalledWordManifest
-Filename: "{code:GetVstoInstallerPath}"; Parameters: "/Uninstall ""{code:GetPowerPointManifestUri}"" /Silent"; StatusMsg: "Removing an earlier PowerPoint registration..."; Flags: runhidden waituntilterminated
-Filename: "{code:GetVstoInstallerPath}"; Parameters: "/Install ""{code:GetPowerPointManifestUri}"" /Silent"; StatusMsg: "Registering LaTeX Blocks with Microsoft PowerPoint..."; Flags: runhidden waituntilterminated; AfterInstall: RegisterInstalledPowerPointManifest
-
-[UninstallRun]
-Filename: "{code:GetVstoInstallerPath}"; Parameters: "/Uninstall ""{code:GetManifestUri}"" /Silent"; RunOnceId: "UninstallVstoSolution"; Flags: runhidden waituntilterminated skipifdoesntexist
-Filename: "{code:GetVstoInstallerPath}"; Parameters: "/Uninstall ""{code:GetPowerPointManifestUri}"" /Silent"; RunOnceId: "UninstallPowerPointVstoSolution"; Flags: runhidden waituntilterminated skipifdoesntexist
+Filename: "{code:GetVstoInstallerPath}"; Parameters: "/Uninstall ""{code:GetManifestUri}"" /Silent"; StatusMsg: "Removing an earlier Word ClickOnce registration..."; Flags: runhidden waituntilterminated
+Filename: "{code:GetVstoInstallerPath}"; Parameters: "/Uninstall ""{code:GetPowerPointManifestUri}"" /Silent"; StatusMsg: "Removing an earlier PowerPoint ClickOnce registration..."; Flags: runhidden waituntilterminated
 
 [Code]
+function GetVstoInstallerPath(Param: String): String; forward;
+
 function InitializeSetup: Boolean;
 var
+  DotNetRelease: Cardinal;
   OfficePlatform: String;
 begin
   Result := True;
   if RegQueryStringValue(HKLM64, 'SOFTWARE\Microsoft\Office\ClickToRun\Configuration',
        'Platform', OfficePlatform) and (CompareText(OfficePlatform, 'x86') = 0) then begin
     MsgBox('LaTeX Blocks requires 64-bit Microsoft Office because StemTeX is an x64 native runtime.',
+      mbError, MB_OK);
+    Result := False;
+    exit;
+  end;
+  if not RegQueryDWordValue(HKLM64, 'SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full',
+       'Release', DotNetRelease) or (DotNetRelease < 528040) then begin
+    MsgBox('LaTeX Blocks requires Microsoft .NET Framework 4.8.', mbError, MB_OK);
+    Result := False;
+    exit;
+  end;
+  if not FileExists(GetVstoInstallerPath('')) then begin
+    MsgBox('LaTeX Blocks requires Microsoft Visual Studio 2010 Tools for Office Runtime.',
       mbError, MB_OK);
     Result := False;
   end;
@@ -138,7 +146,7 @@ begin
     installer owns the final registration and must always point Word at its
     self-contained installed files. }
   AddInKey := 'Software\Microsoft\Office\Word\Addins\LaTeXBlocks.Word.AddIn';
-  if not RegWriteStringValue(HKCU, AddInKey, 'Manifest', GetManifestUri('')) then
+  if not RegWriteStringValue(HKCU, AddInKey, 'Manifest', GetManifestUri('') + '|vstolocal') then
     RaiseException('Could not register the installed LaTeX Blocks manifest.');
   if not RegWriteDWordValue(HKCU, AddInKey, 'LoadBehavior', 3) then
     RaiseException('Could not enable the installed LaTeX Blocks add-in.');
@@ -149,10 +157,21 @@ var
   AddInKey: String;
 begin
   AddInKey := 'Software\Microsoft\Office\PowerPoint\Addins\LaTeXBlocks.PowerPoint.AddIn';
-  if not RegWriteStringValue(HKCU, AddInKey, 'Manifest', GetPowerPointManifestUri('')) then
+  if not RegWriteStringValue(HKCU, AddInKey, 'Manifest', GetPowerPointManifestUri('') + '|vstolocal') then
     RaiseException('Could not register the installed PowerPoint LaTeX Blocks manifest.');
   if not RegWriteDWordValue(HKCU, AddInKey, 'LoadBehavior', 3) then
     RaiseException('Could not enable the installed PowerPoint LaTeX Blocks add-in.');
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssPostInstall then begin
+    { Register both add-ins directly from the files owned by this installer.
+      Installing the two VSTO deployments through VSTOInstaller would make
+      Word and PowerPoint appear as separate products in Programs and Features. }
+    RegisterInstalledWordManifest;
+    RegisterInstalledPowerPointManifest;
+  end;
 end;
 
 function GetVstoInstallerPath(Param: String): String;
@@ -167,21 +186,6 @@ begin
     end;
   end;
   Result := ExpandConstant('{commoncf32}\Microsoft Shared\VSTO\10.0\VSTOInstaller.exe');
-end;
-
-function NeedsBootstrapper: Boolean;
-var
-  DotNetRelease: Cardinal;
-  HasDotNet48: Boolean;
-  HasVstoRuntime: Boolean;
-begin
-  if IsWin64 then
-    HasDotNet48 := RegQueryDWordValue(HKLM64, 'SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full', 'Release', DotNetRelease)
-  else
-    HasDotNet48 := RegQueryDWordValue(HKLM32, 'SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full', 'Release', DotNetRelease);
-  HasDotNet48 := HasDotNet48 and (DotNetRelease >= 528040);
-  HasVstoRuntime := FileExists(GetVstoInstallerPath(''));
-  Result := (not HasDotNet48) or (not HasVstoRuntime);
 end;
 
 function NeedsVCRuntime: Boolean;

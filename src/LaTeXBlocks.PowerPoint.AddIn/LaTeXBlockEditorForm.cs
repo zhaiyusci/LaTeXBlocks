@@ -185,7 +185,7 @@ namespace LaTeXBlocks.PowerPoint
             borderColorButton = CreateColorButton(borderColor);
             backgroundFillCheck = new CheckBox
             {
-                Text = "Fill",
+                Text = "Background",
                 AutoSize = true,
                 Checked = style.HasBackgroundFill,
                 Margin = new Padding(12, 4, 2, 0)

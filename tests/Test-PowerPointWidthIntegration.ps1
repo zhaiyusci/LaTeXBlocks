@@ -76,25 +76,15 @@ function Get-ShapeTag([object]$Shape, [string]$Name) {
     return ''
 }
 
-function ConvertFrom-LaTeXBlockTitle([string]$Title) {
-    $values = @{}
-    foreach ($part in $Title -split ';') {
-        $separator = $part.IndexOf('=')
-        if ($separator -gt 0) {
-            $values[$part.Substring(0, $separator)] = $part.Substring($separator + 1)
-        }
+function Get-LaTeXBlockContract([object]$Shape) {
+    $json = [string]$Shape.Title
+    if ([string]::IsNullOrWhiteSpace($json)) { throw 'LaTeX Block JSON contract is missing.' }
+    $contract = $json | ConvertFrom-Json
+    if ($contract.version -ne 1 -or $contract.type -ne 'latex-block' -or
+        [string]::IsNullOrWhiteSpace([string]$contract.id)) {
+        throw "Invalid LaTeX Block JSON contract: $json"
     }
-    if (-not $values.ContainsKey('id') -or -not $values.ContainsKey('width') -or
-        -not $values.ContainsKey('size')) {
-        throw "Invalid LaTeX block metadata: $Title"
-    }
-    return [pscustomobject]@{
-        id = [string]$values.id
-        widthPt = [double]::Parse([string]$values.width,
-            [Globalization.CultureInfo]::InvariantCulture)
-        fontSizePt = [double]::Parse([string]$values.size,
-            [Globalization.CultureInfo]::InvariantCulture)
-    }
+    return $contract
 }
 
 function ConvertTo-InvariantDouble([string]$Text, [string]$Description) {
@@ -124,10 +114,9 @@ function Assert-HostFrameContract([object]$Shape, [object]$ExpectedMetadata,
         throw "$Label retained obsolete LATEXBLOCKS_VISUAL_SCALE=$visualScale."
     }
 
-    $svgWidthText = Get-ShapeTag $Shape 'LATEXBLOCKS_SVG_WIDTH_PT'
-    $svgHeightText = Get-ShapeTag $Shape 'LATEXBLOCKS_SVG_HEIGHT_PT'
-    $svgWidth = ConvertTo-InvariantDouble $svgWidthText "$Label SVG width tag"
-    $svgHeight = ConvertTo-InvariantDouble $svgHeightText "$Label SVG height tag"
+    $metadata = Get-LaTeXBlockContract $Shape
+    $svgWidth = [double]$metadata.svgWidthPt
+    $svgHeight = [double]$metadata.svgHeightPt
     $actualWidth = [double]$Shape.Width
     $actualHeight = [double]$Shape.Height
 
@@ -138,7 +127,6 @@ function Assert-HostFrameContract([object]$Shape, [object]$ExpectedMetadata,
     Assert-Near $actualWidth $ExpectedFrameWidth 0.15 "$Label frame width"
     Assert-Near $actualHeight $ExpectedFrameHeight 0.15 "$Label frame height"
 
-    $metadata = ConvertFrom-LaTeXBlockTitle $Shape.Title
     Assert-Near ([double]$metadata.widthPt) ([double]$ExpectedMetadata.widthPt) 0.15 "$Label typesetting width"
     Assert-Near ([double]$metadata.fontSizePt) ([double]$ExpectedMetadata.fontSizePt) 0.001 "$Label TeX font size"
     return $metadata
@@ -147,8 +135,9 @@ function Assert-HostFrameContract([object]$Shape, [object]$ExpectedMetadata,
 function Test-HostFrameGeometry([object]$Shape, [double]$ExpectedWidth,
     [double]$ExpectedHeight) {
     try {
-        $svgWidth = ConvertTo-InvariantDouble (Get-ShapeTag $Shape 'LATEXBLOCKS_SVG_WIDTH_PT') 'SVG width tag'
-        $svgHeight = ConvertTo-InvariantDouble (Get-ShapeTag $Shape 'LATEXBLOCKS_SVG_HEIGHT_PT') 'SVG height tag'
+        $contract = Get-LaTeXBlockContract $Shape
+        $svgWidth = [double]$contract.svgWidthPt
+        $svgHeight = [double]$contract.svgHeightPt
         return [Math]::Abs([double]$Shape.Width - $ExpectedWidth) -le 0.15 -and
                [Math]::Abs([double]$Shape.Height - $ExpectedHeight) -le 0.15 -and
                [Math]::Abs([double]$Shape.Width - $svgWidth) -le 0.12 -and
@@ -167,14 +156,14 @@ function Get-LaTeXBlockShape([object]$Presentation, [string]$StableId = '') {
                 $candidate = $slide.Shapes.Item($shapeIndex)
                 $keep = $false
                 try {
-                    if ((Get-ShapeTag $candidate 'LATEXBLOCKS_KIND') -ne 'LATEX_BLOCK') { continue }
+                    try { $metadata = Get-LaTeXBlockContract $candidate } catch { continue }
                     if ([string]::IsNullOrEmpty($StableId)) {
                         # PowerPoint can enumerate a just-replaced SVG picture
                         # before its title/metadata has propagated. A block is not
                         # usable for the initial integration assertion until its
                         # complete semantic contract is visible as well.
                         try {
-                            $null = ConvertFrom-LaTeXBlockTitle ([string]$candidate.Title)
+                            $null = Get-LaTeXBlockContract $candidate
                         }
                         catch {
                             continue
@@ -182,13 +171,12 @@ function Get-LaTeXBlockShape([object]$Presentation, [string]$StableId = '') {
                         $keep = $true
                         return $candidate
                     }
-                    if ([string]::IsNullOrWhiteSpace([string]$candidate.Title)) { continue }
                     # Shape replacement is atomic from the user's point of view,
                     # but COM enumeration can briefly expose a just-created shape
                     # before its Title property has propagated. Skip that transient
                     # candidate and keep polling for the stable semantic ID.
                     try {
-                        $metadata = ConvertFrom-LaTeXBlockTitle $candidate.Title
+                        $metadata = Get-LaTeXBlockContract $candidate
                     }
                     catch {
                         continue
@@ -234,7 +222,7 @@ function Wait-ForHostFrame([object]$Presentation, [string]$StableId,
         if ($null -eq $candidate) { continue }
         $keep = $false
         try {
-            $metadata = ConvertFrom-LaTeXBlockTitle $candidate.Title
+            $metadata = Get-LaTeXBlockContract $candidate
             if ([Math]::Abs([double]$metadata.widthPt - $ExpectedLayoutWidthPt) -gt 0.15 -or
                 [Math]::Abs([double]$metadata.fontSizePt - $ExpectedFontSizePt) -gt 0.001 -or
                 -not (Test-HostFrameGeometry $candidate $ExpectedWidthPt $ExpectedHeightPt)) {
@@ -263,7 +251,7 @@ function Wait-ForReflowedFrame([object]$Presentation, [string]$StableId,
         if ($null -eq $candidate) { continue }
         $keep = $false
         try {
-            $metadata = ConvertFrom-LaTeXBlockTitle $candidate.Title
+            $metadata = Get-LaTeXBlockContract $candidate
             $layoutChangedInExpectedDirection = switch ($LayoutDirection) {
                 'Increase' { [double]$metadata.widthPt -gt $PreviousLayoutWidthPt + 0.15 }
                 'Decrease' { [double]$metadata.widthPt -lt $PreviousLayoutWidthPt - 0.15 }
@@ -396,7 +384,7 @@ try {
         throw 'The smoke presentation contains no recognized LaTeX block.'
     }
 
-    $before = ConvertFrom-LaTeXBlockTitle $selectedShape.Title
+    $before = Get-LaTeXBlockContract $selectedShape
     $stableId = [string]$before.id
     $layoutWidthBefore = [double]$before.widthPt
     $fontSizeBefore = [double]$before.fontSizePt
@@ -413,7 +401,7 @@ try {
     # width can be either direction relative to old metadata. Require a true layout
     # change and the exact requested host frame, not a guessed direction.
     $replacementShape = Wait-ForReflowedFrame $presentation $stableId $horizontalTargetWidth $layoutWidthBefore $fontSizeBefore 'Change' $TimeoutSeconds 'Horizontal resize'
-    $after = ConvertFrom-LaTeXBlockTitle $replacementShape.Title
+    $after = Get-LaTeXBlockContract $replacementShape
     $visibleWidthAfter = [double]$replacementShape.Width
     $visibleHeightAfter = [double]$replacementShape.Height
     $null = Assert-HostFrameContract $replacementShape $after $horizontalTargetWidth $visibleHeightAfter 'Horizontal frame'
@@ -427,7 +415,7 @@ try {
     $replacementShape = $null
 
     $shrinkShape = Wait-ForReflowedFrame $presentation $stableId $shrunkenTargetWidth $currentLayoutWidth $fontSizeBefore 'Decrease' $TimeoutSeconds 'Shrink expanded frame'
-    $shrinkMetadata = ConvertFrom-LaTeXBlockTitle $shrinkShape.Title
+    $shrinkMetadata = Get-LaTeXBlockContract $shrinkShape
     $null = Assert-HostFrameContract $shrinkShape $shrinkMetadata $shrunkenTargetWidth ([double]$shrinkShape.Height) 'Shrunk frame'
     $visibleWidthAfter = [double]$shrinkShape.Width
     $visibleHeightAfter = [double]$shrinkShape.Height
@@ -442,7 +430,7 @@ try {
     $shrinkShape = $null
 
     $reflowShape = Wait-ForReflowedFrame $presentation $stableId $reflowTargetWidth $currentLayoutWidth $fontSizeBefore 'Decrease' $TimeoutSeconds 'Narrow reflow'
-    $reflowMetadata = ConvertFrom-LaTeXBlockTitle $reflowShape.Title
+    $reflowMetadata = Get-LaTeXBlockContract $reflowShape
     $null = Assert-HostFrameContract $reflowShape $reflowMetadata $reflowTargetWidth ([double]$reflowShape.Height) 'Auto-reflow frame'
     $visibleWidthAfter = [double]$reflowShape.Width
     $visibleHeightAfter = [double]$reflowShape.Height
@@ -496,7 +484,7 @@ try {
     $clippedShape = $null
 
     $cornerShape = Wait-ForReflowedFrame $presentation $stableId $cornerTargetWidth $currentLayoutWidth $fontSizeBefore 'Increase' $TimeoutSeconds 'Corner resize'
-    $cornerExpected = ConvertFrom-LaTeXBlockTitle $cornerShape.Title
+    $cornerExpected = Get-LaTeXBlockContract $cornerShape
     $null = Assert-HostFrameContract $cornerShape $cornerExpected $cornerTargetWidth $cornerTargetHeight 'Corner frame'
     $currentLayoutWidth = [double]$cornerExpected.widthPt
 
@@ -512,7 +500,7 @@ try {
     # replacement shape while PowerPoint completes its notifications.
     Pump-PowerPointForMilliseconds 2200
     $nonReflowShape = Wait-ForHostFrame $presentation $stableId $cornerTargetWidth $cornerTargetHeight $currentLayoutWidth $fontSizeBefore 5 'Move/rotation stability'
-    $nonReflowMetadata = ConvertFrom-LaTeXBlockTitle $nonReflowShape.Title
+    $nonReflowMetadata = Get-LaTeXBlockContract $nonReflowShape
     if ([int]$nonReflowShape.Id -ne $cornerShapeId) {
         throw 'Moving or rotating a LaTeX block incorrectly replaced its SVG.'
     }
@@ -543,7 +531,7 @@ try {
     $rapidResizeShape = $null
 
     $lastGestureShape = Wait-ForReflowedFrame $presentation $stableId $lastGestureTargetWidth $currentLayoutWidth $fontSizeBefore 'Increase' $TimeoutSeconds 'Consecutive native resize'
-    $lastGestureExpected = ConvertFrom-LaTeXBlockTitle $lastGestureShape.Title
+    $lastGestureExpected = Get-LaTeXBlockContract $lastGestureShape
     $null = Assert-HostFrameContract $lastGestureShape $lastGestureExpected $lastGestureTargetWidth $cornerTargetHeight 'Consecutive native frame'
     Release-ComObject $lastGestureShape
     $lastGestureShape = $null

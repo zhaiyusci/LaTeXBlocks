@@ -281,7 +281,7 @@ namespace LaTeXBlocks.Word
         private const uint WindowMessageCommand = 0x0111;
         private const int DialogResultOk = 1;
         private const int DialogResultCancel = 2;
-        private const int PaletteCommitDelayMilliseconds = 100;
+        private const int PaletteCommitDelayMilliseconds = 1;
         private const uint PaletteEventPairWindowMilliseconds = 3000;
 
         private readonly Control dispatcher;
@@ -767,9 +767,10 @@ namespace LaTeXBlocks.Word
                 }
                 var ticket = new PaletteCommitTicket(interactionId, generation);
                 previousTimer = paletteCommitTimer;
-                // WH_MOUSE_LL runs before Word receives WM_LBUTTONUP. Defer the
-                // semantic commit so the Word UI thread first applies the native
-                // colour/MRU update; the dispatcher drain then reconciles formulas.
+                // WH_MOUSE_LL runs before Word receives WM_LBUTTONUP. Cross one
+                // scheduler turn, then post the semantic commit through the Word UI
+                // dispatcher. A longer fixed delay makes SVG formula paint visibly
+                // trail Word's native text colour.
                 paletteCommitTimer = new System.Threading.Timer(
                     PaletteCommitTimerElapsed, ticket,
                     PaletteCommitDelayMilliseconds, Timeout.Infinite);
