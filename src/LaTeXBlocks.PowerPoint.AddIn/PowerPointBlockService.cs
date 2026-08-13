@@ -12,8 +12,6 @@ namespace LaTeXBlocks.PowerPoint
 {
     internal sealed class PowerPointBlockService
     {
-        internal const string SvgWidthTag = "LATEXBLOCKS_SVG_WIDTH_PT";
-        internal const string SvgHeightTag = "LATEXBLOCKS_SVG_HEIGHT_PT";
         private readonly PowerPointInterop.Application application;
         private readonly IStemTeXBackend renderers;
         private readonly string cacheDirectory;
@@ -341,8 +339,6 @@ namespace LaTeXBlocks.PowerPoint
                     metadata.Kind != LaTeXBlockKind.LaTeXBlock ||
                     metadata.Role != LaTeXBlockRole.Content ||
                     metadata.Mode != LaTeXBlockLayoutMode.Fixed) return false;
-                metadata = metadata.WithObservedState(shape.Width, shape.Width,
-                    shape.Height);
                 if (string.IsNullOrWhiteSpace(source))
                 {
                     metadata = null;
@@ -816,23 +812,6 @@ namespace LaTeXBlocks.PowerPoint
         internal static string FromOfficeAlternativeText(string value)
         {
             return LaTeXBlockMetadata.ReadSource(value);
-        }
-
-        internal static double ReadPositiveTag(PowerPointInterop.Shape shape, string name,
-            double fallback)
-        {
-            try
-            {
-                var value = string.Equals(name, SvgWidthTag, StringComparison.Ordinal)
-                    ? shape.Width
-                    : string.Equals(name, SvgHeightTag, StringComparison.Ordinal)
-                        ? shape.Height
-                        : 0;
-                if (value > 0 && !double.IsNaN(value) && !double.IsInfinity(value))
-                    return value;
-            }
-            catch (COMException) { }
-            return fallback;
         }
 
         private static int TryGetZOrder(PowerPointInterop.Shape shape)

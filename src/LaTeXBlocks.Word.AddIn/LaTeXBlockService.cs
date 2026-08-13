@@ -1450,8 +1450,12 @@ namespace LaTeXBlocks.Word
                 if (!LaTeXBlockMetadata.TryParse(shape.AlternativeText,
                         out metadata, out source)) return false;
                 var observedDepthPt = Math.Max(0, -(double)shape.Range.Font.Position);
-                metadata = metadata.WithObservedState(shape.Width, shape.Width,
-                    shape.Height, observedDepthPt);
+                metadata = metadata.WithObservedState(shape.Width,
+                    metadata.Kind == LaTeXBlockKind.LaTeXBlock
+                        ? metadata.FrameWidthPt : shape.Width,
+                    metadata.Kind == LaTeXBlockKind.LaTeXBlock
+                        ? metadata.FrameHeightPt : shape.Height,
+                    observedDepthPt);
                 if (string.IsNullOrWhiteSpace(source)) { metadata = null; source = null; return false; }
                 return true;
             }
@@ -1488,8 +1492,11 @@ namespace LaTeXBlocks.Word
                 if (!IsSupportedFloatingShapeType(shape.Type)) return false;
                 if (!LaTeXBlockMetadata.TryParse(shape.AlternativeText,
                         out metadata, out source)) return false;
-                metadata = metadata.WithObservedState(shape.Width, shape.Width,
-                    shape.Height);
+                metadata = metadata.WithObservedState(shape.Width,
+                    metadata.Kind == LaTeXBlockKind.LaTeXBlock
+                        ? metadata.FrameWidthPt : shape.Width,
+                    metadata.Kind == LaTeXBlockKind.LaTeXBlock
+                        ? metadata.FrameHeightPt : shape.Height);
                 if (string.IsNullOrWhiteSpace(source)) { metadata = null; source = null; return false; }
                 return true;
             }

@@ -195,6 +195,19 @@ namespace LaTeXBlocks.PowerPointSmoke
                     PowerPointBlockService.ReadSvgWidthPt(render.SvgBytes),
                     PowerPointBlockService.ReadSvgHeightPt(render.SvgBytes),
                     "The inserted PowerPoint block");
+                var committedFrameWidth = metadata.FrameWidthPt;
+                var eventResizeWidth = committedFrameWidth + 24;
+                block.Width = (float)eventResizeWidth;
+                Assert(PowerPointBlockService.TryReadContract(block,
+                           out var eventMetadata, out _) &&
+                       Math.Abs(eventMetadata.FrameWidthPt - committedFrameWidth) < 0.01,
+                    "Reading a resized PowerPoint block replaced its committed frame baseline with the live shape size.");
+                var eventFrame = PowerPointBlockService.CaptureFrameResize(block,
+                    eventMetadata);
+                Assert(eventFrame.HasChange && eventFrame.WidthChanged &&
+                       Math.Abs(eventFrame.FrameWidthPt - eventResizeWidth) < 0.05,
+                    "The real AfterShapeSizeChange read sequence did not detect a PowerPoint block resize.");
+                PowerPointBlockService.RestoreStoredGeometry(block, eventMetadata);
                 // An editor-accepted default is not equivalent to a legacy default
                 // tag: it literally requests the visible 1.20× leading and an SVG
                 // frame, matching Word's explicit Fixed Block style semantics.
@@ -809,14 +822,12 @@ namespace LaTeXBlocks.PowerPointSmoke
             double expectedWidthPt, double expectedHeightPt, string context)
         {
             const double tolerancePt = 0.06;
-            var taggedWidth = PowerPointBlockService.ReadPositiveTag(shape,
-                PowerPointBlockService.SvgWidthTag, 0);
-            var taggedHeight = PowerPointBlockService.ReadPositiveTag(shape,
-                PowerPointBlockService.SvgHeightTag, 0);
-            Assert(taggedWidth > 0 && taggedHeight > 0 &&
-                   Math.Abs(shape.Width - taggedWidth) < tolerancePt &&
-                   Math.Abs(shape.Height - taggedHeight) < tolerancePt,
-                context + " did not keep its SVG width/height tags equal to its shape geometry.");
+            Assert(PowerPointBlockService.TryReadContract(shape,
+                       out var metadata, out _) &&
+                   metadata.FrameWidthPt > 0 && metadata.FrameHeightPt > 0 &&
+                   Math.Abs(shape.Width - metadata.FrameWidthPt) < tolerancePt &&
+                   Math.Abs(shape.Height - metadata.FrameHeightPt) < tolerancePt,
+                context + " did not keep its committed Magic Header frame equal to its shape geometry.");
             Assert(Math.Abs(shape.Width - expectedWidthPt) < tolerancePt &&
                    Math.Abs(shape.Height - expectedHeightPt) < tolerancePt,
                 context + " did not retain the expected renderer-root host-frame dimensions.");

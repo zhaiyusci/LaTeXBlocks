@@ -335,11 +335,12 @@ namespace LaTeXBlocks.WordSmoke
                            out var reparsedFrameMetadata, out var reparsedBoundarySource) &&
                        reparsedBoundarySource == boundarySource &&
                        reparsedFrameMetadata.DepthPt == 0 &&
-                       reparsedFrameMetadata.FrameWidthPt == 0 &&
-                       reparsedFrameMetadata.FrameHeightPt == 0 &&
+                       Math.Abs(reparsedFrameMetadata.FrameWidthPt - 182.75) < 0.001 &&
+                       Math.Abs(reparsedFrameMetadata.FrameHeightPt - 48.25) < 0.001 &&
                        framedEnvelope.IndexOf("depth-pt", StringComparison.Ordinal) < 0 &&
-                       framedEnvelope.IndexOf("frame-width", StringComparison.Ordinal) < 0,
-                    "Magic Header did not preserve source boundaries or exclude runtime geometry.");
+                       framedEnvelope.IndexOf("% frame-width-pt: 182.75",
+                           StringComparison.Ordinal) >= 0,
+                    "Magic Header did not preserve source boundaries and committed frame geometry.");
                 var styledBlockStyle = new LaTeXBlockStyle(1.45, 8.5,
                     LaTeXBlockVerticalAlignment.Middle,
                     System.Drawing.Color.FromArgb(0x12, 0x34, 0x56), true,

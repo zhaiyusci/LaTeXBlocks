@@ -109,8 +109,15 @@ namespace LaTeXBlocks.Word
             if (Mode == LaTeXBlockLayoutMode.Fixed)
                 Append(builder, "width-pt", FormatNumber(WidthPt));
             Append(builder, "font-size-pt", FormatNumber(FontSizePt));
-            if (kind == LaTeXBlockKind.LaTeXBlock && HasExplicitStyle)
-                AppendStyle(builder, Style);
+            if (kind == LaTeXBlockKind.LaTeXBlock)
+            {
+                if (!(FrameWidthPt > 0) || !(FrameHeightPt > 0))
+                    throw new InvalidOperationException(
+                        "A persisted LaTeX Block needs a positive committed frame size.");
+                Append(builder, "frame-width-pt", FormatNumber(FrameWidthPt));
+                Append(builder, "frame-height-pt", FormatNumber(FrameHeightPt));
+                if (HasExplicitStyle) AppendStyle(builder, Style);
+            }
             builder.AppendLine(EndLine);
             builder.Append(source ?? string.Empty);
             return builder.ToString();
@@ -164,9 +171,23 @@ namespace LaTeXBlocks.Word
                 return false;
             var role = kind == LaTeXBlockKind.NumberedMath
                 ? LaTeXBlockRole.NumberedEquation : LaTeXBlockRole.Content;
+            var frameWidthPt = 0.0;
+            var frameHeightPt = 0.0;
+            if (kind == LaTeXBlockKind.LaTeXBlock)
+            {
+                if (!TryRequired(fields, "frame-width-pt", out var frameWidthText) ||
+                    !TryRequired(fields, "frame-height-pt", out var frameHeightText) ||
+                    !TryNumber(frameWidthText, double.Epsilon, double.MaxValue,
+                        out frameWidthPt) ||
+                    !TryNumber(frameHeightText, double.Epsilon, double.MaxValue,
+                        out frameHeightPt)) return false;
+            }
+            else if (fields.ContainsKey("frame-width-pt") ||
+                     fields.ContainsKey("frame-height-pt")) return false;
             if (!TryReadStyle(fields, kind, out var style, out var hasStyle)) return false;
             metadata = new LaTeXBlockMetadata(id, widthPt, 0, mode, fontSizePt, role,
-                0, 0, hasStyle ? style.ToMetadataValue() : null, kind);
+                frameWidthPt, frameHeightPt, hasStyle ? style.ToMetadataValue() : null,
+                kind);
             return true;
         }
 

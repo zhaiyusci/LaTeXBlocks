@@ -50,15 +50,27 @@ border-width-pt: non-negative invariant-culture decimal
 border-color: #RRGGBB
 ```
 
+Every `kind: latex-block` header also contains these required fields:
+
+```text
+frame-width-pt: positive invariant-culture decimal
+frame-height-pt: positive invariant-culture decimal
+```
+
+They record the dimensions of the last committed SVG frame. Office resize
+events are delivered after the live shape has changed, so this committed frame
+is the comparison baseline that distinguishes a user resize from an unchanged
+object. A successful refresh replaces both values with the new SVG frame.
+
 An absent `background-color` means no background. An absent or zero
 `border-width-pt` means no border. If no style field appears, the current
 default style is used. When any style field appears, omitted style fields take
 their normal defaults.
 
-The contract does not persist runtime or host-observable state: `role`, TeX
-depth, SVG frame width, and SVG frame height are excluded. Numbered role follows
-from `kind`; frame dimensions come from the Office shape; TeX depth comes from a
-render result.
+The contract does not persist derived runtime state: `role` and TeX depth are
+excluded. Numbered role follows from `kind`; TeX depth comes from a render
+result. The committed frame dimensions above are durable authoring state, not
+the transient dimensions observed from an Office shape during a resize.
 
 ## Examples
 
@@ -79,6 +91,8 @@ E=mc^2
 % mode: fixed
 % width-pt: 360
 % font-size-pt: 18
+% frame-width-pt: 360
+% frame-height-pt: 72
 % line-spacing: 1.2
 % padding-pt: 0
 % vertical-alignment: top
@@ -102,4 +116,3 @@ This is a second paragraph.
 - An object is a LaTeX Blocks object only when the complete v1 header and all
   required fields parse successfully.
 - No legacy Title/JSON or tag format is read.
-

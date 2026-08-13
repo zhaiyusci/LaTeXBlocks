@@ -219,14 +219,12 @@ namespace LaTeXBlocks.PowerPoint
             var currentFrameWidthPt = PowerPointBlockService.ReadFrameWidthPt(shape);
             var currentFrameHeightPt = PowerPointBlockService.ReadFrameHeightPt(shape);
             // During a native resize, PowerPoint has already changed Shape.Width /
-            // Height but the embedded SVG still advertises its previous root box.
-            // Compare against that root box when deciding whether a frame update is
-            // meaningful; comparing against the temporary host scale would wrongly
-            // discard every native request as a no-op.
-            var storedFrameWidthPt = PowerPointBlockService.ReadPositiveTag(shape,
-                PowerPointBlockService.SvgWidthTag, currentFrameWidthPt);
-            var storedFrameHeightPt = PowerPointBlockService.ReadPositiveTag(shape,
-                PowerPointBlockService.SvgHeightTag, currentFrameHeightPt);
+            // Height. The magic header still records the last committed SVG frame,
+            // which is the only valid baseline for the post-resize event. Do not
+            // read the live shape here: doing so makes old and new dimensions equal
+            // and silently discards every native resize as a no-op.
+            var committedFrameWidthPt = metadata.FrameWidthPt;
+            var committedFrameHeightPt = metadata.FrameHeightPt;
             var targetFrameWidthPt = currentFrameWidthPt;
             var targetFrameHeightPt = currentFrameHeightPt;
             // A native resize supplies one frame-fitting request. These flags say
@@ -282,12 +280,12 @@ namespace LaTeXBlocks.PowerPoint
             // rerenders the same width; that is still a fresh TeX layout pass.
             if (nativeFrameGestureSequence.HasValue && frameWidthPt.HasValue)
                 targetWidthPt = EstimateNativeLayoutWidth(metadata.WidthPt,
-                    storedFrameWidthPt, targetFrameWidthPt);
+                    committedFrameWidthPt, targetFrameWidthPt);
 
             var comparisonFrameWidthPt = nativeFrameGestureSequence.HasValue
-                ? storedFrameWidthPt : currentFrameWidthPt;
+                ? committedFrameWidthPt : currentFrameWidthPt;
             var comparisonFrameHeightPt = nativeFrameGestureSequence.HasValue
-                ? storedFrameHeightPt : currentFrameHeightPt;
+                ? committedFrameHeightPt : currentFrameHeightPt;
             if (Math.Abs(targetWidthPt - metadata.WidthPt) < 0.01 &&
                 Math.Abs(targetFontSizePt - metadata.FontSizePt) < 0.001 &&
                 Math.Abs(targetFrameWidthPt - comparisonFrameWidthPt) < 0.01 &&
