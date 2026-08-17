@@ -18,7 +18,9 @@ test("server-renders the LaTeX Blocks product homepage", async () => {
   assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
   const html = await response.text();
   assert.match(html, /<title>LaTeX Blocks — Editable LaTeX for Microsoft Office<\/title>/i);
-  assert.match(html, /LaTeX that belongs/);
+  assert.match(html, /Rendered as you work/);
+  assert.match(html, /Real-time rendering by StemTeX/);
+  assert.match(html, /Instant feedback, real TeX/);
   assert.match(html, /Right at home in Word/);
   assert.match(html, /Make LaTeX part of your Office workflow/);
   assert.match(html, /word-overview\.png/);

@@ -18,11 +18,12 @@ export default function Home() {
 
       <section className="hero shell" id="top">
         <div className="heroCopy">
-          <div className="eyebrow"><i /> Built for Word + PowerPoint</div>
-          <h1>LaTeX that belongs<br />in your document.</h1>
+          <div className="eyebrow"><i /> Real-time rendering by StemTeX</div>
+          <h1>Real TeX.<br />Rendered as you work.</h1>
           <p className="lede">
-            Create precise, editable LaTeX blocks in Microsoft Office.
-            Beautiful SVG on the surface. Your source stays with the object.
+            StemTeX turns your source into precise SVG in an instant, so previews,
+            edits, and reflows keep pace with your work in Word and PowerPoint.
+            Your source stays editable on the object.
           </p>
           <div className="actions">
             <a className="button primary" href={downloadUrl}>Download for Windows <span>↓</span></a>
@@ -47,7 +48,7 @@ export default function Home() {
 
       <section className="trustStrip" id="features">
         <div className="shell trustInner">
-          <p><strong>Real TeX layout.</strong> Native Office workflow.</p>
+          <p><strong>Instant StemTeX rendering.</strong> Native Office workflow.</p>
           <div><span>WORD</span><i>+</i><span>POWERPOINT</span><i>+</i><span>STEMTEX</span></div>
         </div>
       </section>
@@ -62,8 +63,8 @@ export default function Home() {
           <article className="feature featureWide navyFeature">
             <div className="featureNumber">01</div>
             <div>
-              <h3>Edit the source, not the pixels.</h3>
-              <p>Change the author LaTeX and render it back into the same Office frame. The SVG remains portable while its source remains editable.</p>
+              <h3>Instant feedback, real TeX.</h3>
+              <p>Preview source changes immediately, then edit or reflow the same object without waiting on a separate typesetting workflow. StemTeX provides real TeX layout at interactive speed.</p>
             </div>
           </article>
           <article className="feature">
