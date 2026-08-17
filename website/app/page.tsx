@@ -33,30 +33,15 @@ export default function Home() {
           </div>
         </div>
 
-        <div className="productStage" aria-label="LaTeX Blocks in an Office document">
+        <div className="productStage" aria-label="LaTeX Blocks source and output model">
           <div className="stageGlow" />
-          <div className="officeCard">
-            <div className="officeChrome">
-              <div className="windowDots"><i /><i /><i /></div>
-              <span>Research notes.docx</span>
-              <div className="wordBadge">W</div>
-            </div>
-            <div className="ribbon">
-              <span className="ribbonTab">LaTeX Blocks</span>
-              <div className="ribbonTools"><i>∫</i><i>∑</i><i>▱</i><i>↗</i></div>
-            </div>
-            <div className="document">
-              <p>For a quantum state with Hamiltonian</p>
-              <div className="equationBox">
-                <span>Ĥ</span> = <span className="fraction"><b>p̂²</b><i>2m</i></span> + V(q̂)
-                <div className="handle tl" /><div className="handle tr" />
-                <div className="handle bl" /><div className="handle br" />
-              </div>
-              <p>the partition function can be written as an editable block.</p>
-              <div className="sourceTag"><span>Source</span><code>{"\\hat H = \\frac{\\hat p^2}{2m} + V(\\hat q)"}</code></div>
-            </div>
+          <div className="modelCard">
+            <div className="modelLabel"><span>AUTHOR SOURCE</span><b>Stored with the object</b></div>
+            <code className="modelSource">{"\\hat H = \\frac{\\hat p^2}{2m} + V(\\hat q)"}</code>
+            <div className="modelFlow"><span /><b>StemTeX</b><span /></div>
+            <div className="modelOutput"><small>PORTABLE SVG</small><div><span>Ĥ</span> = <span className="fraction"><b>p̂²</b><i>2m</i></span> + V(q̂)</div></div>
+            <div className="modelFacts"><span>Editable</span><span>Searchable source</span><span>Office-native object</span></div>
           </div>
-          <div className="formatChip"><i>✓</i><span><b>Portable SVG</b><small>Looks right everywhere</small></span></div>
         </div>
       </section>
 
@@ -78,12 +63,11 @@ export default function Home() {
             <div className="featureNumber">01</div>
             <div>
               <h3>Edit the source, not the pixels.</h3>
-              <p>Double-click a recognized object, change the author LaTeX, and render it back into the same Office frame.</p>
+              <p>Change the author LaTeX and render it back into the same Office frame. This diagram describes the data path; it is not a UI screenshot.</p>
             </div>
-            <div className="editorMini">
-              <div><span>LaTeX source</span><b>Preview is current</b></div>
-              <code>{"\\begin{align}\n  Z &= \\int e^{-\\beta H} \\, dq \\, dp\n\\end{align}"}</code>
-              <div className="previewEquation">Z = ∫ e<sup>−βH</sup> dq dp</div>
+            <div className="sourceDiagram">
+              <code>{"\\begin{align}\n  Z &= \\int e^{-\\beta H} \\,dq\\,dp\n\\end{align}"}</code>
+              <span>TeX → SVG</span><div>Z = ∫ e<sup>−βH</sup> dq dp</div>
             </div>
           </article>
           <article className="feature">
@@ -127,7 +111,7 @@ export default function Home() {
                 <li><i>✓</i> Fixed blocks, inline or floating</li>
                 <li><i>✓</i> Copy and paste mixed LaTeX</li>
               </ul>
-              <div className="hostSample wordSample"><span>Einstein&apos;s theory</span><b>E = mc²</b><span>changed physics.</span></div>
+              <div className="hostFacts"><span>INLINE</span><span>DISPLAY</span><span>NUMBERED</span><span>BLOCK</span></div>
             </article>
             <article className="hostCard">
               <div className="hostHead"><span className="hostLogo powerpoint">P</span><div><small>Microsoft</small><h3>PowerPoint</h3></div></div>
@@ -138,7 +122,7 @@ export default function Home() {
                 <li><i>✓</i> Reflow after every size change</li>
                 <li><i>✓</i> Persistent per-block styling</li>
               </ul>
-              <div className="hostSample slideSample"><div /><b>∫<sub>a</sub><sup>b</sup> f(x) dx</b><span>Editable slide object</span></div>
+              <div className="hostFacts"><span>POSITIONED</span><span>RESIZABLE</span><span>STYLED</span><span>PORTABLE</span></div>
             </article>
           </div>
         </div>

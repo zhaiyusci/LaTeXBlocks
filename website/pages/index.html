@@ -9,11 +9,8 @@
   <meta property="og:description" content="Create editable, portable LaTeX blocks in Microsoft Word and PowerPoint.">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://zhaiyusci.github.io/LaTeXBlocks/">
-  <meta property="og:image" content="https://zhaiyusci.github.io/LaTeXBlocks/og.png">
-  <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="LaTeX Blocks — Editable LaTeX for Microsoft Office">
   <meta name="twitter:description" content="Create editable, portable LaTeX blocks in Microsoft Word and PowerPoint.">
-  <meta name="twitter:image" content="https://zhaiyusci.github.io/LaTeXBlocks/og.png">
   <link rel="icon" href="./brand-icon.png">
   <link rel="stylesheet" href="./styles.css">
 </head>
@@ -32,19 +29,15 @@
       <div class="actions"><a class="button primary" href="https://github.com/zhaiyusci/LaTeXBlocks/releases/latest">Download for Windows <span>↓</span></a><a class="button secondary" href="https://github.com/zhaiyusci/LaTeXBlocks">View on GitHub <span>↗</span></a></div>
       <div class="requirements"><span>Windows 64-bit</span><b>·</b><span>Office 64-bit</span><b>·</b><span>Open source</span></div>
     </div>
-    <div class="productStage" aria-label="LaTeX Blocks in an Office document">
+    <div class="productStage" aria-label="LaTeX Blocks source and output model">
       <div class="stageGlow"></div>
-      <div class="officeCard">
-        <div class="officeChrome"><div class="windowDots"><i></i><i></i><i></i></div><span>Research notes.docx</span><div class="wordBadge">W</div></div>
-        <div class="ribbon"><span class="ribbonTab">LaTeX Blocks</span><div class="ribbonTools"><i>∫</i><i>∑</i><i>▱</i><i>↗</i></div></div>
-        <div class="document">
-          <p>For a quantum state with Hamiltonian</p>
-          <div class="equationBox"><span>Ĥ</span> = <span class="fraction"><b>p̂²</b><i>2m</i></span> + V(q̂)<div class="handle tl"></div><div class="handle tr"></div><div class="handle bl"></div><div class="handle br"></div></div>
-          <p>the partition function can be written as an editable block.</p>
-          <div class="sourceTag"><span>Source</span><code>\hat H = \frac{\hat p^2}{2m} + V(\hat q)</code></div>
-        </div>
+      <div class="modelCard">
+        <div class="modelLabel"><span>AUTHOR SOURCE</span><b>Stored with the object</b></div>
+        <code class="modelSource">\hat H = \frac{\hat p^2}{2m} + V(\hat q)</code>
+        <div class="modelFlow"><span></span><b>StemTeX</b><span></span></div>
+        <div class="modelOutput"><small>PORTABLE SVG</small><div><span>Ĥ</span> = <span class="fraction"><b>p̂²</b><i>2m</i></span> + V(q̂)</div></div>
+        <div class="modelFacts"><span>Editable</span><span>Searchable source</span><span>Office-native object</span></div>
       </div>
-      <div class="formatChip"><i>✓</i><span><b>Portable SVG</b><small>Looks right everywhere</small></span></div>
     </div>
   </section>
 
@@ -53,9 +46,9 @@
   <section class="section shell capabilities">
     <div class="sectionIntro"><span class="kicker">Made for serious documents</span><h2>Office-native on the outside.<br>LaTeX all the way through.</h2><p>Every block carries its own source, so editing stays effortless and the document remains portable.</p></div>
     <div class="featureGrid">
-      <article class="feature featureWide navyFeature"><div class="featureNumber">01</div><div><h3>Edit the source, not the pixels.</h3><p>Double-click a recognized object, change the author LaTeX, and render it back into the same Office frame.</p></div><div class="editorMini"><div><span>LaTeX source</span><b>Preview is current</b></div><code>\begin{align}
-  Z &amp;= \int e^{-\beta H} \, dq \, dp
-\end{align}</code><div class="previewEquation">Z = ∫ e<sup>−βH</sup> dq dp</div></div></article>
+      <article class="feature featureWide navyFeature"><div class="featureNumber">01</div><div><h3>Edit the source, not the pixels.</h3><p>Change the author LaTeX and render it back into the same Office frame. This diagram describes the data path; it is not a UI screenshot.</p></div><div class="sourceDiagram"><code>\begin{align}
+  Z &amp;= \int e^{-\beta H} \,dq\,dp
+\end{align}</code><span>TeX → SVG</span><div>Z = ∫ e<sup>−βH</sup> dq dp</div></div></article>
       <article class="feature"><div class="featureIcon sourceIcon">{ }</div><h3>Source travels with it</h3><p>LaTeX is persisted on the visual object—not in a hidden companion file.</p></article>
       <article class="feature"><div class="featureIcon resizeIcon">↔</div><h3>Resize, then reflow</h3><p>Release the frame and the block is typeset again for its exact new dimensions.</p></article>
       <article class="feature featureWide paleFeature"><div class="featureNumber">04</div><div><h3>Style the entire block.</h3><p>Control TeX size, line spacing, padding, vertical placement, text, background, and border—without routing block styling through Office fills.</p></div><div class="swatches" aria-label="Block styling controls"><span style="background:#071738"></span><span style="background:#08a6aa"></span><span style="background:#ffb11b"></span><span style="background:#f0dfff"></span><b>Top</b><b>Middle</b><b>Bottom</b></div></article>
@@ -65,8 +58,8 @@
   <section class="hostSection"><div class="shell">
     <div class="sectionIntro lightIntro"><span class="kicker">Two hosts. One source model.</span><h2>Right at home in Word<br>and PowerPoint.</h2></div>
     <div class="hostCards">
-      <article class="hostCard"><div class="hostHead"><span class="hostLogo word">W</span><div><small>Microsoft</small><h3>Word</h3></div></div><p>Write in the text stream or build a full-width content block.</p><ul><li><i>✓</i> Inline formulas with exact baselines</li><li><i>✓</i> Display and numbered equations</li><li><i>✓</i> Fixed blocks, inline or floating</li><li><i>✓</i> Copy and paste mixed LaTeX</li></ul><div class="hostSample wordSample"><span>Einstein’s theory</span><b>E = mc²</b><span>changed physics.</span></div></article>
-      <article class="hostCard"><div class="hostHead"><span class="hostLogo powerpoint">P</span><div><small>Microsoft</small><h3>PowerPoint</h3></div></div><p>Place a free-standing TeX block anywhere on the slide.</p><ul><li><i>✓</i> Exact typesetting width</li><li><i>✓</i> Native position and rotation</li><li><i>✓</i> Reflow after every size change</li><li><i>✓</i> Persistent per-block styling</li></ul><div class="hostSample slideSample"><div></div><b>∫<sub>a</sub><sup>b</sup> f(x) dx</b><span>Editable slide object</span></div></article>
+      <article class="hostCard"><div class="hostHead"><span class="hostLogo word">W</span><div><small>Microsoft</small><h3>Word</h3></div></div><p>Write in the text stream or build a full-width content block.</p><ul><li><i>✓</i> Inline formulas with exact baselines</li><li><i>✓</i> Display and numbered equations</li><li><i>✓</i> Fixed blocks, inline or floating</li><li><i>✓</i> Copy and paste mixed LaTeX</li></ul><div class="hostFacts"><span>INLINE</span><span>DISPLAY</span><span>NUMBERED</span><span>BLOCK</span></div></article>
+      <article class="hostCard"><div class="hostHead"><span class="hostLogo powerpoint">P</span><div><small>Microsoft</small><h3>PowerPoint</h3></div></div><p>Place a free-standing TeX block anywhere on the slide.</p><ul><li><i>✓</i> Exact typesetting width</li><li><i>✓</i> Native position and rotation</li><li><i>✓</i> Reflow after every size change</li><li><i>✓</i> Persistent per-block styling</li></ul><div class="hostFacts"><span>POSITIONED</span><span>RESIZABLE</span><span>STYLED</span><span>PORTABLE</span></div></article>
     </div>
   </div></section>
 

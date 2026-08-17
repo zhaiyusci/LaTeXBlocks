@@ -13,12 +13,11 @@ export async function generateMetadata(): Promise<Metadata> {
   const origin = `${protocol}://${host}`;
   const title = "LaTeX Blocks — Editable LaTeX for Microsoft Office";
   const description = "Create editable, portable LaTeX blocks in Microsoft Word and PowerPoint.";
-  const image = `${origin}/og.png`;
   return {
     metadataBase: new URL(origin), title, description,
     icons: { icon: "/brand-icon.png", shortcut: "/brand-icon.png" },
-    openGraph: { title, description, type: "website", url: origin, images: [{ url: image, width: 1536, height: 1024, alt: "LaTeX Blocks" }] },
-    twitter: { card: "summary_large_image", title, description, images: [image] },
+    openGraph: { title, description, type: "website", url: origin },
+    twitter: { title, description },
   };
 }
 
