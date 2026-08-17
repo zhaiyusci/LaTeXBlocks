@@ -21,6 +21,8 @@ test("server-renders the LaTeX Blocks product homepage", async () => {
   assert.match(html, /LaTeX that belongs/);
   assert.match(html, /Right at home in Word/);
   assert.match(html, /Make LaTeX part of your Office workflow/);
+  assert.doesNotMatch(html, /productStage|modelCard|sourceDiagram|stepVisual/);
+  assert.doesNotMatch(html, /UI screenshot|Office frame[^<]*diagram/i);
   assert.doesNotMatch(html, /og\.png|twitter:image|og:image/);
   assert.doesNotMatch(html, /codex-preview|SkeletonPreview|Your site is taking shape/);
 });

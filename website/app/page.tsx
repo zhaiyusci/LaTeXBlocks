@@ -33,16 +33,6 @@ export default function Home() {
           </div>
         </div>
 
-        <div className="productStage" aria-label="LaTeX Blocks source and output model">
-          <div className="stageGlow" />
-          <div className="modelCard">
-            <div className="modelLabel"><span>AUTHOR SOURCE</span><b>Stored with the object</b></div>
-            <code className="modelSource">{"\\hat H = \\frac{\\hat p^2}{2m} + V(\\hat q)"}</code>
-            <div className="modelFlow"><span /><b>StemTeX</b><span /></div>
-            <div className="modelOutput"><small>PORTABLE SVG</small><div><span>Ĥ</span> = <span className="fraction"><b>p̂²</b><i>2m</i></span> + V(q̂)</div></div>
-            <div className="modelFacts"><span>Editable</span><span>Searchable source</span><span>Office-native object</span></div>
-          </div>
-        </div>
       </section>
 
       <section className="trustStrip" id="features">
@@ -63,11 +53,7 @@ export default function Home() {
             <div className="featureNumber">01</div>
             <div>
               <h3>Edit the source, not the pixels.</h3>
-              <p>Change the author LaTeX and render it back into the same Office frame. This diagram describes the data path; it is not a UI screenshot.</p>
-            </div>
-            <div className="sourceDiagram">
-              <code>{"\\begin{align}\n  Z &= \\int e^{-\\beta H} \\,dq\\,dp\n\\end{align}"}</code>
-              <span>TeX → SVG</span><div>Z = ∫ e<sup>−βH</sup> dq dp</div>
+              <p>Change the author LaTeX and render it back into the same Office frame. The SVG remains portable while its source remains editable.</p>
             </div>
           </article>
           <article className="feature">
@@ -85,11 +71,6 @@ export default function Home() {
             <div>
               <h3>Style the entire block.</h3>
               <p>Control TeX size, line spacing, padding, vertical placement, text, background, and border—without routing block styling through Office fills.</p>
-            </div>
-            <div className="swatches" aria-label="Block styling controls">
-              <span style={{ background: "#071738" }} /><span style={{ background: "#08a6aa" }} />
-              <span style={{ background: "#ffb11b" }} /><span style={{ background: "#f0dfff" }} />
-              <b>Top</b><b>Middle</b><b>Bottom</b>
             </div>
           </article>
         </div>
@@ -134,9 +115,9 @@ export default function Home() {
           <h2>Author once. Keep every layer.</h2>
         </div>
         <div className="steps">
-          <article><span>1</span><div className="stepVisual typeVisual">$ E = mc^2 $<i /></div><h3>Write LaTeX</h3><p>Use the source you already know.</p></article>
-          <article><span>2</span><div className="stepVisual renderVisual"><i>∫</i><b>StemTeX</b></div><h3>Render precisely</h3><p>A real TeX engine produces portable SVG.</p></article>
-          <article><span>3</span><div className="stepVisual placeVisual"><div><i /><b>E = mc²</b></div></div><h3>Work in Office</h3><p>Edit, move, resize, search, and share.</p></article>
+          <article><span>1</span><h3>Write LaTeX</h3><p>Use the source you already know.</p></article>
+          <article><span>2</span><h3>Render precisely</h3><p>A real TeX engine produces portable SVG.</p></article>
+          <article><span>3</span><h3>Work in Office</h3><p>Edit, move, resize, search, and share.</p></article>
         </div>
       </section>
 
