@@ -31,11 +31,11 @@ namespace LaTeXBlocks.Word
             return "<customUI xmlns=\"http://schemas.microsoft.com/office/2009/07/customui\" onLoad=\"OnLoad\">" +
                    "<ribbon><tabs><tab id=\"LaTeXBlocks.Tab\" label=\"LaTeX Blocks\">" +
                    "<group id=\"LaTeXBlocks.Blocks\" label=\"LaTeX\">" +
-                   "<button id=\"LaTeXBlocks.InsertFormula\" label=\"Inline Math\" size=\"large\" imageMso=\"EquationInsertNew\" onAction=\"OnInsertFormula\"/>" +
-                   "<button id=\"LaTeXBlocks.InsertDisplayMath\" label=\"Display Math\" size=\"large\" imageMso=\"EquationInsertNew\" onAction=\"OnInsertDisplayMath\"/>" +
-                   "<button id=\"LaTeXBlocks.InsertNumberedEquation\" label=\"Numbered Math\" size=\"large\" imageMso=\"CaptionInsert\" onAction=\"OnInsertNumberedEquation\"/>" +
-                   "<button id=\"LaTeXBlocks.InsertBlock\" label=\"LaTeX Block\" size=\"large\" imageMso=\"TextBoxInsert\" onAction=\"OnInsertBlock\"/>" +
-                   "<button id=\"LaTeXBlocks.InsertEquationReference\" label=\"Equation Reference\" imageMso=\"InsertCrossReference\" onAction=\"OnInsertEquationReference\"/>" +
+                   "<button id=\"LaTeXBlocks.InsertFormula\" label=\"Inline Math\" size=\"large\" getImage=\"GetCommandImage\" onAction=\"OnInsertFormula\"/>" +
+                   "<button id=\"LaTeXBlocks.InsertDisplayMath\" label=\"Display Math\" size=\"large\" getImage=\"GetCommandImage\" onAction=\"OnInsertDisplayMath\"/>" +
+                   "<button id=\"LaTeXBlocks.InsertNumberedEquation\" label=\"Numbered Math\" size=\"large\" getImage=\"GetCommandImage\" onAction=\"OnInsertNumberedEquation\"/>" +
+                   "<button id=\"LaTeXBlocks.InsertBlock\" label=\"LaTeX Block\" size=\"large\" getImage=\"GetCommandImage\" onAction=\"OnInsertBlock\"/>" +
+                   "<button id=\"LaTeXBlocks.InsertEquationReference\" label=\"Equation Reference\" getImage=\"GetCommandImage\" onAction=\"OnInsertEquationReference\"/>" +
                    "<button id=\"LaTeXBlocks.Edit\" label=\"Edit Block\" size=\"large\" imageMso=\"" +
                    EditBlockImageMso + "\" onAction=\"OnEdit\"/>" +
                    "<button id=\"" + ReflowFrameControlId +
@@ -47,10 +47,16 @@ namespace LaTeXBlocks.Word
                    "\" label=\"Don't Expand Shift+Enter Lines\" getEnabled=\"GetDontExpandShiftEnterEnabled\" getPressed=\"GetDontExpandShiftEnterPressed\" onAction=\"OnDontExpandShiftEnter\"/>" +
                    "<editBox id=\"" + WidthControlId +
                    "\" label=\"Typesetting width (pt)\" sizeString=\"000.0\" getText=\"GetWidthText\" getEnabled=\"GetWidthEnabled\" onChange=\"OnWidthChanged\"/>" +
+                   "</group><group id=\"LaTeXBlocks.AboutGroup\" label=\"LaTeX Blocks\">" +
+                   "<button id=\"LaTeXBlocks.About\" label=\"About\" imageMso=\"Info\" onAction=\"OnAbout\"/>" +
                    "</group></tab></tabs></ribbon></customUI>";
         }
 
         public void OnLoad(Office.IRibbonUI ui) { ribbonUi = ui; }
+        public object GetCommandImage(Office.IRibbonControl control)
+        {
+            return Branding.RibbonImageProvider.GetImage(control.Id);
+        }
         public void OnInsertFormula(Office.IRibbonControl control) { Run(addIn.ShowInsertFormulaEditor); }
         public void OnInsertDisplayMath(Office.IRibbonControl control) { Run(addIn.ShowInsertDisplayMathEditor); }
         public void OnInsertBlock(Office.IRibbonControl control) { Run(addIn.ShowInsertBlockEditor); }
@@ -61,6 +67,7 @@ namespace LaTeXBlocks.Word
         public void OnUpdateEquationNumbers(Office.IRibbonControl control) { Run(addIn.UpdateEquationNumbers); }
         public void OnCopyAsLaTeX(Office.IRibbonControl control) { Run(addIn.CopySelectionAsLaTeX); }
         public void OnPasteFromLaTeX(Office.IRibbonControl control) { Run(addIn.PasteFromLaTeX); }
+        public void OnAbout(Office.IRibbonControl control) { Run(addIn.ShowAbout); }
         public bool GetDontExpandShiftEnterEnabled(Office.IRibbonControl control)
         {
             try { return addIn.HasActiveDocument(); }

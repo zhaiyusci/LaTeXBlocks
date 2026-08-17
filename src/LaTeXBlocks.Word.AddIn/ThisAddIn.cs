@@ -2780,6 +2780,12 @@ namespace LaTeXBlocks.Word
         {
             return ribbon = new LaTeXBlocksRibbon(this);
         }
+
+        internal void ShowAbout()
+        {
+            using (var about = new Branding.AboutForm("Word"))
+                about.ShowDialog(new LaTeXBlocksRibbon.WordWindow(Application));
+        }
         protected override object RequestComAddInAutomationService() { return diagnostics ?? (diagnostics = new RuntimeDiagnostics(this)); }
 
         private void InternalStartup()

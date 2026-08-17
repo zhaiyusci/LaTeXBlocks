@@ -1,0 +1,85 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="370" viewBox="0 0 960 370">
+  <defs>
+    <style>
+      .heading { font: 700 23px 'Segoe UI', sans-serif; fill: #17223a; }
+      .sub { font: 14px 'Segoe UI', sans-serif; fill: #6b7587; }
+      .name { font: 600 17px 'Segoe UI', sans-serif; fill: #17223a; }
+      .note { font: 13px 'Segoe UI', sans-serif; fill: #6b7587; }
+      .ribbon { font: 13px 'Segoe UI', sans-serif; fill: #252525; }
+    </style>
+    <filter id="shadow" x="-20%" y="-25%" width="140%" height="160%">
+      <feDropShadow dx="0" dy="2" stdDeviation="4" flood-color="#17223a" flood-opacity="0.11"/>
+    </filter>
+
+    <!-- A: equation number is part of ordinary document structure; arrow expresses reference. -->
+    <symbol id="target-arrow" viewBox="0 0 32 32">
+      <path d="M4 6h16M4 11h11M4 16h13M4 27h11" fill="none" stroke="#5f6b7a" stroke-width="1.55" stroke-linecap="round"/>
+      <path d="M18 17h8" fill="none" stroke="#5f6b7a" stroke-width="1.4" stroke-linecap="round"/>
+      <text x="23" y="19" font-family="'Segoe UI',sans-serif" font-size="7.5" font-weight="600" fill="#404a58">(1)</text>
+      <path d="M9 25c8 0 13-3 15-8" fill="none" stroke="#185abd" stroke-width="2.1" stroke-linecap="round"/>
+      <path d="M20.5 18.5l4-2.5 1.2 4.5" fill="none" stroke="#185abd" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M5 22v6" stroke="#185abd" stroke-width="1.8" stroke-linecap="round"/>
+    </symbol>
+
+    <!-- B: Word-style document/bookmark metaphor. -->
+    <symbol id="bookmark-arrow" viewBox="0 0 32 32">
+      <path d="M6 3h15l5 5v21H6z" fill="#fff" stroke="#5f6b7a" stroke-width="1.45" stroke-linejoin="round"/>
+      <path d="M21 3v6h5M10 13h10M10 17h8M10 21h9" fill="none" stroke="#8b95a3" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M19 10v8l2.5-1.8L24 18v-8" fill="#e8f1ff" stroke="#185abd" stroke-width="1.5" stroke-linejoin="round"/>
+      <path d="M3 25c4.5 0 7-1.4 8.5-4.5" fill="none" stroke="#185abd" stroke-width="2" stroke-linecap="round"/>
+      <path d="M8.5 21.5l3.5-2.2.8 4" fill="none" stroke="#185abd" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    </symbol>
+
+    <!-- C: a Word field result points to the numbered equation target. -->
+    <symbol id="field-arrow" viewBox="0 0 32 32">
+      <path d="M4 6h12M4 11h8M4 16h12M4 26h9" fill="none" stroke="#657181" stroke-width="1.5" stroke-linecap="round"/>
+      <path d="M20 6h8v10h-8" fill="none" stroke="#657181" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round"/>
+      <text x="21" y="14" font-family="'Segoe UI',sans-serif" font-size="7" font-weight="600" fill="#404a58">(1)</text>
+      <path d="M15 26h6" fill="none" stroke="#185abd" stroke-width="1.6" stroke-linecap="round"/>
+      <path d="M17 22c6 0 8-2 8-6" fill="none" stroke="#185abd" stroke-width="2" stroke-linecap="round"/>
+      <path d="M21.5 17.5l3.5-2.5 1.7 3.8" fill="none" stroke="#185abd" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M14 22v8" stroke="#185abd" stroke-width="1.8" stroke-linecap="round"/>
+    </symbol>
+  </defs>
+
+  <rect width="960" height="370" fill="#f6f8fb"/>
+  <text x="38" y="42" class="heading">Equation Reference — Word-native style studies</text>
+  <text x="38" y="67" class="sub">Neutral document strokes + one Office-blue action arrow. No app-style pills, badges, or decorative colour.</text>
+
+  <g transform="translate(38 90)" filter="url(#shadow)">
+    <rect width="884" height="82" rx="7" fill="#fff"/>
+    <g transform="translate(98 8)">
+      <use href="#target-arrow" x="14" width="40" height="40"/>
+      <text x="34" y="62" text-anchor="middle" class="ribbon">Reference A</text>
+    </g>
+    <g transform="translate(392 8)">
+      <use href="#bookmark-arrow" x="14" width="40" height="40"/>
+      <text x="34" y="62" text-anchor="middle" class="ribbon">Reference B</text>
+    </g>
+    <g transform="translate(686 8)">
+      <use href="#field-arrow" x="14" width="40" height="40"/>
+      <text x="34" y="62" text-anchor="middle" class="ribbon">Reference C</text>
+    </g>
+  </g>
+
+  <g transform="translate(38 200)">
+    <g>
+      <rect width="274" height="135" rx="14" fill="#fff"/>
+      <use href="#target-arrow" x="101" y="12" width="72" height="72"/>
+      <text x="137" y="102" text-anchor="middle" class="name">A · Equation target</text>
+      <text x="137" y="123" text-anchor="middle" class="note">recommended: specific and still Word-like</text>
+    </g>
+    <g transform="translate(305)">
+      <rect width="274" height="135" rx="14" fill="#fff"/>
+      <use href="#bookmark-arrow" x="101" y="12" width="72" height="72"/>
+      <text x="137" y="102" text-anchor="middle" class="name">B · Bookmark target</text>
+      <text x="137" y="123" text-anchor="middle" class="note">closest to Word's underlying model</text>
+    </g>
+    <g transform="translate(610)">
+      <rect width="274" height="135" rx="14" fill="#fff"/>
+      <use href="#field-arrow" x="101" y="12" width="72" height="72"/>
+      <text x="137" y="102" text-anchor="middle" class="name">C · Field result</text>
+      <text x="137" y="123" text-anchor="middle" class="note">more technical; weaker at small size</text>
+    </g>
+  </g>
+</svg>

@@ -79,6 +79,7 @@ namespace LaTeXBlocks.PowerPoint
             borderColor = style.BorderColor;
             widthPt = BlockLayoutWidthPolicy.Clamp(widthPt);
             Text = editing ? "Edit LaTeX Block" : "Insert LaTeX Block";
+            Branding.BrandAssets.ApplyTo(this);
             StartPosition = FormStartPosition.CenterParent;
             MinimumSize = new Size(840, 600);
             Size = new Size(980, 720);
@@ -92,7 +93,7 @@ namespace LaTeXBlocks.PowerPoint
                 ScrollBars = ScrollBars.Both,
                 WordWrap = false,
                 Font = new Font("Consolas", 11F),
-                Text = source ?? string.Empty,
+                Text = ToEditorText(source),
                 Dock = DockStyle.Fill
             };
             widthSlider = new TrackBar
@@ -491,7 +492,7 @@ namespace LaTeXBlocks.PowerPoint
             };
         }
 
-        internal string Source => sourceBox.Text;
+        internal string Source => FromEditorText(sourceBox.Text);
         internal double WidthPt => (double)widthBox.Value;
         internal double FontSizePt => (double)fontSizeBox.Value;
         internal string Profile => (string)profileBox.SelectedItem;
@@ -505,7 +506,8 @@ namespace LaTeXBlocks.PowerPoint
         internal double AcceptedWidthPt => acceptedWidthPt;
         internal LaTeXBlockStyle AcceptedStyle => acceptedStyle ?? Style;
         internal LaTeXBlockRender AcceptedRender => acceptedRender;
-        internal void SetSourceForTest(string source) { sourceBox.Text = source; }
+        internal int SourceLineCountForTest => sourceBox.Lines.Length;
+        internal void SetSourceForTest(string source) { sourceBox.Text = ToEditorText(source); }
         internal void SetWidthPtForTest(double widthPt)
         {
             widthBox.Value = (decimal)BlockLayoutWidthPolicy.Clamp(widthPt);
@@ -523,6 +525,16 @@ namespace LaTeXBlocks.PowerPoint
             };
             UpdateColorButton(button, color);
             return button;
+        }
+
+        private static string ToEditorText(string source)
+        {
+            return FromEditorText(source).Replace("\n", Environment.NewLine);
+        }
+
+        private static string FromEditorText(string source)
+        {
+            return (source ?? string.Empty).Replace("\r\n", "\n").Replace('\r', '\n');
         }
 
         private void ChooseColor(Button button, Action<Color> apply)

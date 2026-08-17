@@ -1,5 +1,5 @@
 #ifndef MyAppVersion
-#define MyAppVersion "0.2.123"
+#define MyAppVersion "0.2.127"
 #endif
 #ifndef SourceDir
   #error SourceDir must point to the Word local VSTO directory
@@ -57,8 +57,11 @@ VersionInfoCompany=Y. Zhai
 VersionInfoDescription=LaTeX Blocks for Microsoft Office
 VersionInfoProductName=LaTeX Blocks
 VersionInfoProductVersion={#MyAppVersion}
+SetupIconFile=..\assets\branding\latex-blocks-icon.ico
+UninstallDisplayIcon={app}\LaTeXBlocks.ico
 
 [Files]
+Source: "..\assets\branding\latex-blocks-icon.ico"; DestDir: "{app}"; DestName: "LaTeXBlocks.ico"; Flags: ignoreversion
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#PowerPointSourceDir}\*"; DestDir: "{app}\PowerPoint"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#StemTeXSourceDir}\runtime\*"; DestDir: "{app}\StemTeX\runtime"; Excludes: "texmf-var\fonts\cache\*,*.aux,*.log,*.xdv,*.pdf,*.synctex.gz"; Flags: ignoreversion recursesubdirs createallsubdirs

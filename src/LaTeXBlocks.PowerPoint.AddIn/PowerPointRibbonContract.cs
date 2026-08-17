@@ -15,11 +15,13 @@ namespace LaTeXBlocks.PowerPoint
             return "<customUI xmlns=\"http://schemas.microsoft.com/office/2009/07/customui\" onLoad=\"OnLoad\">" +
                    "<ribbon><tabs><tab id=\"LaTeXBlocks.PowerPoint.Tab\" label=\"LaTeX Blocks\">" +
                    "<group id=\"LaTeXBlocks.PowerPoint.Blocks\" label=\"LaTeX Blocks\">" +
-                   "<button id=\"LaTeXBlocks.PowerPoint.Insert\" label=\"Insert Block\" size=\"large\" imageMso=\"TextBoxInsert\" onAction=\"OnInsertBlock\"/>" +
+                   "<button id=\"LaTeXBlocks.PowerPoint.Insert\" label=\"Insert Block\" size=\"large\" getImage=\"GetCommandImage\" onAction=\"OnInsertBlock\"/>" +
                    "<button id=\"LaTeXBlocks.PowerPoint.Edit\" label=\"Edit Block\" size=\"large\" imageMso=\"" +
                    EditBlockImageMso + "\" onAction=\"OnEditBlock\"/>" +
                    "<editBox id=\"" + LayoutWidthControlId + "\" label=\"Typesetting width (pt)\" sizeString=\"000.0\" getText=\"GetLayoutWidthText\" getEnabled=\"GetLayoutWidthEnabled\" onChange=\"OnLayoutWidthChanged\"/>" +
                    "<editBox id=\"" + FontSizeControlId + "\" label=\"TeX size (pt)\" sizeString=\"000.0\" getText=\"GetFontSizeText\" getEnabled=\"GetFontSizeEnabled\" onChange=\"OnFontSizeChanged\"/>" +
+                   "</group><group id=\"LaTeXBlocks.PowerPoint.AboutGroup\" label=\"LaTeX Blocks\">" +
+                   "<button id=\"LaTeXBlocks.PowerPoint.About\" label=\"About\" imageMso=\"Info\" onAction=\"OnAbout\"/>" +
                    "</group></tab></tabs></ribbon></customUI>";
         }
 

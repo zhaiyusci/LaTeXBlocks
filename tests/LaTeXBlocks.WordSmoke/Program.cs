@@ -504,6 +504,13 @@ namespace LaTeXBlocks.WordSmoke
                     !LaTeXBlockWidthPolicy.TryParseWidth("Natural", out _),
                     "The Ribbon width field does not parse precise point values safely.");
                 var ribbonXml = LaTeXBlocksRibbon.BuildCustomUi();
+                Assert(ribbonXml.IndexOf("id=\"LaTeXBlocks.InsertEquationReference\"", StringComparison.Ordinal) >= 0 &&
+                       ribbonXml.IndexOf("getImage=\"GetCommandImage\"", StringComparison.Ordinal) >= 0 &&
+                       ribbonXml.IndexOf("imageMso=\"InsertCrossReference\"", StringComparison.Ordinal) < 0,
+                    "The Word Ribbon does not use the branded equation-reference image callback.");
+                Assert(ribbonXml.IndexOf("id=\"LaTeXBlocks.About\"", StringComparison.Ordinal) >= 0 &&
+                       ribbonXml.IndexOf("onAction=\"OnAbout\"", StringComparison.Ordinal) >= 0,
+                    "The Word Ribbon does not expose the About dialog.");
                 Assert(ribbonXml.IndexOf(LaTeXBlocksRibbon.WidthControlId,
                            StringComparison.Ordinal) >= 0 &&
                        ribbonXml.IndexOf("getEnabled=\"GetWidthEnabled\"",
@@ -765,10 +772,15 @@ namespace LaTeXBlocks.WordSmoke
                     editor.Close();
                 }
                 const double legacyFixedWidthPt = 181.234;
-                using (var editor = new LaTeXBlockEditorForm(service, "\\[x_1+x_2\\]",
+                const string fixedEditorSource =
+                    "First paragraph.\n\nSecond paragraph with $x_1+x_2$.";
+                using (var editor = new LaTeXBlockEditorForm(service, fixedEditorSource,
                     legacyFixedWidthPt, LaTeXBlockLayoutMode.Fixed, profile,
                     selected => { }, true, 10))
                 {
+                    Assert(editor.Source == fixedEditorSource &&
+                           editor.SourceLineCountForTest == 3,
+                        "The Word Block editor collapsed LF source lines instead of displaying them as CRLF lines.");
                     Assert(!editor.WidthIsNatural &&
                         Math.Abs(editor.WidthPt - legacyFixedWidthPt) < 0.0001,
                         "Opening a legacy fixed-width block changed its absolute metadata width.");
@@ -3695,6 +3707,8 @@ namespace LaTeXBlocks.WordSmoke
                     "The isolated Word instance did not become the foreground window.");
                 dispatcher = new Control();
                 dispatcher.CreateControl();
+                RunMouseCaptureFallbackSignalSmoke(dispatcher, wordWindowHandle,
+                    unchecked((int)wordProcessId));
                 monitor = new WordFontColorMonitor(dispatcher,
                     unchecked((int)wordProcessId));
                 monitor.SetInteractionContext(true);
@@ -4118,6 +4132,40 @@ namespace LaTeXBlocks.WordSmoke
             }
         }
 
+        private static void RunMouseCaptureFallbackSignalSmoke(Control dispatcher,
+            IntPtr wordWindowHandle, int wordProcessId)
+        {
+            Console.WriteLine("Word: testing resize mouse-up fallback signal...");
+            using (var monitor = new WordMouseCaptureMonitor(dispatcher, wordProcessId))
+            {
+                var starts = 0;
+                var ends = 0;
+                monitor.CaptureStarted += (sender, args) =>
+                    Interlocked.Increment(ref starts);
+                monitor.CaptureEnded += (sender, args) =>
+                    Interlocked.Increment(ref ends);
+                monitor.Start();
+                Assert(monitor.IsMouseFallbackRunning,
+                    "The Word resize monitor did not install its mouse-up fallback.");
+
+                NativeRect client;
+                Assert(GetClientRect(wordWindowHandle, out client),
+                    "The Word resize monitor smoke could not read the Word client area.");
+                var target = new NativePoint
+                {
+                    X = Math.Max(1, client.Right / 2),
+                    Y = Math.Max(1, client.Bottom / 2)
+                };
+                Assert(ClientToScreen(wordWindowHandle, ref target),
+                    "The Word resize monitor smoke could not map the click target.");
+                ClickAt(target.X, target.Y);
+                WaitFor(() => Volatile.Read(ref starts) > 0 &&
+                              Volatile.Read(ref ends) > 0,
+                    3000,
+                    "A mouse gesture in Word did not produce the resize-completion signal.");
+            }
+        }
+
         private static void AssertAutoFormatRefreshState(WordInterop.InlineShape shape,
             Guid expectedId, string expectedSource, double expectedWidthPt,
             double expectedFontSizePt, int expectedTextColor,
@@ -4434,6 +4482,14 @@ namespace LaTeXBlocks.WordSmoke
         private static extern bool GetCursorPos(out NativePoint point);
 
         [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetClientRect(IntPtr window, out NativeRect rect);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool ClientToScreen(IntPtr window, ref NativePoint point);
+
+        [DllImport("user32.dll")]
         private static extern void mouse_event(uint flags, uint dx, uint dy,
             uint data, UIntPtr extraInfo);
 
@@ -4442,6 +4498,15 @@ namespace LaTeXBlocks.WordSmoke
         {
             internal int X;
             internal int Y;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct NativeRect
+        {
+            internal int Left;
+            internal int Top;
+            internal int Right;
+            internal int Bottom;
         }
 
         private static string EquationNumberText(WordInterop.Field field)

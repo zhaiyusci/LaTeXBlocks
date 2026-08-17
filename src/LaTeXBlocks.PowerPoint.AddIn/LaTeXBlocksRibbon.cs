@@ -23,8 +23,13 @@ namespace LaTeXBlocks.PowerPoint
         }
 
         public void OnLoad(Office.IRibbonUI ui) { ribbonUi = ui; }
+        public object GetCommandImage(Office.IRibbonControl control)
+        {
+            return Branding.RibbonImageProvider.GetImage(control.Id);
+        }
         public void OnInsertBlock(Office.IRibbonControl control) { Run(addIn.ShowInsertBlockEditor); }
         public void OnEditBlock(Office.IRibbonControl control) { Run(addIn.ShowEditBlockEditor); }
+        public void OnAbout(Office.IRibbonControl control) { Run(addIn.ShowAbout); }
         public string GetLayoutWidthText(Office.IRibbonControl control)
         {
             try { return addIn.GetSelectedBlockLayoutWidthText(); }

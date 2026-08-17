@@ -90,6 +90,7 @@ namespace LaTeXBlocks.Word
                 !double.IsInfinity(widthPt) ? widthPt : LaTeXBlockWidthPolicy.DefaultWidthPt;
             widthPt = LaTeXBlockWidthPolicy.ClampWidth(widthPt);
             Text = windowTitle ?? (editing ? "Edit LaTeX Block" : "Insert LaTeX Block");
+            Branding.BrandAssets.ApplyTo(this);
             StartPosition = FormStartPosition.CenterParent;
             MinimumSize = new Size(840, 600);
             Size = new Size(980, 720);
@@ -103,9 +104,9 @@ namespace LaTeXBlocks.Word
                 ScrollBars = ScrollBars.Both,
                 WordWrap = false,
                 Font = new Font("Consolas", 11F),
-                Text = mathEditor && !string.IsNullOrWhiteSpace(source)
+                Text = ToEditorText(mathEditor && !string.IsNullOrWhiteSpace(source)
                     ? LaTeXBlockService.NormalizeMathBody(source)
-                    : source ?? string.Empty,
+                    : source),
                 Dock = DockStyle.Fill
             };
             widthSlider = new TrackBar
@@ -405,7 +406,7 @@ namespace LaTeXBlocks.Word
             };
         }
 
-        internal string Source => sourceBox.Text;
+        internal string Source => FromEditorText(sourceBox.Text);
         internal double WidthPt => Mode == LaTeXBlockLayoutMode.Auto
             ? naturalWidthSentinelPt
             : (double)widthBox.Value;
@@ -431,7 +432,8 @@ namespace LaTeXBlocks.Word
         internal LaTeXBlockStyle AcceptedStyle => acceptedStyle ?? Style;
         internal LaTeXBlockRender CurrentRender => currentRender;
         internal bool PreviewIsCurrent => currentRender != null && renderedVersion == editVersion;
-        internal void SetSourceForTest(string source) { sourceBox.Text = source; }
+        internal int SourceLineCountForTest => sourceBox.Lines.Length;
+        internal void SetSourceForTest(string source) { sourceBox.Text = ToEditorText(source); }
         internal void SetWidthPtForTest(double widthPt)
         {
             widthBox.Value = (decimal)LaTeXBlockWidthPolicy.ClampWidth(widthPt);
@@ -517,6 +519,16 @@ namespace LaTeXBlocks.Word
             };
             UpdateColorButton(button, color);
             return button;
+        }
+
+        private static string ToEditorText(string source)
+        {
+            return FromEditorText(source).Replace("\n", Environment.NewLine);
+        }
+
+        private static string FromEditorText(string source)
+        {
+            return (source ?? string.Empty).Replace("\r\n", "\n").Replace('\r', '\n');
         }
 
         private void ChooseColor(Button button, Action<Color> apply)

@@ -1,4 +1,10 @@
-# LaTeX Blocks
+<p align="center">
+  <img src="assets/branding/latex-blocks-icon.png" alt="LaTeX Blocks" width="180">
+</p>
+
+<h1 align="center">LaTeX Blocks</h1>
+
+<p align="center"><strong>Editable LaTeX blocks for Microsoft Word and PowerPoint.</strong></p>
 
 LaTeX Blocks puts editable LaTeX into Microsoft Office as portable SVG objects. StemTeX performs TeX layout and
 SVG rendering; the Office add-in owns placement, editing, and persistence. The source of each block remains on the

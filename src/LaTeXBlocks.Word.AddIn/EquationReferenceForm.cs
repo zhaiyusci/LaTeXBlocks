@@ -21,6 +21,7 @@ namespace LaTeXBlocks.Word
             if (references == null) throw new ArgumentNullException(nameof(references));
 
             Text = "Insert Equation Reference";
+            Branding.BrandAssets.ApplyTo(this);
             StartPosition = FormStartPosition.CenterParent;
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MinimizeBox = false;

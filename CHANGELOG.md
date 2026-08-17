@@ -5,6 +5,43 @@ Word-and-PowerPoint package line.
 
 ## [Unreleased]
 
+## [0.2.127] — 2026-08-17
+
+### Word
+
+- Fixed fixed-size LaTeX Blocks being stretched after a mouse resize instead of
+  being recompiled for the new frame. The resize monitor now observes Word mouse
+  release as a fallback for drawing-layer gestures that omit the native capture-
+  end accessibility event.
+- Added a real foreground-Word interaction check for the resize mouse-release
+  fallback, in addition to the existing exact-frame reflow and persistence test.
+
+## [0.2.126] — 2026-08-17
+
+### Word and PowerPoint
+
+- Replaced the generic Office glyphs for Inline Math, Display Math, Numbered
+  Math, LaTeX Block, and Equation Reference with a coherent mathematical Ribbon
+  icon family. Equation Reference uses the selected Word-style document,
+  bookmark, and action-arrow artwork without changing the add-in's behavior.
+- PowerPoint's Insert Block command now shares the same LaTeX Block icon as Word.
+
+## [0.2.125] — 2026-08-17
+
+### Brand and product surfaces
+
+- Adopted the new full-canvas LaTeX Blocks icon across the repository README, the
+  Word and PowerPoint About dialogs, and the Windows installer/uninstaller.
+- Added an About command to both Office Ribbon tabs with the installed version,
+  host-specific product description, project home, and support link.
+- Applied the same product icon to every add-in-owned editor and equation-reference
+  window instead of leaving the default WinForms application glyph in the title bar.
+
+### Word and PowerPoint
+
+- Preserve authored LF line boundaries when transferring multi-line TeX between
+  the Alternative Text persistence envelope and the Windows editor control.
+
 ## [0.2.121] — 2026-08-12
 
 ### Word

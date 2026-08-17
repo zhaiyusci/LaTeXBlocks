@@ -36,6 +36,12 @@ namespace LaTeXBlocks.PowerPointSmoke
         private static void Run()
         {
             var ribbonXml = PowerPointRibbonContract.BuildCustomUi();
+            Assert(ribbonXml.IndexOf("id=\"LaTeXBlocks.PowerPoint.Insert\"", StringComparison.Ordinal) >= 0 &&
+                   ribbonXml.IndexOf("getImage=\"GetCommandImage\"", StringComparison.Ordinal) >= 0,
+                "The PowerPoint Ribbon does not use the branded Block image callback.");
+            Assert(ribbonXml.IndexOf("id=\"LaTeXBlocks.PowerPoint.About\"", StringComparison.Ordinal) >= 0 &&
+                   ribbonXml.IndexOf("onAction=\"OnAbout\"", StringComparison.Ordinal) >= 0,
+                "The PowerPoint Ribbon does not expose the About dialog.");
             var ribbonDocument = new System.Xml.XmlDocument();
             ribbonDocument.LoadXml(ribbonXml);
             Assert(ribbonXml.IndexOf(PowerPointRibbonContract.FontSizeControlId,
@@ -130,10 +136,13 @@ namespace LaTeXBlocks.PowerPointSmoke
                 Assert(Math.Abs(service.ResolveInitialWidth(360) - 360) < 0.01,
                     "A new PowerPoint block did not use StemTeX's standard initial width.");
 
-                const string editorSource = "$E=mc^2$";
+                const string editorSource = "First paragraph.\n\nSecond paragraph with $E=mc^2$.";
                 using (var editor = new LaTeXBlockEditorForm(service, editorSource, 288,
                            inheritedSize, profile, backend.SwitchProfile, false))
                 {
+                    Assert(editor.Source == editorSource &&
+                           editor.SourceLineCountForTest == 3,
+                        "The PowerPoint editor collapsed LF source lines instead of displaying them as CRLF lines.");
                     editor.StartPosition = System.Windows.Forms.FormStartPosition.Manual;
                     editor.Location = new System.Drawing.Point(100, 100);
                     editor.Show();

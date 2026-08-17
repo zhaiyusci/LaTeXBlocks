@@ -1,0 +1,108 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="390" viewBox="0 0 1100 390">
+  <defs>
+    <style>
+      .title { font: 700 24px 'Segoe UI', sans-serif; fill: #13213c; }
+      .subtitle { font: 14px 'Segoe UI', sans-serif; fill: #687386; }
+      .label { font: 600 16px 'Segoe UI', sans-serif; fill: #17223a; }
+      .note { font: 13px 'Segoe UI', sans-serif; fill: #667085; }
+      .math { font-family: 'Cambria Math', 'STIX Two Math', serif; font-style: italic; fill: #0b2b70; }
+      .ui { font-family: 'Segoe UI', sans-serif; fill: #0b2b70; }
+      .navy-stroke { stroke: #0b2b70; }
+      .teal-stroke { stroke: #00a6ae; }
+      .orange-stroke { stroke: #ffaa17; }
+    </style>
+
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="2" stdDeviation="4" flood-color="#152238" flood-opacity="0.10"/>
+    </filter>
+
+    <symbol id="inline" viewBox="0 0 64 64">
+      <path d="M5 38h15M44 38h15" fill="none" stroke="#65758b" stroke-width="3" stroke-linecap="round"/>
+      <path d="M6 31h10M48 31h10" fill="none" stroke="#a2adbd" stroke-width="2" stroke-linecap="round"/>
+      <text x="21" y="40" class="math" font-size="27">x²</text>
+      <path d="M18 45h29" fill="none" stroke="#00a6ae" stroke-width="2" stroke-linecap="round"/>
+    </symbol>
+
+    <symbol id="display" viewBox="0 0 64 64">
+      <path d="M7 13h50M7 52h50" fill="none" stroke="#a2adbd" stroke-width="2.5" stroke-linecap="round"/>
+      <path d="M15 20h34M15 45h34" fill="none" stroke="#d1d7e0" stroke-width="2" stroke-linecap="round"/>
+      <text x="14" y="40" class="math" font-size="23">E=mc²</text>
+      <path d="M29 7h6M32 7v5" fill="none" stroke="#00a6ae" stroke-width="2" stroke-linecap="round"/>
+    </symbol>
+
+    <symbol id="numbered" viewBox="0 0 64 64">
+      <path d="M6 17h52M6 49h52" fill="none" stroke="#d1d7e0" stroke-width="2.25" stroke-linecap="round"/>
+      <text x="8" y="39" class="math" font-size="20">E=mc²</text>
+      <rect x="45" y="24" width="16" height="20" rx="5" fill="#fff5d8" stroke="#ffaa17" stroke-width="2"/>
+      <text x="50" y="39" class="ui" font-size="13" font-weight="700">1</text>
+    </symbol>
+
+    <symbol id="block" viewBox="0 0 64 64">
+      <rect x="18" y="5" width="41" height="43" rx="10" fill="#00a6ae"/>
+      <rect x="5" y="16" width="46" height="43" rx="11" fill="#0b2b70"/>
+      <path d="M15 30h12" fill="none" stroke="#ffaa17" stroke-width="4" stroke-linecap="round"/>
+      <path d="M16 52c9 5 14-4 17-15 3-12 6-17 11-16 3 1 3 5 0 7"
+            fill="none" stroke="#fff" stroke-width="5.5" stroke-linecap="round"/>
+    </symbol>
+
+    <symbol id="reference" viewBox="0 0 64 64">
+      <text x="5" y="20" class="math" font-size="16">E=mc²</text>
+      <rect x="45" y="5" width="16" height="19" rx="5" fill="#fff5d8" stroke="#ffaa17" stroke-width="2"/>
+      <text x="50" y="19" class="ui" font-size="12" font-weight="700">1</text>
+      <path d="M7 45h17M7 52h11" fill="none" stroke="#65758b" stroke-width="2.5" stroke-linecap="round"/>
+      <rect x="26" y="40" width="16" height="19" rx="5" fill="#e8f7f8" stroke="#00a6ae" stroke-width="2"/>
+      <text x="31" y="54" class="ui" font-size="12" font-weight="700">1</text>
+      <path d="M43 47C56 43 58 35 55 26" fill="none" stroke="#0b2b70" stroke-width="3" stroke-linecap="round"/>
+      <path d="M50 29l5-5 5 4" fill="none" stroke="#0b2b70" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    </symbol>
+  </defs>
+
+  <rect width="1100" height="390" fill="#f7f9fc"/>
+  <text x="40" y="45" class="title">LaTeX Blocks — Ribbon icon concepts</text>
+  <text x="40" y="70" class="subtitle">One visual grammar, tested conceptually at 32 px; functional meaning comes before decoration.</text>
+
+  <g transform="translate(40 100)">
+    <g filter="url(#shadow)"><rect width="190" height="245" rx="18" fill="#fff"/></g>
+    <use href="#inline" x="55" y="26" width="80" height="80"/>
+    <rect x="77" y="120" width="36" height="36" rx="4" fill="#f4f6f9"/>
+    <use href="#inline" x="79" y="122" width="32" height="32"/>
+    <text x="95" y="184" text-anchor="middle" class="label">Inline Math</text>
+    <text x="95" y="209" text-anchor="middle" class="note">formula on the text baseline</text>
+  </g>
+
+  <g transform="translate(250 100)">
+    <g filter="url(#shadow)"><rect width="190" height="245" rx="18" fill="#fff"/></g>
+    <use href="#display" x="55" y="26" width="80" height="80"/>
+    <rect x="77" y="120" width="36" height="36" rx="4" fill="#f4f6f9"/>
+    <use href="#display" x="79" y="122" width="32" height="32"/>
+    <text x="95" y="184" text-anchor="middle" class="label">Display Math</text>
+    <text x="95" y="209" text-anchor="middle" class="note">centered, independent line</text>
+  </g>
+
+  <g transform="translate(460 100)">
+    <g filter="url(#shadow)"><rect width="190" height="245" rx="18" fill="#fff"/></g>
+    <use href="#numbered" x="55" y="26" width="80" height="80"/>
+    <rect x="77" y="120" width="36" height="36" rx="4" fill="#f4f6f9"/>
+    <use href="#numbered" x="79" y="122" width="32" height="32"/>
+    <text x="95" y="184" text-anchor="middle" class="label">Numbered Math</text>
+    <text x="95" y="209" text-anchor="middle" class="note">equation plus right-side number</text>
+  </g>
+
+  <g transform="translate(670 100)">
+    <g filter="url(#shadow)"><rect width="190" height="245" rx="18" fill="#fff"/></g>
+    <use href="#block" x="55" y="26" width="80" height="80"/>
+    <rect x="77" y="120" width="36" height="36" rx="4" fill="#f4f6f9"/>
+    <use href="#block" x="79" y="122" width="32" height="32"/>
+    <text x="95" y="184" text-anchor="middle" class="label">LaTeX Block</text>
+    <text x="95" y="209" text-anchor="middle" class="note">the product's layered block mark</text>
+  </g>
+
+  <g transform="translate(880 100)">
+    <g filter="url(#shadow)"><rect width="190" height="245" rx="18" fill="#fff"/></g>
+    <use href="#reference" x="55" y="26" width="80" height="80"/>
+    <rect x="77" y="120" width="36" height="36" rx="4" fill="#f4f6f9"/>
+    <use href="#reference" x="79" y="122" width="32" height="32"/>
+    <text x="95" y="184" text-anchor="middle" class="label">Equation Reference</text>
+    <text x="95" y="209" text-anchor="middle" class="note">citation number points to target</text>
+  </g>
+</svg>

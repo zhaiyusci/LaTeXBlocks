@@ -827,6 +827,12 @@ namespace LaTeXBlocks.PowerPoint
             return ribbon = new LaTeXBlocksRibbon(this);
         }
 
+        internal void ShowAbout()
+        {
+            using (var about = new Branding.AboutForm("PowerPoint"))
+                about.ShowDialog(new LaTeXBlocksRibbon.PowerPointWindow(Application));
+        }
+
         private void InternalStartup()
         {
             Startup += ThisAddIn_Startup;
