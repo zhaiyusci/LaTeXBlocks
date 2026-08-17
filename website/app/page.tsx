@@ -35,6 +35,16 @@ export default function Home() {
 
       </section>
 
+      <figure className="productScreenshot shell">
+        <img
+          src="/word-overview.png"
+          alt="LaTeX Blocks running in Microsoft Word, showing its ribbon commands and inline, display, and numbered LaTeX objects in a document."
+          width="1908"
+          height="607"
+        />
+        <figcaption>LaTeX Blocks in Microsoft Word</figcaption>
+      </figure>
+
       <section className="trustStrip" id="features">
         <div className="shell trustInner">
           <p><strong>Real TeX layout.</strong> Native Office workflow.</p>

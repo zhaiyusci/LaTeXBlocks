@@ -21,9 +21,12 @@ h1 { margin:21px 0 23px; font-size:clamp(48px,5.1vw,72px); line-height:.99; lett
 .button:hover { transform:translateY(-2px); }.button.primary { color:#fff; background:var(--navy); box-shadow:0 13px 26px rgba(8,42,112,.2); }.button.primary span { color:var(--amber); font-size:17px; }
 .button.secondary { border:1px solid #d7deea; background:#fff; }.button.secondary:hover { box-shadow:0 10px 22px rgba(20,42,76,.09); }
 .requirements { display:flex; gap:12px; align-items:center; margin-top:23px; color:#7a879b; font-size:12px; }.requirements b { color:#c1c8d2; }
+.productScreenshot { margin-top:-54px; margin-bottom:92px; }
+.productScreenshot img { display:block; width:100%; height:auto; border:1px solid #dfe5ed; border-radius:14px; background:#fff; box-shadow:0 24px 58px rgba(11,31,66,.14); }
+.productScreenshot figcaption { margin-top:13px; color:#7a879b; font-size:11px; text-align:center; }
 .trustStrip { border-top:1px solid #eef1f5; border-bottom:1px solid #eef1f5; background:var(--paper); }.trustInner { min-height:84px; display:flex; align-items:center; justify-content:space-between; color:#607089; font-size:13px; }.trustInner p strong { color:var(--ink); }.trustInner div { display:flex; gap:15px; align-items:center; color:#8a96a8; font-size:10px; font-weight:800; letter-spacing:.14em; }.trustInner i { color:#c7ced8; font-style:normal; }
 @media(max-width:900px){.hero{padding-top:40px;text-align:center}.heroCopy{display:flex;flex-direction:column;align-items:center;margin:auto}}
-@media(max-width:620px){.shell{width:min(100% - 30px,1180px)}.nav{height:70px}.navLinks>a:not(.navCta){display:none}.hero{padding:48px 0 72px}.lede{font-size:17px}.actions{width:100%;flex-direction:column}.button{width:100%}.requirements{flex-wrap:wrap;justify-content:center}.trustInner{padding:22px 0;flex-direction:column;gap:10px;text-align:center}}
+@media(max-width:620px){.shell{width:min(100% - 30px,1180px)}.nav{height:70px}.navLinks>a:not(.navCta){display:none}.hero{padding:48px 0 72px}.lede{font-size:17px}.actions{width:100%;flex-direction:column}.button{width:100%}.requirements{flex-wrap:wrap;justify-content:center}.productScreenshot{margin-top:-32px;margin-bottom:64px}.productScreenshot img{border-radius:8px}.trustInner{padding:22px 0;flex-direction:column;gap:10px;text-align:center}}
 
 .section { padding-top:120px; padding-bottom:120px; }
 .sectionIntro { max-width:690px; margin-bottom:54px; }.sectionIntro h2 { margin:13px 0 18px; font-size:clamp(36px,4vw,54px); line-height:1.08; letter-spacing:-.045em; }.sectionIntro p { max-width:600px; margin:0; color:var(--muted); font-size:17px; line-height:1.65; }
