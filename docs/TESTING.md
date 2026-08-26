@@ -1,7 +1,8 @@
 # Testing
 
-LaTeX Blocks tests are desktop smoke tests, not mocked Office tests. They require the selected Microsoft Office host
-and a usable StemTeX runtime. Build the requested configuration before running them.
+LaTeXBlocks tests are desktop smoke tests, not mocked Office tests. They require the selected Microsoft Office host,
+StemTeX 0.13 or newer, and a usable system TeX Live root. The test validates that the resolved root contains
+`texmf-dist\web2c`. Build the requested configuration before running them.
 
 Close Word and PowerPoint before a test run. In particular, the PowerPoint smoke test fails immediately if any
 `POWERPNT` process is already running.

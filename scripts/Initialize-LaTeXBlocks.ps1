@@ -1,6 +1,6 @@
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
-$subject = 'CN=LaTeX Blocks Development'
+$subject = 'CN=LaTeXBlocks Development'
 $certificate = Get-ChildItem Cert:\CurrentUser\My |
     Where-Object { $_.Subject -eq $subject -and $_.HasPrivateKey -and $_.NotAfter -gt (Get-Date).AddMonths(1) } |
     Sort-Object NotAfter -Descending | Select-Object -First 1
@@ -24,4 +24,4 @@ foreach ($projectDirectory in @('LaTeXBlocks.Word.AddIn', 'LaTeXBlocks.PowerPoin
     $propsPath = Join-Path $root "src\$projectDirectory\LaTeXBlocks.Development.props"
     [IO.File]::WriteAllText($propsPath, $props, [Text.UTF8Encoding]::new($false))
 }
-Write-Output "LaTeX Blocks signing initialized: $($certificate.Thumbprint)"
+Write-Output "LaTeXBlocks signing initialized: $($certificate.Thumbprint)"

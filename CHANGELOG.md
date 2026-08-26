@@ -1,15 +1,198 @@
 # Changelog
 
+## [0.2.149] — 2026-08-26
+
+- Fix the real native Font Size event path: its asynchronous commit guard now compares the request against the formula's Office Graphic Fill rather than Word's transient `Font.TextColor=Automatic`, so valid rerenders are no longer silently discarded.
+- Add opt-in end-to-end diagnostics for native Word format capture, asynchronous rendering, live-state validation, and commit.
+
+## [0.2.145] — 2026-08-26
+
+- Preserve an inline formula's existing Office Graphic paint during native Font Size rerenders instead of re-resolving colour through Word's transient `Font.TextColor` projection.
+- Capture the exact drawing-run theme slot and tint/shade from the already-serialized batch OOXML before the Word undo record starts, then restore the run and Graphics Fill without extra serialization or split undo entries.
+
+## [0.2.144] — 2026-08-26
+
+- Simplified Word colour synchronization to one host-level operation: after the
+  outer layer identifies LaTeXBlocks formulas, the colour layer reads the Office
+  colour descriptor from the native command selection's drawing run and projects
+  it directly to each target InlineShape fill. Formula kind, numbering fields,
+  tabs, and LaTeX layout metadata do not participate in colour conversion.
+
+## [0.2.143] — 2026-08-26
+
+- Fixed Word theme tint/shade synchronization by reading the drawing run from
+  the bounded native formula scaffold. `InlineShape.Range` and `ColorFormat`
+  can both omit the selected variant even though Word has committed it in OOXML.
+- Removed the speculative 300 ms theme-fill delay. Native palette changes now
+  cross one short UI turn and update only the Office Graphic fill, without TeX
+  rendering or polling.
+- Made detailed colour-sync tracing opt-in through
+  `HKCU\Software\LaTeXBlocks\Word\ColorSyncDiagnostics` or the
+  `LATEXBLOCKS_COLOR_SYNC_TRACE=1` environment variable.
+
+## [0.2.142] — 2026-08-26
+
+- Added bounded Word colour-sync diagnostics under the LaTeXBlocks local
+  application-data directory. The trace records native palette lifecycle,
+  semantic theme properties, and Office Graphic fill projections without
+  recording document or LaTeX content.
+- Assigned a distinct VSTO deployment version so the diagnostic build cannot be
+  confused with a cached 0.2.141 assembly.
+
+## [0.2.141] — 2026-08-26
+
+- Deferred the single Word theme-fill assignment until 300 ms after the native
+  colour-palette commit, preventing the still-running Office command from
+  overwriting the SVG with the base theme colour.
+- Restored one unconditional `ObjectThemeColor` then `Brightness` assignment for
+  theme fills; no SVG replacement, TeX render, RGB conversion, or polling is used.
+
+## [0.2.140] — 2026-08-26
+
+- Fixed Word theme fills by preserving an already-correct `ObjectThemeColor`
+  slot and replaying only `Brightness`; this prevents Word's delayed theme-slot
+  repaint from overwriting the SVG tint with the base theme colour.
+- The persistence regression now waits for Word's deferred SVG update before
+  comparing the drawing run, fill properties, and embedded SVG paint.
+
+## [0.2.139] — 2026-08-26
+
+- Fixed Word SVG theme tint being skipped when `Fill.ForeColor` projected the
+  drawing run's target theme before the embedded SVG had actually been repainted.
+- Theme fills are now always replayed through Office so the SVG/fallback paint
+  matches the semantic theme slot and tint.
+- Extended the Word colour regression to inspect the stored SVG paint rather
+  than trusting COM theme and brightness properties alone.
+
+## [0.2.138] — 2026-08-26
+
+- Fixed Word theme-colour synchronization to read the semantic colour from the
+  exact `w:r` that owns the formula drawing instead of taking the first themed
+  `w:color` found in a Flat OPC package.
+- Limited the authoritative OOXML read to one formula character, preserving
+  correct theme tint/shade without serializing a large mixed selection.
+- Added a regression case where neighbouring text has a different theme colour.
+
+## [0.2.137] — 2026-08-26
+
+- Replaced the ambiguous theme `Variant` with a semantic colour transform:
+  `None`, `Tint(amount)`, or `Shade(amount)`.
+- Word font colours now map the transform exclusively through
+  `Font.TextColor.TintAndShade`; Word SVG graphic fills map it exclusively through
+  `Fill.ForeColor.Brightness`.
+- PowerPoint shape fills retain their own `TintAndShade` adapter instead of sharing
+  Word SVG-fill behaviour.
+- Added hidden Word coverage for positive tint, negative shade, and neutral theme
+  transforms, including assertions that Word graphic `TintAndShade` remains zero.
+
+## [0.2.136] — 2026-08-26
+
+- Changed Word's native Font Color synchronization to read the selected formula's
+  COM `Font.TextColor` after the command settles; the interaction path no longer
+  serializes or searches `Range.WordOpenXML`.
+- Fixed a theme-tint bug where a complete Flat OPC package could make the previous
+  parser take an unrelated run's first theme colour (for example Accent1/-0.25)
+  instead of the formula's actual Accent6/0.8 value.
+- If Word has not exposed a coherent semantic colour, the graphic is now left
+  unchanged rather than guessing a theme variant from a resolved RGB value.
+
+## [0.2.135] — 2026-08-26
+
+- Added a host-independent Office graphic colour model with separate Word and
+  PowerPoint adapters; theme slots and tint/shade variants are no longer reduced
+  to resolved RGB during document updates.
+- Separated Office-owned graphic colour from TeX-owned explicit style colour.
+  Native Office colour commands update graphic fill without invoking StemTeX.
+- Removed full-selection OOXML scanning and redundant per-formula Font writes from
+  Word's native colour synchronization path.
+- Restricted direct multi-formula Word media replacement to one paragraph so a
+  cross-paragraph font-size change cannot discard numbered-equation tab stops.
+
 All notable product-facing changes are recorded here. Version history begins with the first self-contained
 Word-and-PowerPoint package line.
 
 ## [Unreleased]
 
+## [0.2.134] — 2026-08-26
+
+### Word
+
+- Recover the selected theme slot and its `themeTint`/`themeShade` directly from WordprocessingML when Word's
+  `ColorFormat` reports only the base theme colour. Tinted formula text and SVG Graphics Fill now stay in sync.
+- Apply the recovered theme variant in the original Font Color commit, without a delayed retry, so theme-colour
+  changes no longer produce an untinted-to-tinted flash.
+
+## [0.2.133] — 2026-08-26
+
+### Word
+
+- Wait for Word to finish its two-stage theme-colour commit before the single Graphics Fill update, so a tinted
+  theme swatch no longer leaves the SVG at the untinted base colour or causes a base-to-tint flash.
+- Always store the Word theme variant through Graphics Fill's `Brightness` representation, including on Office
+  builds that accept `TintAndShade` without applying it to SVG paint.
+
+## [0.2.132] — 2026-08-26
+
+### Word
+
+- Preserved native theme colours for formula Graphics Fill, including the theme slot and tint/brightness variant,
+  across exact-formula Font Color changes, mixed selections, normal SVG replacement, and batched SVG media updates.
+  Word font theme indices are now mapped explicitly to the Office drawing-theme indices used by Graphics Fill.
+- Removed the delayed second colour write. Each committed Font Color action now performs one semantic update, while
+  unchanged theme fills and unchanged direct RGB fills are left untouched to avoid visible flashing.
+
+### PowerPoint
+
+- Kept default-black standalone display formulas on StemTeX's bare display path when no fixed height is requested, so
+  enabling Block typography no longer introduces a nested TeX display box or an extra `\topskip` in the SVG height.
+
+## [0.2.131] — 2026-08-26
+
+### Word
+
+- Added Font Color synchronization for SVG formulas, including numbered equations and exact formula selections, by
+  mirroring Word's drawing-run colour to Graphics Fill.
+
+## [0.2.130] — 2026-08-26
+
+### Word and PowerPoint
+
+- Standardized the product name as `LaTeXBlocks` without a space across the Ribbon, dialogs, installer, assembly
+  metadata, website, documentation, and new installation directory. Upgrades remove the former spaced application
+  directory after Office is closed; user profiles remain under `%LOCALAPPDATA%\LaTeXBlocks\profiles`.
+
+## [0.2.129] — 2026-08-26
+
+### Word and PowerPoint
+
+- Moved Profile Creator output into LaTeXBlocks' own `%LOCALAPPDATA%\LaTeXBlocks\profiles` directory. Existing user
+  profiles under `%LOCALAPPDATA%\StemTeX\profiles` are copied forward without overwriting same-named profiles.
+
+## [0.2.128] — 2026-08-26
+
+### Word and PowerPoint
+
+- Updated the renderer integration to StemTeX 0.13 and made the system TeX Live tree the authoritative source for
+  TeX packages, fonts, maps, and format inputs. Users can select its root from either Ribbon; a strict
+  `STEMTEX_TEXMF_ROOT` override remains available for diagnostics and managed deployments.
+- Added StemTeX's original Profile Creator to both Ribbon tabs. User profiles are generated under
+  `%LOCALAPPDATA%\StemTeX\profiles`, discovered alongside the installed `unicodemath` profile, and refreshed when the
+  Creator exits.
+- Kept profile selection host-specific: Word and PowerPoint continue to persist different current profiles even
+  though they share the configured system TeX Live tree and user profile collection.
+- Office foreground and fixed-block background colours no longer assume that a custom profile loads `xcolor`;
+  foreground uses the SVG driver's native colour special and the existing SVG frame paints the background.
+
+### Packaging
+
+- The installer now requires a staged StemTeX 0.13 runtime and bundles its Profile Creator unchanged. TeX Live's
+  `texmf-dist` and `texmf-var` are excluded, and upgrades remove copies left by earlier LaTeXBlocks packages.
+
 ## [0.2.127] — 2026-08-17
 
 ### Word
 
-- Fixed fixed-size LaTeX Blocks being stretched after a mouse resize instead of
+- Fixed fixed-size LaTeXBlocks being stretched after a mouse resize instead of
   being recompiled for the new frame. The resize monitor now observes Word mouse
   release as a fallback for drawing-layer gestures that omit the native capture-
   end accessibility event.
@@ -30,7 +213,7 @@ Word-and-PowerPoint package line.
 
 ### Brand and product surfaces
 
-- Adopted the new full-canvas LaTeX Blocks icon across the repository README, the
+- Adopted the new full-canvas LaTeXBlocks icon across the repository README, the
   Word and PowerPoint About dialogs, and the Windows installer/uninstaller.
 - Added an About command to both Office Ribbon tabs with the installed version,
   host-specific product description, project home, and support link.
@@ -112,7 +295,7 @@ Word-and-PowerPoint package line.
   The editor's Fill label is now Background.
 - The unified installer now registers the Word and PowerPoint VSTO manifests
   directly instead of installing them as two independent ClickOnce products.
-  Programs and Features therefore exposes one LaTeX Blocks entry, owned by the
+  Programs and Features therefore exposes one LaTeXBlocks entry, owned by the
   stable installer AppId, while upgrades remove registrations created by the old
   packaging path.
 - Fixed the unified installer's local VSTO layout. The installer now packages
@@ -486,7 +669,7 @@ Word-and-PowerPoint package line.
 
 ### Word
 
-- Removed the two full-heap collections and global finalizer wait from final-document close. LaTeX Blocks now releases
+- Removed the two full-heap collections and global finalizer wait from final-document close. LaTeXBlocks now releases
   only the persistent Range/Shape RCWs held by its selection and rerender state, preserving prompt process teardown
   without pausing for unrelated WebBrowser, UIA, or Office finalizers.
 
@@ -552,10 +735,10 @@ Word-and-PowerPoint package line.
   processes its native command, and a single FIFO UI-thread queue preserves Begin-before-terminal ordering across
   callback threads.
 - Made an ordinary text range containing one or more Auto formulas behave like text under Word's native Font Color:
-  Word colours the text and formula drawing characters, then LaTeX Blocks immediately rerenders each changed formula.
+  Word colours the text and formula drawing characters, then LaTeXBlocks immediately rerenders each changed formula.
   A shared range lease preserves the mixed selection across asynchronous replacements without stealing it back after
   the user moves elsewhere.
-- Kept the formula as an exact `InlineShape` selection. On a confirmed colour commit, LaTeX Blocks briefly uses a
+- Kept the formula as an exact `InlineShape` selection. On a confirmed colour commit, LaTeXBlocks briefly uses a
   collapsed caret to read Word's current picker value, restores the exact picture selection, applies the value to the
   drawing run, and queues the SVG refresh. The U+2060 spacing boundaries are never turned into a persistent text
   selection, so copy, arrow navigation, and picture handles retain normal Word behavior.
@@ -771,7 +954,7 @@ Word-and-PowerPoint package line.
 
 ### Word
 
-- Fixed-width ordinary LaTeX Blocks now use one resize/reflow contract whether Word keeps them in line with text or
+- Fixed-width ordinary LaTeXBlocks now use one resize/reflow contract whether Word keeps them in line with text or
   exposes them as a floating object under any wrapping mode. Changing either outer-frame axis rerenders the TeX box
   and rebuilds an exact SVG viewport rather than persisting a Word image-scale transform.
 - Native resize commits now begin at Word's mouse-capture end (mouse-up), via a process-scoped WinEvent whose callback
@@ -783,7 +966,7 @@ Word-and-PowerPoint package line.
 
 ### Word
 
-- Floating fixed-width LaTeX Blocks now persist an exact SVG frame separately from their TeX layout width. Native
+- Floating fixed-width LaTeXBlocks now persist an exact SVG frame separately from their TeX layout width. Native
   frame changes are rerendered and reframed without stretching TeX artwork; a width change derives a fresh measure,
   while a height-only change preserves the measure and clips or adds viewport space as needed.
 - Added **Reflow Frame** for the selected floating Block. Word has no shape-resize event, so the same operation is
@@ -793,7 +976,7 @@ Word-and-PowerPoint package line.
 
 ### Word
 
-- Fixed-width LaTeX Blocks remain editable after Word Layout Options converts them to floating SVG objects. Editing
+- Fixed-width LaTeXBlocks remain editable after Word Layout Options converts them to floating SVG objects. Editing
   preserves their floating position, relative frame, wrapping, margins, supported object formatting, and metadata.
 
 ## [0.2.29] — 2026-08-05

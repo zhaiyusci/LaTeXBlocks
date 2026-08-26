@@ -1,4 +1,4 @@
-# LaTeX Blocks brand assets
+# LaTeXBlocks brand assets
 
 `latex-blocks-icon.png` is the canonical 1024 × 1024 transparent product mark.
 Its visible artwork reaches every canvas edge; do not add baked-in transparent

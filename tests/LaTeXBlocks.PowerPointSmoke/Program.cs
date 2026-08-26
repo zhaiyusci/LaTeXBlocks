@@ -7,6 +7,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.RegularExpressions;
 using LaTeXBlocks.PowerPoint;
+using LaTeXBlocks.OfficeColor;
 using Office = Microsoft.Office.Core;
 using PowerPointInterop = Microsoft.Office.Interop.PowerPoint;
 
@@ -23,7 +24,7 @@ namespace LaTeXBlocks.PowerPointSmoke
                     throw new InvalidOperationException(
                         "Close PowerPoint before running the PowerPoint smoke test.");
                 Run();
-                Console.WriteLine("LaTeX Blocks PowerPoint smoke test passed.");
+                Console.WriteLine("LaTeXBlocks PowerPoint smoke test passed.");
                 return 0;
             }
             catch (Exception exception)
@@ -35,6 +36,15 @@ namespace LaTeXBlocks.PowerPointSmoke
 
         private static void Run()
         {
+            var theme = OfficeGraphicColor.FromTheme(OfficeThemeColor.Accent2,
+                OfficeColorTransform.Tint(0.4f));
+            var texColor = TeXColor.Explicit(Color.FromArgb(20, 40, 60));
+            Assert(theme.Kind == OfficeGraphicColorKind.Theme &&
+                   theme.Theme == OfficeThemeColor.Accent2 &&
+                   theme.Transform.Kind == OfficeColorTransformKind.Tint &&
+                   Math.Abs(theme.Transform.Amount - 0.4f) < 0.000001f &&
+                   texColor.Kind == TeXColorKind.ExplicitRgb,
+                "PowerPoint did not consume the shared Office/TeX colour model.");
             var ribbonXml = PowerPointRibbonContract.BuildCustomUi();
             Assert(ribbonXml.IndexOf("id=\"LaTeXBlocks.PowerPoint.Insert\"", StringComparison.Ordinal) >= 0 &&
                    ribbonXml.IndexOf("getImage=\"GetCommandImage\"", StringComparison.Ordinal) >= 0,
@@ -42,6 +52,11 @@ namespace LaTeXBlocks.PowerPointSmoke
             Assert(ribbonXml.IndexOf("id=\"LaTeXBlocks.PowerPoint.About\"", StringComparison.Ordinal) >= 0 &&
                    ribbonXml.IndexOf("onAction=\"OnAbout\"", StringComparison.Ordinal) >= 0,
                 "The PowerPoint Ribbon does not expose the About dialog.");
+            Assert(ribbonXml.IndexOf("id=\"LaTeXBlocks.PowerPoint.TeXLive\"", StringComparison.Ordinal) >= 0 &&
+                   ribbonXml.IndexOf("onAction=\"OnConfigureTexLive\"", StringComparison.Ordinal) >= 0 &&
+                   ribbonXml.IndexOf("id=\"LaTeXBlocks.PowerPoint.ProfileCreator\"", StringComparison.Ordinal) >= 0 &&
+                   ribbonXml.IndexOf("onAction=\"OnProfileCreator\"", StringComparison.Ordinal) >= 0,
+                "The PowerPoint Ribbon does not expose TeX Live configuration and Profile Creator.");
             var ribbonDocument = new System.Xml.XmlDocument();
             ribbonDocument.LoadXml(ribbonXml);
             Assert(ribbonXml.IndexOf(PowerPointRibbonContract.FontSizeControlId,
@@ -56,6 +71,29 @@ namespace LaTeXBlocks.PowerPointSmoke
                    !PowerPointRibbonContract.TryParseFontSize("0", out _) &&
                    !PowerPointRibbonContract.TryParseFontSize("not-a-size", out _),
                 "The PowerPoint TeX font-size control did not validate point sizes.");
+            var texLiveRoot = StemTeXInstallation.ResolveTexLiveRoot();
+            string normalizedTexLiveRoot;
+            Assert(Directory.Exists(Path.Combine(texLiveRoot, "texmf-dist", "web2c")) &&
+                   string.Equals(StemTeXInstallation.UserProfilesRoot,
+                       Path.Combine(Environment.GetFolderPath(
+                           Environment.SpecialFolder.LocalApplicationData),
+                           "LaTeXBlocks", "profiles"),
+                       StringComparison.OrdinalIgnoreCase) &&
+                   StemTeXInstallation.TryNormalizeTexLiveRoot(texLiveRoot,
+                       out normalizedTexLiveRoot) &&
+                   string.Equals(normalizedTexLiveRoot, texLiveRoot,
+                       StringComparison.OrdinalIgnoreCase) &&
+                   StemTeXInstallation.TryNormalizeTexLiveRoot(
+                       Path.Combine(texLiveRoot, "texmf-dist"), out normalizedTexLiveRoot) &&
+                   string.Equals(normalizedTexLiveRoot, texLiveRoot,
+                       StringComparison.OrdinalIgnoreCase) &&
+                   StemTeXInstallation.TryNormalizeTexLiveRoot(
+                       Path.Combine(texLiveRoot, "texmf-dist", "web2c"),
+                       out normalizedTexLiveRoot) &&
+                   string.Equals(normalizedTexLiveRoot, texLiveRoot,
+                       StringComparison.OrdinalIgnoreCase) &&
+                   StemTeXInstallation.RequiredRuntimeVersion >= new Version(0, 13, 0),
+                "LaTeXBlocks did not normalize the accepted system TeX Live directory forms for StemTeX 0.13.");
             Assert(LaTeXBlockEditorForm.IsTransientPreviewNavigationFailure(
                        new COMException("busy", unchecked((int)0x8001010A))) &&
                    LaTeXBlockEditorForm.IsTransientPreviewNavigationFailure(
@@ -285,10 +323,9 @@ namespace LaTeXBlocks.PowerPointSmoke
                     "The PowerPoint TeX wrapper did not establish stable outer text-line metrics.");
                 var fixedBoxWrapper = styledStyle.WrapSource(styledSource, inheritedSize,
                     true, 200, 80);
-                Assert(fixedBoxWrapper.IndexOf("\\color[HTML]{183766}",
+                Assert(fixedBoxWrapper.IndexOf("\\special{color push rgb 0.094118 0.215686 0.4}",
                            StringComparison.Ordinal) >= 0 &&
-                       fixedBoxWrapper.IndexOf("\\colorbox[HTML]{F1F5FF}",
-                           StringComparison.Ordinal) >= 0 &&
+                       fixedBoxWrapper.IndexOf("\\colorbox", StringComparison.Ordinal) < 0 &&
                        fixedBoxWrapper.IndexOf(styledSource + "%\r\n",
                            StringComparison.Ordinal) >= 0,
                     "A fixed PowerPoint Block did not pass its exact source and colours to TeX.");
@@ -354,7 +391,7 @@ namespace LaTeXBlocks.PowerPointSmoke
                 Assert(displayWrapper.IndexOf("\\noindent\\strut", StringComparison.Ordinal) < 0 &&
                        displayWrapper.IndexOf("\\setbox\\strutbox", StringComparison.Ordinal) < 0 &&
                        displayWrapper.IndexOf("\\color{latexblocksforeground}", StringComparison.Ordinal) < 0 &&
-                       displayWrapper.IndexOf("\\setlength{\\parindent}{0pt}",
+                       displayWrapper.IndexOf("\\global\\PreviewBorder=0pt",
                            StringComparison.Ordinal) >= 0,
                     "A display-style Block did not remain clean inside the shared TeX layout box.");
                 var bareDisplayResult = backend.RenderQueuedAsync(profile,
@@ -364,10 +401,20 @@ namespace LaTeXBlocks.PowerPointSmoke
                     typographicBoxStyle, 180, null);
                 var styledDisplayRender = service.RenderPreviewAsync("\\[E=mc^2\\]", 180, profile,
                     inheritedSize, typographicBoxStyle, null, null, true).GetAwaiter().GetResult();
-                Assert(Math.Abs(PowerPointBlockService.ReadSvgWidthPt(expectedDisplaySvg) -
-                                PowerPointBlockService.ReadSvgWidthPt(styledDisplayRender.SvgBytes)) < 0.05 &&
-                       Math.Abs(PowerPointBlockService.ReadSvgHeightPt(expectedDisplaySvg) -
-                                PowerPointBlockService.ReadSvgHeightPt(styledDisplayRender.SvgBytes)) < 0.05,
+                var expectedDisplayWidth =
+                    PowerPointBlockService.ReadSvgWidthPt(expectedDisplaySvg);
+                var expectedDisplayHeight =
+                    PowerPointBlockService.ReadSvgHeightPt(expectedDisplaySvg);
+                var styledDisplayWidth = PowerPointBlockService.ReadSvgWidthPt(
+                    styledDisplayRender.SvgBytes);
+                var styledDisplayHeight = PowerPointBlockService.ReadSvgHeightPt(
+                    styledDisplayRender.SvgBytes);
+                Console.WriteLine("PowerPoint display geometry: bare=" +
+                    expectedDisplayWidth + "x" + expectedDisplayHeight +
+                    "pt, styled=" + styledDisplayWidth + "x" +
+                    styledDisplayHeight + "pt");
+                Assert(Math.Abs(expectedDisplayWidth - styledDisplayWidth) < 0.05 &&
+                       Math.Abs(expectedDisplayHeight - styledDisplayHeight) < 0.05,
                     "A display-style Block changed size merely because typographic text-line metrics were enabled.");
                 var displayRoot = Regex.Match(Encoding.UTF8.GetString(styledDisplayRender.SvgBytes),
                     "<svg\\b[^>]*>", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant).Value;

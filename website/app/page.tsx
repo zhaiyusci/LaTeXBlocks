@@ -5,9 +5,9 @@ export default function Home() {
   return (
     <main>
       <nav className="nav shell" aria-label="Primary navigation">
-        <a className="brand" href="#top" aria-label="LaTeX Blocks home">
+        <a className="brand" href="#top" aria-label="LaTeXBlocks home">
           <img src="/brand-icon.png" alt="" width="42" height="42" />
-          <span>LaTeX Blocks</span>
+          <span>LaTeXBlocks</span>
         </a>
         <div className="navLinks">
           <a href="#features">Features</a>
@@ -39,11 +39,11 @@ export default function Home() {
       <figure className="productScreenshot shell">
         <img
           src="/word-overview.png"
-          alt="LaTeX Blocks running in Microsoft Word, showing its ribbon commands and inline, display, and numbered LaTeX objects in a document."
+          alt="LaTeXBlocks running in Microsoft Word, showing its ribbon commands and inline, display, and numbered LaTeX objects in a document."
           width="1908"
           height="607"
         />
-        <figcaption>LaTeX Blocks in Microsoft Word</figcaption>
+        <figcaption>LaTeXBlocks in Microsoft Word</figcaption>
       </figure>
 
       <section className="trustStrip" id="features">
@@ -134,14 +134,14 @@ export default function Home() {
 
       <section className="downloadSection">
         <div className="shell downloadCard">
-          <img src="/brand-icon.png" width="96" height="96" alt="LaTeX Blocks" />
-          <div><span className="kicker">Ready to typeset?</span><h2>Make LaTeX part of your Office workflow.</h2><p>One self-contained installer for 64-bit Word and PowerPoint on Windows.</p></div>
-          <a className="button downloadButton" href={downloadUrl}>Get LaTeX Blocks <span>↓</span></a>
+          <img src="/brand-icon.png" width="96" height="96" alt="LaTeXBlocks" />
+          <div><span className="kicker">Ready to typeset?</span><h2>Make LaTeX part of your Office workflow.</h2><p>One installer for 64-bit Word and PowerPoint on Windows. Uses your system TeX Live tree.</p></div>
+          <a className="button downloadButton" href={downloadUrl}>Get LaTeXBlocks <span>↓</span></a>
         </div>
       </section>
 
       <footer className="footer shell">
-        <a className="brand" href="#top"><img src="/brand-icon.png" alt="" width="34" height="34" /><span>LaTeX Blocks</span></a>
+        <a className="brand" href="#top"><img src="/brand-icon.png" alt="" width="34" height="34" /><span>LaTeXBlocks</span></a>
         <p>Editable LaTeX for Microsoft Office.</p>
         <div><a href={repositoryUrl}>GitHub</a><a href={`${repositoryUrl}#documentation`}>Documentation</a><a href={`${repositoryUrl}/issues`}>Issues</a></div>
       </footer>

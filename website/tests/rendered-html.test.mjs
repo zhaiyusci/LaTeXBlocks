@@ -12,19 +12,19 @@ async function render() {
   );
 }
 
-test("server-renders the LaTeX Blocks product homepage", async () => {
+test("server-renders the LaTeXBlocks product homepage", async () => {
   const response = await render();
   assert.equal(response.status, 200);
   assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
   const html = await response.text();
-  assert.match(html, /<title>LaTeX Blocks — Editable LaTeX for Microsoft Office<\/title>/i);
+  assert.match(html, /<title>LaTeXBlocks — Editable LaTeX for Microsoft Office<\/title>/i);
   assert.match(html, /Rendered as you work/);
   assert.match(html, /Real-time rendering by StemTeX/);
   assert.match(html, /Instant feedback, real TeX/);
   assert.match(html, /Right at home in Word/);
   assert.match(html, /Make LaTeX part of your Office workflow/);
   assert.match(html, /word-overview\.png/);
-  assert.match(html, /LaTeX Blocks in Microsoft Word/);
+  assert.match(html, /LaTeXBlocks in Microsoft Word/);
   assert.doesNotMatch(html, /productStage|modelCard|sourceDiagram|stepVisual/);
   assert.doesNotMatch(html, /UI screenshot|Office frame[^<]*diagram/i);
   assert.doesNotMatch(html, /og\.png|twitter:image|og:image/);

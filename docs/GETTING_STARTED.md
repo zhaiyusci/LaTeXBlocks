@@ -1,6 +1,6 @@
 # Getting Started
 
-LaTeX Blocks is a Windows desktop VSTO project. A development build is deliberately separate from the installed
+LaTeXBlocks is a Windows desktop VSTO project. A development build is deliberately separate from the installed
 product: building does not change the Office add-in registration. Register a build explicitly only when you want
 Word or PowerPoint to load it.
 
@@ -12,11 +12,14 @@ Word or PowerPoint to load it.
   currently expect MSBuild at `C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\MSBuild.exe`.
 - The .NET Framework 4.8 and Visual Studio Tools for Office runtime to load an add-in in Office.
 - PowerShell 7 (`pwsh.exe`) for the commands below.
+- A system TeX Live tree containing `texmf-dist` and `texmf-dist\web2c` (for example `C:\texlive\2026`). The Ribbon's
+  **TeX Live...** command stores a custom location under the current user's LaTeXBlocks settings.
 - A usable StemTeX installation. For development and publishing, the expected staged distribution is
-  `..\xetex\stemtex\dist\stemtex-installer\StemTeX` relative to this repository. It must include the x64 runtime and
-  the profiles required by the package, including `xits_cjk` and `arial_lete_simhei`.
+  `..\xetex\stemtex\dist\package-stage\StemTeX-0.13.0` relative to this repository. It must be StemTeX 0.13 or newer
+  and include the x64 runtime, `stemtex-profile-creator.exe`, its native profile SDK, and the `unicodemath` profile.
 
-The release installer bundles StemTeX, the VSTO manifests, and the VC++ x64 runtime. A source checkout does not.
+The release installer bundles StemTeX's patched engine runtime and Profile Creator, the VSTO manifests, and the VC++
+x64 runtime. It intentionally does not bundle TeX Live's package/font tree.
 
 ## Initialize local signing
 
@@ -26,7 +29,7 @@ From the repository root, run:
 pwsh.exe -NoProfile -File .\scripts\Initialize-LaTeXBlocks.ps1
 ```
 
-The script creates or reuses a current-user `CN=LaTeX Blocks Development` code-signing certificate, trusts it in the
+The script creates or reuses a current-user `CN=LaTeXBlocks Development` code-signing certificate, trusts it in the
 current user's `TrustedPublisher` store, and writes the certificate thumbprint to a development props file for each
 add-in. Those props files are ignored by Git and must remain local.
 
@@ -50,7 +53,7 @@ pwsh.exe -NoProfile -File .\scripts\Register-LaTeXBlocks.ps1 -Configuration Debu
 
 `-TargetHost` accepts `Word`, `PowerPoint`, or `Both`. The registration is per-user and points the corresponding
 Office host at the local `.vsto` manifest with `|vstolocal`. Reopen the selected host after registration and use the
-**LaTeX Blocks** Ribbon tab.
+**LaTeXBlocks** Ribbon tab.
 
 For example, to work only on Word:
 

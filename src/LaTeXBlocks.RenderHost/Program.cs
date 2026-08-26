@@ -46,12 +46,12 @@ namespace LaTeXBlocks.RenderHost
 
                 var pipeName = PipePrefix + nonce;
                 TryAttachProcessLifetimeJob();
-                Console.WriteLine("LaTeX Blocks render host listening on {0}.", pipeName);
+                Console.WriteLine("LaTeXBlocks render host listening on {0}.", pipeName);
                 return Serve(pipeName);
             }
             catch (Exception exception)
             {
-                Console.Error.WriteLine("LaTeX Blocks render host failed: {0}", exception.Message);
+                Console.Error.WriteLine("LaTeXBlocks render host failed: {0}", exception.Message);
                 return 1;
             }
         }

@@ -11,7 +11,7 @@ export async function generateMetadata(): Promise<Metadata> {
   const host = incoming.get("x-forwarded-host") ?? incoming.get("host") ?? "localhost:3000";
   const protocol = incoming.get("x-forwarded-proto") ?? (host.startsWith("localhost") ? "http" : "https");
   const origin = `${protocol}://${host}`;
-  const title = "LaTeX Blocks — Editable LaTeX for Microsoft Office";
+  const title = "LaTeXBlocks — Editable LaTeX for Microsoft Office";
   const description = "Create editable, portable LaTeX blocks in Microsoft Word and PowerPoint.";
   return {
     metadataBase: new URL(origin), title, description,

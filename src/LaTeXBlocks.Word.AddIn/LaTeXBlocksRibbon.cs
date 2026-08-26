@@ -29,7 +29,7 @@ namespace LaTeXBlocks.Word
         internal static string BuildCustomUi()
         {
             return "<customUI xmlns=\"http://schemas.microsoft.com/office/2009/07/customui\" onLoad=\"OnLoad\">" +
-                   "<ribbon><tabs><tab id=\"LaTeXBlocks.Tab\" label=\"LaTeX Blocks\">" +
+                   "<ribbon><tabs><tab id=\"LaTeXBlocks.Tab\" label=\"LaTeXBlocks\">" +
                    "<group id=\"LaTeXBlocks.Blocks\" label=\"LaTeX\">" +
                    "<button id=\"LaTeXBlocks.InsertFormula\" label=\"Inline Math\" size=\"large\" getImage=\"GetCommandImage\" onAction=\"OnInsertFormula\"/>" +
                    "<button id=\"LaTeXBlocks.InsertDisplayMath\" label=\"Display Math\" size=\"large\" getImage=\"GetCommandImage\" onAction=\"OnInsertDisplayMath\"/>" +
@@ -47,7 +47,10 @@ namespace LaTeXBlocks.Word
                    "\" label=\"Don't Expand Shift+Enter Lines\" getEnabled=\"GetDontExpandShiftEnterEnabled\" getPressed=\"GetDontExpandShiftEnterPressed\" onAction=\"OnDontExpandShiftEnter\"/>" +
                    "<editBox id=\"" + WidthControlId +
                    "\" label=\"Typesetting width (pt)\" sizeString=\"000.0\" getText=\"GetWidthText\" getEnabled=\"GetWidthEnabled\" onChange=\"OnWidthChanged\"/>" +
-                   "</group><group id=\"LaTeXBlocks.AboutGroup\" label=\"LaTeX Blocks\">" +
+                   "</group><group id=\"LaTeXBlocks.StemTeX\" label=\"StemTeX\">" +
+                   "<button id=\"LaTeXBlocks.TeXLive\" label=\"TeX Live...\" imageMso=\"FileOpen\" onAction=\"OnConfigureTexLive\"/>" +
+                   "<button id=\"LaTeXBlocks.ProfileCreator\" label=\"Profile Creator\" imageMso=\"NewStyles\" onAction=\"OnProfileCreator\"/>" +
+                   "</group><group id=\"LaTeXBlocks.AboutGroup\" label=\"LaTeXBlocks\">" +
                    "<button id=\"LaTeXBlocks.About\" label=\"About\" imageMso=\"Info\" onAction=\"OnAbout\"/>" +
                    "</group></tab></tabs></ribbon></customUI>";
         }
@@ -67,6 +70,8 @@ namespace LaTeXBlocks.Word
         public void OnUpdateEquationNumbers(Office.IRibbonControl control) { Run(addIn.UpdateEquationNumbers); }
         public void OnCopyAsLaTeX(Office.IRibbonControl control) { Run(addIn.CopySelectionAsLaTeX); }
         public void OnPasteFromLaTeX(Office.IRibbonControl control) { Run(addIn.PasteFromLaTeX); }
+        public void OnConfigureTexLive(Office.IRibbonControl control) { Run(addIn.ConfigureTexLiveRoot); }
+        public void OnProfileCreator(Office.IRibbonControl control) { Run(addIn.ShowProfileCreator); }
         public void OnAbout(Office.IRibbonControl control) { Run(addIn.ShowAbout); }
         public bool GetDontExpandShiftEnterEnabled(Office.IRibbonControl control)
         {
@@ -118,7 +123,7 @@ namespace LaTeXBlocks.Word
             try { action(); }
             catch (Exception exception)
             {
-                MessageBox.Show(new WordWindow(addIn.WordApplication), exception.Message, "LaTeX Blocks", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show(new WordWindow(addIn.WordApplication), exception.Message, "LaTeXBlocks", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
             finally { InvalidateWidthControl(); }
         }

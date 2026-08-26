@@ -26,4 +26,4 @@ The script also exports a Word-produced PDF proof beside the document. Its
 `artifacts/` directory is disposable; the DOCX contains embedded copies of the
 generated assets.
 
-This is sample-only code. It does not load or modify the LaTeX Blocks add-in.
+This is sample-only code. It does not load or modify the LaTeXBlocks add-in.

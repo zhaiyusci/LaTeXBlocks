@@ -1,6 +1,6 @@
-# LaTeX Blocks homepage
+# LaTeXBlocks homepage
 
-The product homepage for LaTeX Blocks, built with vinext and the OpenAI Sites
+The product homepage for LaTeXBlocks, built with vinext and the OpenAI Sites
 runtime. Content lives in `app/page.tsx`; the visual system is in
 `app/globals.css`.
 

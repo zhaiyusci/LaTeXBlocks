@@ -50,7 +50,7 @@ namespace LaTeXBlocks.Branding
 
         internal AboutForm(string hostName)
         {
-            Text = "About LaTeX Blocks";
+            Text = "About LaTeXBlocks";
             StartPosition = FormStartPosition.CenterParent;
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = false;
@@ -75,7 +75,7 @@ namespace LaTeXBlocks.Branding
                 Font = new Font(Font.FontFamily, 20F, FontStyle.Bold),
                 ForeColor = Color.FromArgb(9, 43, 112),
                 Location = new Point(230, 30),
-                Text = "LaTeX Blocks"
+                Text = "LaTeXBlocks"
             };
             var tagline = new Label
             {

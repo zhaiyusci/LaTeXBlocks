@@ -37,7 +37,7 @@ namespace LaTeXBlocks.Word
     // dedicated FIFO worker thread for create/render/destroy.
     internal sealed class StemTeXBackend : IStemTeXBackend
     {
-        internal const string DefaultProfile = "xits_cjk";
+        internal const string DefaultProfile = "unicodemath";
         private readonly object gate = new object();
         private readonly Queue<BackendWorkItem> queue = new Queue<BackendWorkItem>();
         private readonly AutoResetEvent wake = new AutoResetEvent(false);
@@ -76,7 +76,7 @@ namespace LaTeXBlocks.Word
             profiles = StemTeXRenderer.DiscoverProfiles();
             if (profiles.Length == 0) throw new InvalidOperationException("StemTeX has no usable profiles.");
             using (var probe = new StemTeXRenderer(DefaultAvailableProfile)) stemTeXHome = probe.StemTeXHome;
-            worker = new Thread(WorkerLoop) { IsBackground = true, Name = "LaTeX Blocks StemTeX worker" };
+            worker = new Thread(WorkerLoop) { IsBackground = true, Name = "LaTeXBlocks StemTeX worker" };
             worker.Start();
         }
 
@@ -571,7 +571,7 @@ namespace LaTeXBlocks.Word
             })
             {
                 IsBackground = true,
-                Name = "LaTeX Blocks StemTeX shutdown reaper"
+                Name = "LaTeXBlocks StemTeX shutdown reaper"
             };
             try { reaper.Start(); } catch { }
         }

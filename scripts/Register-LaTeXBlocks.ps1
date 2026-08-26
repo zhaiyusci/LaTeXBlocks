@@ -27,16 +27,16 @@ if ($TargetHost -in @('PowerPoint', 'Both')) {
 foreach ($target in $targets) {
     $manifest = Join-Path $root "src\$($target.Project)\bin\$Configuration\$($target.Project).vsto"
     if (-not (Test-Path -LiteralPath $manifest)) {
-        throw "Build LaTeX Blocks before registering $($target.Host): $manifest"
+        throw "Build LaTeXBlocks before registering $($target.Host): $manifest"
     }
     $key = "HKCU:\Software\Microsoft\Office\$($target.RegistryHost)\Addins\$($target.Project)"
     if (-not (Test-Path -LiteralPath $key)) { [void](New-Item -Path $key -Force) }
     $uri = ([Uri](Resolve-Path -LiteralPath $manifest).Path).AbsoluteUri + '|vstolocal'
-    Set-ItemProperty -LiteralPath $key -Name FriendlyName -Value 'LaTeX Blocks'
+    Set-ItemProperty -LiteralPath $key -Name FriendlyName -Value 'LaTeXBlocks'
     Set-ItemProperty -LiteralPath $key -Name Description -Value $target.Description
     Set-ItemProperty -LiteralPath $key -Name LoadBehavior -Type DWord -Value 3
     Set-ItemProperty -LiteralPath $key -Name Manifest -Value $uri
-    Write-Output "Registered LaTeX Blocks for $($target.Host): $uri"
+    Write-Output "Registered LaTeXBlocks for $($target.Host): $uri"
     if (Get-Process $target.Process -ErrorAction SilentlyContinue) {
         Write-Warning "Close every $($target.Host) window and reopen it to load this build."
     }

@@ -6,7 +6,7 @@ This document defines the intentionally narrower PowerPoint host. The common ren
 
 ## Product boundary
 
-The PowerPoint host supports LaTeX Blocks only. A block is one positioned slide object whose visual content is a
+The PowerPoint host supports LaTeXBlocks only. A block is one positioned slide object whose visual content is a
 self-contained SVG rendered by StemTeX and whose Alternative Text contains the authoritative LaTeX source.
 
 PowerPoint does not receive an inline-math mode. In particular, the PowerPoint add-in does not:
@@ -35,13 +35,13 @@ parts of that one shape:
 | --- | --- |
 | Display | Embedded, self-contained SVG |
 | Authoritative source | Shape Alternative Text |
-| Identification and renderer metadata | Shape title plus a dedicated LaTeX Blocks shape tag |
+| Identification and renderer metadata | Shape title plus a dedicated LaTeXBlocks shape tag |
 | Block style | A versioned PowerPoint style tag plus an explicit-style marker |
 | Placement and size | Native PowerPoint host-frame geometry; the SVG content remains 1:1 inside that frame |
 
 Selecting a recognized block and invoking **Edit LaTeX Block** reopens its source. A successful render replaces the SVG
 atomically while preserving the shape's slide position, rotation, z-order, and stable identity. Ordinary pictures,
-MathType objects, and other shapes are never inferred to be LaTeX Blocks merely because they contain SVG or Alternative
+MathType objects, and other shapes are never inferred to be LaTeXBlocks merely because they contain SVG or Alternative
 Text.
 
 Layout width, host-frame geometry, and TeX design size have separate meanings. A new block starts at StemTeX's

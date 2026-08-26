@@ -50,6 +50,9 @@
     <Compile Include="PipeProtocol.cs" />
     <Compile Include="Program.cs" />
     <Compile Include="RenderHostEngine.cs" />
+    <Compile Include="..\LaTeXBlocks.Shared\StemTeXInstallation.cs">
+      <Link>StemTeXInstallation.cs</Link>
+    </Compile>
     <!-- Compile the renderer implementation into this standalone process.  The
          source files themselves remain owned by the add-in project; POWERPOINT
          merely selects their Office-free conditional namespace. -->

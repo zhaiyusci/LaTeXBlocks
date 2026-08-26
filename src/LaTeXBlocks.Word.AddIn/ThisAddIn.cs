@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
 using System.Reflection;
 using System.Runtime.InteropServices;
@@ -31,6 +32,7 @@ namespace LaTeXBlocks.Word
         private Control wordUiDispatcher;
         private WordMouseCaptureMonitor wordMouseCaptureMonitor;
         private IWordFormatInteractionSource wordFormatInteractionSource;
+        private Process profileCreatorProcess;
         private PendingFontColorInteraction pendingFontColorInteraction;
         private WordInterop.ApplicationEvents4_Event applicationEvents;
         private LaTeXBlocksRibbon ribbon;
@@ -88,6 +90,9 @@ namespace LaTeXBlocks.Word
 
         private void ThisAddIn_Startup(object sender, EventArgs e)
         {
+            ColorSyncDiagnostics.StartSession(
+                typeof(ThisAddIn).Assembly.GetName().Version.ToString());
+            var backendAttempted = false;
             try
             {
                 wordUiDispatcher = new Control();
@@ -107,6 +112,7 @@ namespace LaTeXBlocks.Word
                     RememberSelection(Application.Selection);
                 }
 
+                backendAttempted = true;
                 var pool = Renderers;
                 currentProfile = LoadCurrentProfile(pool);
                 var startupProfile = currentProfile;
@@ -134,7 +140,10 @@ namespace LaTeXBlocks.Word
             {
                 backendStartupError = exception.Message;
                 backendStatus = "failed";
-                ReleaseHostResources();
+                // A missing/invalid system TeX Live tree is recoverable from the
+                // Ribbon. Keep the already-created Office dispatcher and event sinks
+                // alive so the user can configure it without restarting Word.
+                if (!backendAttempted) ReleaseHostResources();
             }
         }
 
@@ -194,6 +203,10 @@ namespace LaTeXBlocks.Word
             rendererPool = null;
             blocks = null;
             RunBestEffortCleanup(() => pool?.Dispose());
+
+            var creator = profileCreatorProcess;
+            profileCreatorProcess = null;
+            RunBestEffortCleanup(() => creator?.Dispose());
 
             var dispatcher = wordUiDispatcher;
             wordUiDispatcher = null;
@@ -274,9 +287,11 @@ namespace LaTeXBlocks.Word
                     WordFormatInteractionSource_FormatInteraction;
                 wordFormatInteractionSource.Start();
                 UpdateNativeFormatMonitorContext(Application.Selection);
+                ColorSyncDiagnostics.Write("addin.monitor", "attached");
             }
-            catch
+            catch (Exception exception)
             {
+                ColorSyncDiagnostics.Exception("addin.monitor", exception);
                 DetachWordFontColorMonitor();
             }
         }
@@ -344,9 +359,20 @@ namespace LaTeXBlocks.Word
         private void WordFormatInteractionSource_FormatInteraction(object sender,
             WordFormatInteractionEventArgs e)
         {
-            if (e == null || shuttingDown || !hostEventProcessingEnabled ||
-                programmaticMutationDepth > 0 || Application.Documents.Count == 0)
+            if (e == null)
                 return;
+            ColorSyncDiagnostics.Write("addin.event", "id=" + e.InteractionId +
+                " phase=" + e.Phase + " property=" + e.Property +
+                " origin=" + e.Origin + " shuttingDown=" + shuttingDown +
+                " hostEnabled=" + hostEventProcessingEnabled + " mutationDepth=" +
+                programmaticMutationDepth + " documents=" +
+                Application.Documents.Count);
+            if (shuttingDown || !hostEventProcessingEnabled ||
+                programmaticMutationDepth > 0 || Application.Documents.Count == 0)
+            {
+                ColorSyncDiagnostics.Write("addin.event", "ignored-by-guard");
+                return;
+            }
             try
             {
                 if (e.Property == WordFormatProperty.FontSize)
@@ -361,21 +387,28 @@ namespace LaTeXBlocks.Word
                     case WordFormatInteractionPhase.Began:
                         pendingFontColorInteraction =
                             CaptureFontColorInteraction(e.InteractionId);
+                        ColorSyncDiagnostics.Write("addin.begin", "id=" +
+                            e.InteractionId + " captured=" +
+                            (pendingFontColorInteraction != null));
                         break;
                     case WordFormatInteractionPhase.Canceled:
                         if (pendingFontColorInteraction?.InteractionId == e.InteractionId)
                             pendingFontColorInteraction = null;
                         break;
                     case WordFormatInteractionPhase.Committed:
+                        ColorSyncDiagnostics.Write("addin.commit", "id=" +
+                            e.InteractionId + " queued pending=" +
+                            (pendingFontColorInteraction != null));
                         QueueFontColorInteractionCommit(e.InteractionId);
                         break;
                 }
             }
             catch (Exception exception)
             {
+                ColorSyncDiagnostics.Exception("addin.event", exception);
                 pendingFontColorInteraction = null;
                 MessageBox.Show(new LaTeXBlocksRibbon.WordWindow(Application),
-                    exception.GetBaseException().Message, "LaTeX Blocks",
+                    exception.GetBaseException().Message, "LaTeXBlocks",
                     MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
             finally
@@ -400,10 +433,9 @@ namespace LaTeXBlocks.Word
 
         private void QueueFontColorInteractionCommit(long interactionId)
         {
-            // Palette commits are already deferred by WordFontColorMonitor until
-            // after WM_LBUTTONUP has returned to Word. Posting once to the Word UI
-            // queue is therefore the completion boundary. A second fixed delay made
-            // formula Graphics Fill visibly trail the surrounding text colour.
+            // The native gallery has no VSTO callback carrying its selected swatch.
+            // Read the formula's COM ColorFormat after Word has committed the command;
+            // no document serialization belongs on this interaction path.
             _ = CommitFontColorInteractionOnWordUiAsync(interactionId);
         }
 
@@ -411,6 +443,9 @@ namespace LaTeXBlocks.Word
         {
             try
             {
+                // Cross one short UI turn so Word has committed the drawing run's
+                // w:themeTint/w:themeShade before the bounded formula range is read.
+                await Task.Delay(75).ConfigureAwait(false);
                 await InvokeOnWordUiAsync(() =>
                 {
                     if (shuttingDown || !hostEventProcessingEnabled ||
@@ -430,7 +465,7 @@ namespace LaTeXBlocks.Word
                     {
                         pendingFontColorInteraction = null;
                         MessageBox.Show(new LaTeXBlocksRibbon.WordWindow(Application),
-                            exception.GetBaseException().Message, "LaTeX Blocks",
+                            exception.GetBaseException().Message, "LaTeXBlocks",
                             MessageBoxButtons.OK, MessageBoxIcon.Error);
                     }).ConfigureAwait(false);
                 }
@@ -440,73 +475,156 @@ namespace LaTeXBlocks.Word
 
         private PendingFontColorInteraction CaptureFontColorInteraction(long interactionId)
         {
-            if (interactionId <= 0 || previousSelectionRangeLease == null ||
-                !previousSelectionRangeLease.Matches(Application.Selection))
-                return null;
-            try
+            if (interactionId <= 0)
             {
-                // An exact formula selection is an Office Graphic. Its colour is
-                // owned by the native Graphics Fill command, not Font Color.
-                if (Blocks.TryGetExactlySelectedInlineFormula(out _)) return null;
+                ColorSyncDiagnostics.Write("capture", "invalid-id=" + interactionId);
+                return null;
             }
-            catch (COMException) { return null; }
-            var lease = previousSelectionRangeLease.Clone();
-            if (lease == null) return null;
+            var selection = Application.Selection;
+            var rememberedSelectionMatches = previousSelectionRangeLease != null &&
+                previousSelectionRangeLease.Matches(selection);
+            var lease = rememberedSelectionMatches
+                ? previousSelectionRangeLease.Clone()
+                : SelectionRangeLease.Capture(selection);
+            if (lease == null)
+            {
+                ColorSyncDiagnostics.Write("capture", "id=" + interactionId +
+                    " no-selection-lease");
+                return null;
+            }
+            var formulas = rememberedSelectionMatches
+                ? new List<SelectionFontSnapshot>(previousSelectionFontSnapshots)
+                : CaptureSelectionFontSnapshots(selection);
+            ColorSyncDiagnostics.Write("capture", "id=" + interactionId +
+                " rememberedMatch=" + rememberedSelectionMatches +
+                " formulas=" + formulas.Count);
+            if (formulas.Count == 0) return null;
+
+            // Font Color is the natural command when a formula participates in an
+            // ordinary text selection, and users also reasonably invoke it when the
+            // SVG alone is selected. In both cases Word updates only the drawing
+            // character's w:color; LaTeXBlocks must mirror that value to Graphics
+            // Fill so the visible SVG paint follows it.
             return new PendingFontColorInteraction(interactionId, lease,
-                new List<SelectionFontSnapshot>(previousSelectionFontSnapshots));
+                formulas);
         }
 
         private void CommitFontColorInteraction(long interactionId)
         {
             var interaction = pendingFontColorInteraction;
             pendingFontColorInteraction = null;
+            var selectionMatches = interaction != null &&
+                interaction.SelectionLease.Matches(Application.Selection);
+            ColorSyncDiagnostics.Write("commit", "id=" + interactionId +
+                " pending=" + (interaction != null) + " pendingId=" +
+                (interaction == null ? 0 : interaction.InteractionId) +
+                " selectionMatches=" + selectionMatches);
             if (interaction == null || interaction.InteractionId != interactionId ||
-                !interaction.SelectionLease.Matches(Application.Selection))
+                !selectionMatches)
                 return;
+
+            ReconcileFontColorInteraction(interaction);
+        }
+
+        private void ReconcileFontColorInteraction(PendingFontColorInteraction interaction)
+        {
+            if (interaction == null ||
+                !interaction.SelectionLease.Matches(Application.Selection))
+            {
+                ColorSyncDiagnostics.Write("reconcile", "selection-mismatch");
+                return;
+            }
 
             // For a normal text range Word has already written the chosen native
             // colour to each drawing character. Reconcile only the formulas that were
             // present when the interaction began; ordinary text remains entirely
             // owned by Word and no picker probe is needed.
-            var targetTextColor = LaTeXBlockService.ResolveTextColor(
-                Application.Selection);
             LaTeXBlockService.NativeTextColorDescriptor targetNativeTextColor;
-            var hasTargetNativeTextColor = TryCaptureSelectionNativeTextColor(
-                Application.Selection, out targetNativeTextColor);
+            var hasTargetNativeTextColor = TryCaptureDrawingRunNativeTextColor(
+                Application.Selection, interaction.Formulas,
+                out targetNativeTextColor);
+            // If Word has not exposed a coherent semantic colour yet, leave the
+            // Office graphic unchanged. Never guess a theme variant from RGB.
+            if (!hasTargetNativeTextColor)
+            {
+                ColorSyncDiagnostics.Write("reconcile", "native-color-unavailable");
+                return;
+            }
+            ColorSyncDiagnostics.Write("reconcile", "native-kind=" +
+                targetNativeTextColor.Kind + " direct=" +
+                targetNativeTextColor.DirectWordColor + " theme=" +
+                (int)targetNativeTextColor.ThemeColor + " tint=" +
+                targetNativeTextColor.TintAndShade.ToString("R",
+                    CultureInfo.InvariantCulture));
+            var targetTextColor = targetNativeTextColor.Kind ==
+                                  LaTeXBlockService.NativeTextColorKind.Direct
+                ? targetNativeTextColor.DirectWordColor
+                : LaTeXBlockService.AutomaticTextColor;
             var requests = CaptureTextColorRefreshes(interaction.Formulas,
                 interaction.SelectionLease, targetTextColor);
+            ColorSyncDiagnostics.Write("reconcile", "requests=" + requests.Count);
             RememberSelection(Application.Selection);
-            TryApplyExternalColorRequests(requests, hasTargetNativeTextColor
-                ? targetNativeTextColor
-                : (LaTeXBlockService.NativeTextColorDescriptor?)null);
+            var applied = TryApplyExternalColorRequests(requests, targetNativeTextColor);
+            ColorSyncDiagnostics.Write("reconcile", "applied=" + applied);
         }
 
-        private static bool TryCaptureSelectionNativeTextColor(
+        private static bool TryCaptureDrawingRunNativeTextColor(
             WordInterop.Selection selection,
+            IList<SelectionFontSnapshot> formulas,
             out LaTeXBlockService.NativeTextColorDescriptor descriptor)
         {
             descriptor = LaTeXBlockService.NativeTextColorDescriptor.Automatic;
-            if (selection == null) return false;
-            if (LaTeXBlockService.NativeTextColorDescriptor.TryCapture(
-                    selection.Range, out descriptor))
-                return true;
-
-            WordInterop.Range insertion = null;
+            WordInterop.Range commandRange = null;
             try
             {
-                insertion = selection.Range.Duplicate;
-                insertion.Collapse(WordInterop.WdCollapseDirection.wdCollapseStart);
-                return LaTeXBlockService.NativeTextColorDescriptor.TryCapture(
-                    insertion, out descriptor);
+                commandRange = selection?.Range;
+                if (commandRange != null &&
+                    LaTeXBlockService.TryParseNativeTextColorFromWordOpenXml(
+                        commandRange.WordOpenXML, out descriptor))
+                {
+                    ColorSyncDiagnostics.Write("native-color",
+                        "source=selection-drawing-run kind=" + descriptor.Kind +
+                        " theme=" + (int)descriptor.ThemeColor + " tint=" +
+                        descriptor.TintAndShade.ToString("R",
+                            CultureInfo.InvariantCulture));
+                    return true;
+                }
             }
-            catch (COMException)
+            catch (COMException exception)
             {
-                return false;
+                ColorSyncDiagnostics.Exception("native-color.selection", exception);
             }
             finally
             {
-                if (insertion != null) Marshal.ReleaseComObject(insertion);
+                if (commandRange != null) Marshal.ReleaseComObject(commandRange);
             }
+            if (formulas == null) return false;
+            foreach (var formula in formulas)
+            {
+                if (formula?.Shape == null) continue;
+                WordInterop.Range shapeRange = null;
+                try
+                {
+                    shapeRange = formula.Shape.Range;
+                    ColorSyncDiagnostics.Write("native-color.raw",
+                        WordGraphicColorAdapter.DescribeFontForDiagnostics(shapeRange));
+                    if (LaTeXBlockService.NativeTextColorDescriptor.TryCapture(
+                            shapeRange, out descriptor))
+                    {
+                        ColorSyncDiagnostics.Write("native-color", "source=com kind=" +
+                            descriptor.Kind + " theme=" +
+                            (int)descriptor.ThemeColor + " tint=" +
+                            descriptor.TintAndShade.ToString("R",
+                                CultureInfo.InvariantCulture));
+                        return true;
+                    }
+                }
+                finally
+                {
+                    if (shapeRange != null) Marshal.ReleaseComObject(shapeRange);
+                }
+            }
+            return false;
         }
 
         private bool TryApplyExternalColorRequests(
@@ -514,7 +632,12 @@ namespace LaTeXBlocks.Word
             LaTeXBlockService.NativeTextColorDescriptor? targetNativeTextColor = null)
         {
             if (shuttingDown || requests == null || requests.Count == 0)
+            {
+                ColorSyncDiagnostics.Write("apply-requests", "rejected initial count=" +
+                    (requests == null ? -1 : requests.Count) + " shuttingDown=" +
+                    shuttingDown);
                 return false;
+            }
             var updates = new List<LaTeXBlockColorUpdate>(requests.Count);
             foreach (var request in requests)
             {
@@ -525,16 +648,31 @@ namespace LaTeXBlocks.Word
                     !LaTeXBlockService.TryReadContract(shape, out var metadata,
                         out var source) || source != request.Source ||
                     !SameMetadataState(metadata, request.Metadata))
+                {
+                    ColorSyncDiagnostics.Write("apply-requests", "rejected request shape=" +
+                        request.ShapeKey + " text=" + request.ChangesTextColor +
+                        " size=" + request.ChangesFontSize + " width=" +
+                        request.ChangesWidth + " previous=" +
+                        request.PreviousTextColor.HasValue);
                     return false;
+                }
+                var nativeTextColor = targetNativeTextColor;
+                if (!nativeTextColor.HasValue &&
+                    LaTeXBlockService.NativeTextColorDescriptor.TryCapture(
+                        shape.Range, out var shapeNativeTextColor))
+                    nativeTextColor = shapeNativeTextColor;
                 updates.Add(new LaTeXBlockColorUpdate(shape, request.TextColor,
-                    targetNativeTextColor));
+                    nativeTextColor));
             }
 
             var applied = false;
             RunProgrammaticMutation(() =>
             {
+                ColorSyncDiagnostics.Write("apply-requests", "batch-start count=" +
+                    updates.Count);
                 applied = Blocks.TryApplySvgForegroundFillsBatch(updates);
             });
+            ColorSyncDiagnostics.Write("apply-requests", "batch-result=" + applied);
             if (!applied) return false;
             foreach (var request in requests)
             {
@@ -568,6 +706,9 @@ namespace LaTeXBlocks.Word
         {
             try
             {
+                ColorSyncDiagnostics.Write("format-render", "start sequence=" +
+                    batch.Sequence + " requests=" + batch.Requests.Count +
+                    " profile=" + batch.Profile);
                 // External colour-only requests are removed by QueueFormatRefresh
                 // before a render batch is created. Every request here therefore
                 // changes a genuine renderer input (normally TeX design size).
@@ -580,19 +721,28 @@ namespace LaTeXBlocks.Word
                         request.Metadata.Kind == LaTeXBlockKind.NumberedMath,
                         request.TextColor, renderKind: request.Metadata.Kind));
                 var renders = await Task.WhenAll(tasks).ConfigureAwait(false);
+                ColorSyncDiagnostics.Write("format-render", "complete sequence=" +
+                    batch.Sequence + " renders=" + renders.Length);
                 await InvokeOnWordUiAsync(() => CompleteFormatBatch(service, batch,
                     renders)).ConfigureAwait(false);
+                ColorSyncDiagnostics.Write("format-render", "committed sequence=" +
+                    batch.Sequence);
             }
             catch (TaskCanceledException)
             {
+                ColorSyncDiagnostics.Write("format-render", "cancelled sequence=" +
+                    batch.Sequence);
                 await AbandonFormatBatchAsync(batch, null).ConfigureAwait(false);
             }
             catch (ObjectDisposedException)
             {
+                ColorSyncDiagnostics.Write("format-render", "disposed sequence=" +
+                    batch.Sequence);
                 await AbandonFormatBatchAsync(batch, null).ConfigureAwait(false);
             }
             catch (Exception exception)
             {
+                ColorSyncDiagnostics.Exception("format-render", exception);
                 await AbandonFormatBatchAsync(batch, exception).ConfigureAwait(false);
             }
         }
@@ -600,7 +750,15 @@ namespace LaTeXBlocks.Word
         private void CompleteFormatBatch(LaTeXBlockService service,
             PendingFormatBatch batch, LaTeXBlockRender[] renders)
         {
-            if (shuttingDown || batch.Sequence != formatBatchSequence) return;
+            if (shuttingDown || batch.Sequence != formatBatchSequence)
+            {
+                ColorSyncDiagnostics.Write("format-commit", "stale sequence=" +
+                    batch.Sequence + " current=" + formatBatchSequence +
+                    " shuttingDown=" + shuttingDown);
+                return;
+            }
+            ColorSyncDiagnostics.Write("format-commit", "start sequence=" +
+                batch.Sequence + " renders=" + (renders?.Length ?? 0));
             var restoreSelection = batch.SelectionLease != null &&
                 batch.SelectionLease.Matches(Application.Selection);
             Exception firstFailure = null;
@@ -620,25 +778,52 @@ namespace LaTeXBlocks.Word
                     int? batchParagraphEnd = null;
                     for (var index = 0; index < batch.Requests.Count; index++)
                     {
-                        var request = batch.Requests[index];
-                        try
-                        {
-                            var shape = request.Shape;
-                            if (shape == null ||
-                                !LaTeXBlockService.TryReadContract(shape,
-                                    out var currentMetadata, out var currentSource) ||
-                                currentSource != request.Source ||
-                                !SameMetadataState(currentMetadata, request.Metadata) ||
-                                !string.Equals(batch.Profile, currentProfile,
-                                    StringComparison.OrdinalIgnoreCase))
+                            var request = batch.Requests[index];
+                            try
+                            {
+                                var shape = request.Shape;
+                            LaTeXBlockMetadata currentMetadata = null;
+                            string currentSource = null;
+                            var hasContract = shape != null &&
+                                LaTeXBlockService.TryReadContract(shape,
+                                    out currentMetadata, out currentSource);
+                            var sameSource = hasContract &&
+                                currentSource == request.Source;
+                            var sameMetadata = hasContract &&
+                                SameMetadataState(currentMetadata, request.Metadata);
+                            var sameProfile = string.Equals(batch.Profile,
+                                currentProfile, StringComparison.OrdinalIgnoreCase);
+                            if (!hasContract || !sameSource || !sameMetadata ||
+                                !sameProfile)
+                            {
+                                ColorSyncDiagnostics.Write("format-commit.filter",
+                                    "index=" + index + " contract=" + hasContract +
+                                    " source=" + sameSource + " metadata=" +
+                                    sameMetadata + " profile=" + sameProfile);
                                 continue;
+                            }
                             var shapeRange = shape.Range;
-                            var liveColor = LaTeXBlockService.ResolveTextColor(shapeRange);
+                            // This stale-work guard must observe the same Office-owned
+                            // paint model as request capture. Font.TextColor can become
+                            // Automatic while Word is applying a native size command;
+                            // comparing that transient projection would discard every
+                            // valid rerender before it reaches UpdateRenderedBatch.
+                            var liveColor = ResolveFormulaPaintColor(shape);
                             var liveSize = (double)shapeRange.Font.Size;
                             if (!LaTeXBlockService.TextColorsEqual(liveColor,
                                     request.TextColor) || liveSize < 1 || liveSize > 200 ||
                                 Math.Abs(liveSize - request.FontSizePt) >= 0.001)
+                            {
+                                ColorSyncDiagnostics.Write("format-commit.filter",
+                                    "index=" + index + " liveColor=" +
+                                    liveColor.ToString("X6", CultureInfo.InvariantCulture) +
+                                    " targetColor=" + request.TextColor.ToString("X6",
+                                        CultureInfo.InvariantCulture) + " liveSize=" +
+                                    liveSize.ToString("R", CultureInfo.InvariantCulture) +
+                                    " targetSize=" + request.FontSizePt.ToString("R",
+                                        CultureInfo.InvariantCulture));
                                 continue;
+                            }
                             var paragraph = shapeRange.Paragraphs[1].Range;
                             var autoInline = LaTeXBlockService.CanShareAutoInlineFormatBatch(
                                 currentMetadata, request.ChangesWidth);
@@ -646,7 +831,17 @@ namespace LaTeXBlocks.Word
                                 (batchParagraphStart.HasValue &&
                                  (batchParagraphStart.Value != paragraph.Start ||
                                   batchParagraphEnd.Value != paragraph.End)))
+                            {
                                 canUseOpenXmlBatch = false;
+                                // Replacing one Flat-OPC envelope across paragraph
+                                // boundaries lets Word recreate paragraph properties
+                                // and can drop direct tab stops. Use per-shape updates
+                                // whenever the batch spans paragraphs.
+                                if (batchParagraphStart.HasValue &&
+                                    (batchParagraphStart.Value != paragraph.Start ||
+                                     batchParagraphEnd.Value != paragraph.End))
+                                    canReplaceSvgMediaDirectly = false;
+                            }
                             else if (!batchParagraphStart.HasValue)
                             {
                                 batchParagraphStart = paragraph.Start;
@@ -663,10 +858,14 @@ namespace LaTeXBlocks.Word
                         catch (Exception exception)
                         {
                             if (firstFailure == null) firstFailure = exception;
+                            ColorSyncDiagnostics.Exception("format-commit.item",
+                                exception);
                         }
                     }
                     if (liveUpdates.Count != batch.Requests.Count)
                     {
+                        ColorSyncDiagnostics.Write("format-commit", "liveUpdates=" +
+                            liveUpdates.Count + "/" + batch.Requests.Count);
                         canUseOpenXmlBatch = false;
                         canReplaceSvgMediaDirectly = false;
                     }
@@ -688,6 +887,7 @@ namespace LaTeXBlocks.Word
                     catch (Exception exception)
                     {
                         if (firstFailure == null) firstFailure = exception;
+                        ColorSyncDiagnostics.Exception("format-commit.batch", exception);
                     }
                     if (restoreSelection) batch.SelectionLease.TryRestore(Application);
                 }, restoreSelection);
@@ -698,10 +898,12 @@ namespace LaTeXBlocks.Word
                 catch (COMException) { }
             }
             ClearFormatBatchTargets(batch);
+            ColorSyncDiagnostics.Write("format-commit", "done sequence=" +
+                batch.Sequence + " failure=" + (firstFailure != null));
             ribbon?.InvalidateWidthControl();
             if (firstFailure != null)
                 MessageBox.Show(new LaTeXBlocksRibbon.WordWindow(Application),
-                    firstFailure.GetBaseException().Message, "LaTeX Blocks",
+                    firstFailure.GetBaseException().Message, "LaTeXBlocks",
                     MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
 
@@ -715,7 +917,7 @@ namespace LaTeXBlocks.Word
                 ClearFormatBatchTargets(batch);
                 if (exception != null)
                     MessageBox.Show(new LaTeXBlocksRibbon.WordWindow(Application),
-                        exception.GetBaseException().Message, "LaTeX Blocks",
+                        exception.GetBaseException().Message, "LaTeXBlocks",
                         MessageBoxButtons.OK, MessageBoxIcon.Error);
             });
         }
@@ -873,7 +1075,7 @@ namespace LaTeXBlocks.Word
                 throw new InvalidOperationException("Open a Word document first.");
             var latex = WordSelectionLaTeXExporter.Export(Application.Selection.Range.Duplicate);
             if (string.IsNullOrEmpty(latex))
-                throw new InvalidOperationException("The selection does not contain exportable text or LaTeX Blocks.");
+                throw new InvalidOperationException("The selection does not contain exportable text or LaTeXBlocks.");
             Clipboard.SetText(latex, TextDataFormat.UnicodeText);
             Application.StatusBar = "Copied " + latex.Length + " characters as LaTeX.";
         }
@@ -1074,7 +1276,7 @@ namespace LaTeXBlocks.Word
             {
                 if (metadata.Role != LaTeXBlockRole.Content || metadata.Mode != LaTeXBlockLayoutMode.Fixed)
                     throw new InvalidOperationException(
-                        "Only fixed-width LaTeX Blocks can remain floating. Keep inline formulas and numbered equations \"In Line with Text\".");
+                        "Only fixed-width LaTeXBlocks can remain floating. Keep inline formulas and numbered equations \"In Line with Text\".");
                 source = LaTeXBlockMetadata.ReadSource(floatingShape.AlternativeText);
                 textColor = LaTeXBlockService.ResolveTextColor(floatingShape.Anchor);
                 style = metadata.HasExplicitStyle ? metadata.Style : null;
@@ -1266,7 +1468,7 @@ namespace LaTeXBlocks.Word
             catch (Exception exception)
             {
                 MessageBox.Show(new LaTeXBlocksRibbon.WordWindow(Application), exception.Message,
-                    "LaTeX Blocks", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    "LaTeXBlocks", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
             finally
             {
@@ -1303,10 +1505,19 @@ namespace LaTeXBlocks.Word
         {
             if (shuttingDown || !hostEventProcessingEnabled || refreshingNativeFontSize ||
                 programmaticMutationDepth > 0)
+            {
+                ColorSyncDiagnostics.Write("format-event", "ignored shuttingDown=" +
+                    shuttingDown + " enabled=" + hostEventProcessingEnabled +
+                    " refreshing=" + refreshingNativeFontSize + " mutationDepth=" +
+                    programmaticMutationDepth);
                 return;
+            }
 
             try
             {
+                ColorSyncDiagnostics.Write("format-event", "start previous=" +
+                    (previousSelectionFontSnapshots?.Count ?? 0) + " selection=" +
+                    (selection == null ? "null" : selection.Start + ":" + selection.End));
                 refreshingNativeFontSize = true;
                 // A native format transaction is bound to the selection that was
                 // active when its UI opened. A genuine host selection change makes
@@ -1324,13 +1535,16 @@ namespace LaTeXBlocks.Word
                 // color was applied through a shortcut, palette, style, paste, or macro,
                 // validate the range when the user next leaves it. This is event driven,
                 // not polling and does not rely on a particular Ribbon control.
-                QueueFormatRefresh(CaptureBlocksWhoseHostFormatChanged(
-                    previousSelectionFontSnapshots));
+                var formatRefreshes = CaptureBlocksWhoseHostFormatChanged(
+                    previousSelectionFontSnapshots);
+                ColorSyncDiagnostics.Write("format-event", "captured=" +
+                    formatRefreshes.Count);
+                QueueFormatRefresh(formatRefreshes);
             }
             catch (Exception exception)
             {
                 MessageBox.Show(new LaTeXBlocksRibbon.WordWindow(Application), exception.Message,
-                    "LaTeX Blocks", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    "LaTeXBlocks", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
             finally
             {
@@ -1356,10 +1570,10 @@ namespace LaTeXBlocks.Word
                 if (LaTeXBlockService.TryReadContract(shape, out var metadata, out var source) &&
                     metadata.Mode == LaTeXBlockLayoutMode.Auto &&
                     (!onlyChanged || Math.Abs(metadata.FontSizePt - fontSizePt) > 0.001 ||
-                     HasPendingFormatTarget(shape, fontSizePt,
-                         LaTeXBlockService.ResolveTextColor(shape.Range))))
+                      HasPendingFormatTarget(shape, fontSizePt,
+                          ResolveFormulaPaintColor(shape))))
                     requests.Add(new FormatRefreshRequest(shape, source, metadata, fontSizePt,
-                        LaTeXBlockService.ResolveTextColor(shape.Range), true, false,
+                        ResolveFormulaPaintColor(shape), true, false,
                         selectionLease));
             }
             return requests;
@@ -1380,7 +1594,10 @@ namespace LaTeXBlocks.Word
                     var size = metadata.Mode == LaTeXBlockLayoutMode.Auto
                         ? (double)shape.Range.Font.Size
                         : metadata.FontSizePt;
-                    var textColor = LaTeXBlockService.ResolveTextColor(shape.Range);
+                    // A size command does not own colour. The already synchronized
+                    // Office Graphic fill is the formula's current paint and remains
+                    // stable while Word transiently misreports Font.TextColor tint.
+                    var textColor = ResolveFormulaPaintColor(shape);
                     var hostFormatChanged =
                         LaTeXBlockService.TryClassifyHostFormatChange(metadata.Mode,
                             snapshot.HostFontSizePt, snapshot.HostTextColor, size,
@@ -1388,12 +1605,24 @@ namespace LaTeXBlocks.Word
                             out var textColorChanged);
                     if (!hostFormatChanged &&
                         !HasPendingFormatTarget(shape, size, textColor)) continue;
+                    ColorSyncDiagnostics.Write("format-capture", "id=" + metadata.Id +
+                        " oldSize=" + snapshot.HostFontSizePt.ToString("R",
+                            CultureInfo.InvariantCulture) + " liveSize=" +
+                        size.ToString("R", CultureInfo.InvariantCulture) +
+                        " metaSize=" + metadata.FontSizePt.ToString("R",
+                            CultureInfo.InvariantCulture) + " oldColor=" +
+                        snapshot.HostTextColor.ToString("X6",
+                            CultureInfo.InvariantCulture) + " liveColor=" +
+                        textColor.ToString("X6", CultureInfo.InvariantCulture) +
+                        " sizeChanged=" + fontSizeChanged + " colorChanged=" +
+                        textColorChanged);
                     requests.Add(new FormatRefreshRequest(shape, source, metadata, size,
                         textColor, fontSizeChanged, textColorChanged,
                         previousTextColor: snapshot.HostTextColor));
                 }
                 catch (COMException)
                 {
+                    ColorSyncDiagnostics.Write("format-capture", "com-exception");
                     // The block may have been deleted or moved across a story while
                     // the selection changed. Size refresh is opportunistic.
                 }
@@ -1450,11 +1679,26 @@ namespace LaTeXBlocks.Word
                         : metadata.FontSizePt;
                     if (size >= 1 && size <= 200)
                         snapshots.Add(new SelectionFontSnapshot(shape, size,
-                            LaTeXBlockService.ResolveTextColor(shape.Range)));
+                            ResolveFormulaPaintColor(shape)));
                 }
             }
             catch (COMException) { }
             return snapshots;
+        }
+
+        private static int ResolveFormulaPaintColor(WordInterop.InlineShape shape)
+        {
+            if (shape == null) return LaTeXBlockService.AutomaticTextColor;
+            // Office owns the external colour of an inline formula.  Once the
+            // colour transaction has synchronized the drawing, Fill is both cheaper
+            // and more reliable than Font.TextColor for preserving it through an
+            // unrelated size rerender.  Direct and theme colours both expose their
+            // resolved COLORREF here; the semantic theme descriptor is captured
+            // separately when the replacement is committed.
+            return LaTeXBlockService.TryReadSvgForegroundFillColor(shape,
+                out var fillColor)
+                ? fillColor
+                : LaTeXBlockService.ResolveTextColor(shape.Range);
         }
 
         private BlockFrameSnapshot CaptureBlockFrameSnapshot()
@@ -1613,6 +1857,7 @@ namespace LaTeXBlocks.Word
         private void QueueFormatRefresh(List<FormatRefreshRequest> requests)
         {
             if (shuttingDown || requests == null || requests.Count == 0) return;
+            ColorSyncDiagnostics.Write("format-queue", "requests=" + requests.Count);
             var autoInlineRequests = new List<FormatRefreshRequest>();
             var externalColorRequests = new List<FormatRefreshRequest>();
             var individualRequests = new List<FormatRefreshRequest>();
@@ -1658,7 +1903,7 @@ namespace LaTeXBlocks.Word
             var profile = currentProfile ?? Renderers.DefaultAvailableProfile;
             var targetWidthPt = request.Metadata.WidthPt;
             var targetFontSizePt = request.Metadata.FontSizePt;
-            var targetTextColor = LaTeXBlockService.ResolveTextColor(request.Shape.Range);
+            var targetTextColor = ResolveFormulaPaintColor(request.Shape);
             if (pendingFormatRefreshes.TryGetValue(request.ShapeKey, out var existing) &&
                 SameBaseState(existing, request.Metadata, request.Source, profile))
             {
@@ -1954,7 +2199,7 @@ namespace LaTeXBlocks.Word
                 ribbon?.InvalidateWidthControl();
                 if (exception != null)
                     MessageBox.Show(new LaTeXBlocksRibbon.WordWindow(Application),
-                        exception.GetBaseException().Message, "LaTeX Blocks",
+                        exception.GetBaseException().Message, "LaTeXBlocks",
                         MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
             StartNextBlockFrameReflow(pending.ShapeKey);
@@ -2049,7 +2294,7 @@ namespace LaTeXBlocks.Word
                 // either half of a newer format command. A later host event normally
                 // creates a new pending sequence, but the live comparison also closes
                 // the interval between Word mutating the run and that event arriving.
-                var liveTextColor = LaTeXBlockService.ResolveTextColor(shape.Range);
+                var liveTextColor = ResolveFormulaPaintColor(shape);
                 var liveFontSizePt = currentMetadata.Mode == LaTeXBlockLayoutMode.Auto
                     ? (double)shape.Range.Font.Size
                     : currentMetadata.FontSizePt;
@@ -2154,7 +2399,7 @@ namespace LaTeXBlocks.Word
                     ribbon?.InvalidateWidthControl();
                     if (exception != null)
                         MessageBox.Show(new LaTeXBlocksRibbon.WordWindow(Application),
-                            exception.GetBaseException().Message, "LaTeX Blocks",
+                            exception.GetBaseException().Message, "LaTeXBlocks",
                             MessageBoxButtons.OK, MessageBoxIcon.Error);
                 }
                 StartNextFormatRefresh(pending.ShapeKey);
@@ -2205,7 +2450,7 @@ namespace LaTeXBlocks.Word
                 return true;
             return pendingFormatBatchTargets.TryGetValue(shapeKey, out var batch) &&
                    (Math.Abs(batch.FontSizePt - fontSizePt) > 0.001 ||
-                    !LaTeXBlockService.TextColorsEqual(batch.TextColor, textColor));
+                    !LaTeXBlockService.TextColorsEqual(batch.ResolvedTextColor, textColor));
         }
 
         private bool HasPendingTextColorTarget(WordInterop.InlineShape shape, int textColor)
@@ -2216,7 +2461,7 @@ namespace LaTeXBlocks.Word
                 !LaTeXBlockService.TextColorsEqual(pending.TargetTextColor, textColor))
                 return true;
             return pendingFormatBatchTargets.TryGetValue(shapeKey, out var batch) &&
-                   !LaTeXBlockService.TextColorsEqual(batch.TextColor, textColor);
+                   !LaTeXBlockService.TextColorsEqual(batch.ResolvedTextColor, textColor);
         }
 
         private static bool SameBaseState(PendingFormatRefresh pending,
@@ -2316,10 +2561,9 @@ namespace LaTeXBlocks.Word
             try
             {
                 // The same native adapter observes both Font Color and Font Size.
-                // An exact InlineShape selection must remain enabled so a display or
-                // inline formula receives Font Size commits. CaptureFontColorInteraction
-                // independently rejects that exact selection, leaving its foreground
-                // entirely on Office Graphics Fill.
+                // Keep it enabled for exact formula selections as well as mixed text
+                // ranges: Font Color changes the drawing run, and the commit handler
+                // mirrors that host colour to Office Graphics Fill.
                 enabled = selection != null &&
                     previousSelectionFontSnapshots.Count > 0;
             }
@@ -2583,12 +2827,15 @@ namespace LaTeXBlocks.Word
                 double fontSizePt)
             {
                 Sequence = sequence;
-                TextColor = LaTeXBlockService.NormalizeTextColor(textColor);
+                // This is only the resolved COLORREF used to detect stale TeX
+                // work. Native RGB/theme/variant state remains on the Word object
+                // and is inherited by the replacement through its host snapshot.
+                ResolvedTextColor = LaTeXBlockService.NormalizeTextColor(textColor);
                 FontSizePt = fontSizePt;
             }
 
             internal long Sequence { get; }
-            internal int TextColor { get; }
+            internal int ResolvedTextColor { get; }
             internal double FontSizePt { get; }
         }
 
@@ -2674,7 +2921,7 @@ namespace LaTeXBlocks.Word
             }
             catch (Exception exception)
             {
-                MessageBox.Show(new LaTeXBlocksRibbon.WordWindow(Application), exception.Message, "LaTeX Blocks", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show(new LaTeXBlocksRibbon.WordWindow(Application), exception.Message, "LaTeXBlocks", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
 
@@ -2786,6 +3033,125 @@ namespace LaTeXBlocks.Word
             using (var about = new Branding.AboutForm("Word"))
                 about.ShowDialog(new LaTeXBlocksRibbon.WordWindow(Application));
         }
+
+        internal void ConfigureTexLiveRoot()
+        {
+            if (shuttingDown) throw new ObjectDisposedException(nameof(ThisAddIn));
+            string selectedRoot;
+            var owner = new LaTeXBlocksRibbon.WordWindow(Application);
+            if (!StemTeXUserTools.TryChooseTexLiveRoot(owner, out selectedRoot)) return;
+
+            var previousSetting = StemTeXInstallation.ReadConfiguredTexLiveRoot();
+            StemTeXInstallation.WriteConfiguredTexLiveRoot(selectedRoot);
+            try
+            {
+                ResetRendererBackend();
+            }
+            catch
+            {
+                try { StemTeXInstallation.WriteConfiguredTexLiveRoot(previousSetting); }
+                catch { }
+                throw;
+            }
+            MessageBox.Show(owner, "LaTeXBlocks now uses:\n" + selectedRoot +
+                "\n\nPowerPoint will use this TeX Live tree the next time its renderer starts.",
+                "LaTeXBlocks", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+
+        internal void ShowProfileCreator()
+        {
+            if (shuttingDown) throw new ObjectDisposedException(nameof(ThisAddIn));
+            if (profileCreatorProcess != null)
+            {
+                try
+                {
+                    if (!profileCreatorProcess.HasExited)
+                        throw new InvalidOperationException("StemTeX Profile Creator is already open.");
+                }
+                catch (InvalidOperationException) { throw; }
+                profileCreatorProcess.Dispose();
+                profileCreatorProcess = null;
+            }
+            profileCreatorProcess = StemTeXUserTools.StartProfileCreator(ProfileCreatorExited);
+        }
+
+        private void ProfileCreatorExited(object sender, EventArgs e)
+        {
+            var process = sender as Process;
+            var exitCode = -1;
+            try { if (process != null) exitCode = process.ExitCode; }
+            catch { }
+            var dispatcher = wordUiDispatcher;
+            if (dispatcher == null || dispatcher.IsDisposed || shuttingDown)
+            {
+                try { process?.Dispose(); } catch { }
+                return;
+            }
+            try
+            {
+                dispatcher.BeginInvoke(new Action(() =>
+                {
+                    if (ReferenceEquals(profileCreatorProcess, process)) profileCreatorProcess = null;
+                    try
+                    {
+                        if (exitCode != 0)
+                            throw new InvalidOperationException(
+                                "StemTeX Profile Creator exited with code " + exitCode + ".");
+                        ResetRendererBackend();
+                        Application.StatusBar = "StemTeX profile list refreshed.";
+                    }
+                    catch (Exception exception)
+                    {
+                        MessageBox.Show(new LaTeXBlocksRibbon.WordWindow(Application),
+                            exception.GetBaseException().Message, "LaTeXBlocks",
+                            MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    }
+                    finally { try { process?.Dispose(); } catch { } }
+                }));
+            }
+            catch (InvalidOperationException) { try { process?.Dispose(); } catch { } }
+        }
+
+        private void ResetRendererBackend()
+        {
+            var replacement = new RenderHostClientBackend();
+            string profile = null;
+            foreach (var candidate in replacement.Profiles)
+            {
+                if (string.Equals(candidate, currentProfile, StringComparison.OrdinalIgnoreCase))
+                {
+                    profile = candidate;
+                    break;
+                }
+            }
+            if (profile == null) profile = LoadCurrentProfile(replacement);
+            try { replacement.SwitchProfile(profile); }
+            catch { replacement.Dispose(); throw; }
+
+            Interlocked.Increment(ref formatRefreshSequence);
+            pendingFormatRefreshes.Clear();
+            formatRefreshesInFlight.Clear();
+            Interlocked.Increment(ref formatBatchSequence);
+            pendingFormatBatchTargets.Clear();
+            Interlocked.Increment(ref blockFrameReflowSequence);
+            pendingBlockFrameReflows.Clear();
+            blockFrameReflowsInFlight.Clear();
+
+            var previous = rendererPool;
+            rendererPool = replacement;
+            blocks = null;
+            currentProfile = profile;
+            backendStartupError = null;
+            backendStatus = replacement.Status;
+            try { previous?.Dispose(); } catch { }
+            if (!hostEventProcessingEnabled)
+            {
+                hostEventProcessingEnabled = true;
+                AttachWordMouseCaptureMonitor();
+                AttachWordFontColorMonitor();
+                try { Blocks.EnsureEquationCategory(); } catch { }
+            }
+        }
         protected override object RequestComAddInAutomationService() { return diagnostics ?? (diagnostics = new RuntimeDiagnostics(this)); }
 
         private void InternalStartup()
@@ -2807,6 +3173,11 @@ namespace LaTeXBlocks.Word
             {
                 get { try { return addIn.Renderers.StemTeXHome; } catch (Exception exception) { return "Unavailable: " + exception.Message; } }
             }
+            public string TexLiveRoot
+            {
+                get { try { return StemTeXInstallation.ResolveTexLiveRoot(); } catch (Exception exception) { return "Unavailable: " + exception.Message; } }
+            }
+            public string UserProfilesRoot => StemTeXInstallation.UserProfilesRoot;
             public string Profiles { get { try { return string.Join(",", addIn.Renderers.Profiles); } catch { return string.Empty; } } }
             public string CurrentProfile => addIn.currentProfile ?? string.Empty;
             public string BackendStartup => addIn.backendStartupError == null ? addIn.Renderers.Status : addIn.backendStatus + ": " + addIn.backendStartupError;

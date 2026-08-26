@@ -317,12 +317,12 @@ namespace LaTeXBlocks.Word
             catch (TimeoutException)
             {
                 ThrowIfHostExited();
-                throw new TimeoutException("Timed out waiting for the LaTeX Blocks render host.");
+                throw new TimeoutException("Timed out waiting for the LaTeXBlocks render host.");
             }
             catch (IOException exception)
             {
                 ThrowIfHostExited();
-                throw new IOException("The LaTeX Blocks render host connection failed.", exception);
+                throw new IOException("The LaTeXBlocks render host connection failed.", exception);
             }
         }
 
@@ -411,7 +411,7 @@ namespace LaTeXBlocks.Word
             foreach (var candidate in candidates)
                 if (File.Exists(candidate)) return candidate;
             throw new FileNotFoundException(
-                "LaTeX Blocks RenderHost was not found beside the installed add-in.", candidates[0]);
+                "LaTeXBlocks RenderHost was not found beside the installed add-in.", candidates[0]);
         }
 
         private static Process StartHost(string executable, string nonce)
@@ -427,7 +427,7 @@ namespace LaTeXBlocks.Word
             };
             var process = Process.Start(info);
             if (process == null)
-                throw new InvalidOperationException("LaTeX Blocks RenderHost did not start.");
+                throw new InvalidOperationException("LaTeXBlocks RenderHost did not start.");
             return process;
         }
 
@@ -466,7 +466,7 @@ namespace LaTeXBlocks.Word
             try
             {
                 if (hostProcess != null && hostProcess.HasExited)
-                    throw new InvalidOperationException("LaTeX Blocks RenderHost exited with code " +
+                    throw new InvalidOperationException("LaTeXBlocks RenderHost exited with code " +
                         hostProcess.ExitCode + ".");
             }
             catch (InvalidOperationException) { throw; }

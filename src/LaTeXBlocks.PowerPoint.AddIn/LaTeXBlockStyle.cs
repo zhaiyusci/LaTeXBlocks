@@ -225,6 +225,25 @@ namespace LaTeXBlocks.Word
             // even when every visual style field has its default value.
             if (IsDefault && !applyDefaultTypography) return source;
 
+            var hasFixedWidth = contentWidthPt.HasValue && contentWidthPt.Value > 0;
+            var hasFixedHeight = contentHeightPt.HasValue && contentHeightPt.Value > 0;
+            var standaloneDisplay =
+                StemTeXRenderer.StartsWithFullDisplayOrPageWidthEnvironment(source);
+            if (standaloneDisplay && !hasFixedHeight &&
+                TextColor.ToArgb() == Color.Black.ToArgb())
+            {
+                // The renderer already supplies the requested page-width box. A
+                // second vbox around a complete display invokes TeX's display skips
+                // in a nested vertical list and adds roughly one \topskip. Keep
+                // the display itself in the same outer mode as an unstyled request.
+                // With the default black foreground, SVG decoration owns every
+                // remaining visual style property and no TeX colour whatsit is needed.
+                var display = new StringBuilder();
+                display.AppendLine("\\global\\PreviewBorder=0pt%");
+                display.Append(source);
+                return display.ToString();
+            }
+
             var tex = new StringBuilder();
             // The host wrapper may already be in horizontal mode. Remove only a
             // pending delimiter space; do not end the paragraph or shift the TeX
@@ -249,8 +268,6 @@ namespace LaTeXBlocks.Word
             // passing these content dimensions. Keep paragraph and vertical
             // placement semantics here, leaving SVG composition to paint only the
             // shell and its inside border around the resulting box.
-            var hasFixedWidth = contentWidthPt.HasValue && contentWidthPt.Value > 0;
-            var hasFixedHeight = contentHeightPt.HasValue && contentHeightPt.Value > 0;
             if (hasFixedWidth)
             {
                 tex.AppendLine("\\setlength{\\hsize}{" +
@@ -264,14 +281,9 @@ namespace LaTeXBlocks.Word
             tex.AppendLine("\\hangindent=0pt\\hangafter=1\\parshape=0%");
             tex.AppendLine("\\everypar{}%");
             tex.AppendLine("\\setbox0=\\vbox{%");
-            // Fixed LaTeX Blocks own their paint in TeX. This wrapper is not used
-            // by the three formula kinds, whose host-colour behaviour is unchanged.
-            tex.AppendLine("\\color[HTML]{" + ToHex(TextColor) + "}%");
             // A standalone display already owns a vertical TeX list. Do not insert
             // *anything* which opens a paragraph before or after it: \noindent,
             // \color and \par can all change a tight preview's display geometry.
-            var standaloneDisplay =
-                StemTeXRenderer.StartsWithFullDisplayOrPageWidthEnvironment(source);
             if (standaloneDisplay)
             {
                 // Explicit colours authored in TeX remain local overrides.
@@ -323,26 +335,43 @@ namespace LaTeXBlocks.Word
             {
                 tex.AppendLine("\\setbox2=\\box0%");
             }
+            // Apply Office's foreground only while the completed content box is
+            // shipped out. Putting a colour whatsit inside the source vbox changes
+            // the tight vertical bounds of a standalone display. This placement is
+            // dimensionless and does not require a user profile to load xcolor.
+            var beginColor = BeginSvgColor(TextColor);
             if (hasFixedWidth)
             {
                 var contentBox = "\\hbox to " + FormatDecimal(contentWidthPt.Value) +
                     "pt{\\box2\\hss}";
-                if (HasBackgroundFill)
-                {
-                    tex.AppendLine("\\setlength{\\fboxsep}{" +
-                        FormatDecimal(ToTeXLengthPt(PaddingPt)) + "pt}%");
-                    tex.AppendLine("\\noindent\\colorbox[HTML]{" +
-                        ToHex(BackgroundColor) + "}{" + contentBox + "}\\par");
-                }
+                if (standaloneDisplay)
+                    tex.AppendLine(beginColor + contentBox +
+                        "\\special{color pop}");
                 else
-                {
-                    tex.AppendLine("\\noindent" + contentBox + "\\par");
-                }
+                    tex.AppendLine("\\noindent" + beginColor + contentBox +
+                        "\\special{color pop}\\par");
             }
+            else if (standaloneDisplay)
+                tex.AppendLine(beginColor +
+                    "\\box2\\special{color pop}");
             else
-                tex.AppendLine("\\noindent\\box2\\par");
+                tex.AppendLine("\\noindent" + beginColor +
+                    "\\box2\\special{color pop}\\par");
             tex.AppendLine("\\endgroup");
             return tex.ToString();
+        }
+
+        internal static string BeginSvgColor(Color color)
+        {
+            color = NormalizeColor(color, Color.Black);
+            return "\\special{color push rgb " + FormatColorComponent(color.R) + " " +
+                   FormatColorComponent(color.G) + " " +
+                   FormatColorComponent(color.B) + "}";
+        }
+
+        private static string FormatColorComponent(byte component)
+        {
+            return (component / 255.0).ToString("0.######", CultureInfo.InvariantCulture);
         }
 
         public override string ToString()

@@ -1,4 +1,4 @@
-# LaTeX Blocks Render Host
+# LaTeXBlocks Render Host
 
 `LaTeXBlocks.RenderHost.host` owns the native StemTeX lifecycle outside Word and
 PowerPoint. It contains no Office interop, VSTO, COM selection, or document

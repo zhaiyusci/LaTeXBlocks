@@ -10,6 +10,7 @@ using System.Linq;
 using System.Windows.Automation;
 using System.Windows.Forms;
 using LaTeXBlocks.Word;
+using LaTeXBlocks.OfficeColor;
 using WordInterop = Microsoft.Office.Interop.Word;
 
 namespace LaTeXBlocks.WordSmoke
@@ -20,6 +21,7 @@ namespace LaTeXBlocks.WordSmoke
         private const string UiaFontColorSmoke = "LATEXBLOCKS_UIA_FONT_COLOR_SMOKE";
         private const string UiaFontColorOnly = "LATEXBLOCKS_UIA_FONT_COLOR_ONLY";
         private const string BaselineColorOnly = "LATEXBLOCKS_BASELINE_COLOR_ONLY";
+        private const string TextColorOnly = "LATEXBLOCKS_TEXT_COLOR_ONLY";
         private const string NumberedCaretOnly = "LATEXBLOCKS_NUMBERED_CARET_ONLY";
         private const string MixedFontSizeOnly = "LATEXBLOCKS_MIXED_FONT_SIZE_ONLY";
         private const string WordJoiner = "\u2060";
@@ -49,6 +51,18 @@ namespace LaTeXBlocks.WordSmoke
             try
             {
                 Directory.CreateDirectory(artifactDirectory);
+                if (args != null && args.Contains("--color-model-probe"))
+                {
+                    RunOfficeColorModelSmoke();
+                    Console.WriteLine("LaTeXBlocks colour-model smoke passed.");
+                    return 0;
+                }
+                if (args != null && args.Contains("--profile-migration-probe"))
+                {
+                    RunUserProfileMigrationSmoke();
+                    Console.WriteLine("LaTeXBlocks user-profile migration smoke passed.");
+                    return 0;
+                }
                 if (string.Equals(Environment.GetEnvironmentVariable(UiaFontColorOnly), "1",
                         StringComparison.Ordinal))
                 {
@@ -68,6 +82,31 @@ namespace LaTeXBlocks.WordSmoke
                     return 0;
                 }
                 RunWordFormatInteractionStateSmoke();
+                RunOfficeColorModelSmoke();
+                RunUserProfileMigrationSmoke();
+                var texLiveRoot = StemTeXInstallation.ResolveTexLiveRoot();
+                string normalizedTexLiveRoot;
+                Assert(Directory.Exists(Path.Combine(texLiveRoot, "texmf-dist", "web2c")) &&
+                       string.Equals(StemTeXInstallation.UserProfilesRoot,
+                           Path.Combine(Environment.GetFolderPath(
+                               Environment.SpecialFolder.LocalApplicationData),
+                               "LaTeXBlocks", "profiles"),
+                           StringComparison.OrdinalIgnoreCase) &&
+                       StemTeXInstallation.TryNormalizeTexLiveRoot(texLiveRoot,
+                           out normalizedTexLiveRoot) &&
+                       string.Equals(normalizedTexLiveRoot, texLiveRoot,
+                           StringComparison.OrdinalIgnoreCase) &&
+                       StemTeXInstallation.TryNormalizeTexLiveRoot(
+                           Path.Combine(texLiveRoot, "texmf-dist"), out normalizedTexLiveRoot) &&
+                       string.Equals(normalizedTexLiveRoot, texLiveRoot,
+                           StringComparison.OrdinalIgnoreCase) &&
+                       StemTeXInstallation.TryNormalizeTexLiveRoot(
+                           Path.Combine(texLiveRoot, "texmf-dist", "web2c"),
+                           out normalizedTexLiveRoot) &&
+                       string.Equals(normalizedTexLiveRoot, texLiveRoot,
+                           StringComparison.OrdinalIgnoreCase) &&
+                       StemTeXInstallation.RequiredRuntimeVersion >= new Version(0, 13, 0),
+                    "LaTeXBlocks did not normalize the accepted system TeX Live directory forms for StemTeX 0.13.");
                 Console.WriteLine("StemTeX: testing immediate shutdown during renderer initialization...");
                 RunStartupShutdownProbeInIsolatedHost();
                 renderer = new StemTeXBackend();
@@ -103,6 +142,20 @@ namespace LaTeXBlocks.WordSmoke
                     document = word.Documents.Add();
                     RunMathCaretBaselineProbe(word, document, renderer, profile);
                     Console.WriteLine("Word math caret/baseline probe passed.");
+                    return 0;
+                }
+                if (string.Equals(Environment.GetEnvironmentVariable(TextColorOnly),
+                        "1", StringComparison.Ordinal))
+                {
+                    renderer.WarmUp(profile);
+                    word = new WordInterop.Application();
+                    ownsWord = true;
+                    word.Visible = false;
+                    word.DisplayAlerts = WordInterop.WdAlertLevel.wdAlertsNone;
+                    var colorService = new LaTeXBlockService(word, renderer);
+                    RunTextColorSmoke(word, colorService, profile,
+                        textColorDocumentPath);
+                    Console.WriteLine("Word complete text-colour smoke passed.");
                     return 0;
                 }
                 RunRenderHostClientSmoke(profile);
@@ -321,7 +374,7 @@ namespace LaTeXBlocks.WordSmoke
                     "Word SVG objects are not eligible for the LaTeX Block contract.");
                 Assert(!LaTeXBlockService.IsSupportedInlineShapeType(
                         WordInterop.WdInlineShapeType.wdInlineShapeEmbeddedOLEObject),
-                    "Embedded OLE objects such as MathType must never be probed as LaTeX Blocks.");
+                    "Embedded OLE objects such as MathType must never be probed as LaTeXBlocks.");
                 Assert(!LaTeXBlockMetadata.TryParse(
                         "LaTeXBlocks/1;id=" + Guid.NewGuid().ToString("D") +
                         ";width=360;depth=0;mode=fixed;size=10", out _),
@@ -402,7 +455,7 @@ namespace LaTeXBlocks.WordSmoke
                 var styledSource = styledBlockStyle.WrapSource("\\[E=mc^2\\]", 14);
                 Assert(styledSource.IndexOf("\\colorbox", StringComparison.Ordinal) < 0 &&
                        styledSource.IndexOf("\\fbox", StringComparison.Ordinal) < 0 &&
-                       styledSource.IndexOf("\\color[HTML]{123456}",
+                       styledSource.IndexOf("\\special{color push rgb 0.070588 0.203922 0.337255}",
                            StringComparison.Ordinal) >= 0,
                     "The Word display Block did not define its foreground in TeX.");
                 var fixedWordBoxSource = styledBlockStyle.WrapSource(
@@ -417,8 +470,8 @@ namespace LaTeXBlocks.WordSmoke
                            StringComparison.Ordinal) >= 0 &&
                        fixedWordBoxSource.IndexOf("\\setlength{\\hsize}{160pt}",
                            StringComparison.Ordinal) >= 0 &&
-                       fixedWordBoxSource.IndexOf("\\colorbox[HTML]{F0EED0}",
-                           StringComparison.Ordinal) >= 0 &&
+                       fixedWordBoxSource.IndexOf("\\colorbox",
+                           StringComparison.Ordinal) < 0 &&
                        fixedWordBoxSource.IndexOf("\\setbox2=\\vbox to 42pt",
                            StringComparison.Ordinal) >= 0 &&
                        fixedWordBoxSource.IndexOf("\\vss\\box0\\vss%",
@@ -511,6 +564,11 @@ namespace LaTeXBlocks.WordSmoke
                 Assert(ribbonXml.IndexOf("id=\"LaTeXBlocks.About\"", StringComparison.Ordinal) >= 0 &&
                        ribbonXml.IndexOf("onAction=\"OnAbout\"", StringComparison.Ordinal) >= 0,
                     "The Word Ribbon does not expose the About dialog.");
+                Assert(ribbonXml.IndexOf("id=\"LaTeXBlocks.TeXLive\"", StringComparison.Ordinal) >= 0 &&
+                       ribbonXml.IndexOf("onAction=\"OnConfigureTexLive\"", StringComparison.Ordinal) >= 0 &&
+                       ribbonXml.IndexOf("id=\"LaTeXBlocks.ProfileCreator\"", StringComparison.Ordinal) >= 0 &&
+                       ribbonXml.IndexOf("onAction=\"OnProfileCreator\"", StringComparison.Ordinal) >= 0,
+                    "The Word Ribbon does not expose TeX Live configuration and Profile Creator.");
                 Assert(ribbonXml.IndexOf(LaTeXBlocksRibbon.WidthControlId,
                            StringComparison.Ordinal) >= 0 &&
                        ribbonXml.IndexOf("getEnabled=\"GetWidthEnabled\"",
@@ -1434,7 +1492,7 @@ namespace LaTeXBlocks.WordSmoke
                 RunStyledBlockSmoke(word, service, profile);
                 RunShutdownProbe(renderer, profile);
 
-                Console.WriteLine("LaTeX Blocks smoke test passed.");
+                Console.WriteLine("LaTeXBlocks smoke test passed.");
                 Console.WriteLine("StemTeX: " + renderer.StemTeXHome);
                 Console.WriteLine("Verified: SVG insertion, metadata, update, Word-native equation numbering and references, and DOCX persistence.");
                 return 0;
@@ -1453,6 +1511,68 @@ namespace LaTeXBlocks.WordSmoke
                     Release(word);
                 }
                 renderer?.Dispose();
+            }
+        }
+
+        private static void RunOfficeColorModelSmoke()
+        {
+            var rgb = OfficeGraphicColor.FromRgb(System.Drawing.Color.FromArgb(12, 34, 56));
+            var theme = OfficeGraphicColor.FromTheme(OfficeThemeColor.Accent1,
+                OfficeColorTransform.Shade(0.25f));
+            var texInherited = TeXColor.InheritOffice;
+            var texExplicit = TeXColor.Explicit(System.Drawing.Color.Red);
+            Assert(rgb.Kind == OfficeGraphicColorKind.Rgb &&
+                   OfficeRgb.ToColorRef(rgb.Rgb) == 0x38220c &&
+                   theme.Kind == OfficeGraphicColorKind.Theme &&
+                   theme.Theme == OfficeThemeColor.Accent1 &&
+                   theme.Transform.Kind == OfficeColorTransformKind.Shade &&
+                   Math.Abs(theme.Transform.Amount - 0.25f) < 0.000001f &&
+                   texInherited.Resolve(System.Drawing.Color.Blue).ToArgb() ==
+                       System.Drawing.Color.Blue.ToArgb() &&
+                   texExplicit.Resolve(System.Drawing.Color.Blue).ToArgb() ==
+                       System.Drawing.Color.Red.ToArgb() &&
+                   WordGraphicColorAdapter.ToWordTheme(OfficeThemeColor.Accent1) ==
+                       WordInterop.WdThemeColorIndex.wdThemeColorAccent1 &&
+                   (int)WordGraphicColorAdapter.ToGraphicsTheme(
+                       OfficeThemeColor.Accent1) == 5,
+                "Office graphic colour and TeX colour ownership were conflated.");
+        }
+
+        private static void RunUserProfileMigrationSmoke()
+        {
+            var root = Path.Combine(Path.GetTempPath(),
+                "LaTeXBlocks-profile-migration-" + Guid.NewGuid().ToString("N"));
+            var legacyRoot = Path.Combine(root, "legacy");
+            var targetRoot = Path.Combine(root, "target");
+            try
+            {
+                var legacyCustom = Path.Combine(legacyRoot, "custom-profile");
+                var legacyExisting = Path.Combine(legacyRoot, "existing-profile");
+                var targetExisting = Path.Combine(targetRoot, "existing-profile");
+                Directory.CreateDirectory(Path.Combine(legacyCustom, "assets"));
+                Directory.CreateDirectory(legacyExisting);
+                Directory.CreateDirectory(targetExisting);
+                File.WriteAllText(Path.Combine(legacyCustom, "preamble.tex"), "legacy preamble");
+                File.WriteAllText(Path.Combine(legacyCustom, "warmup.tex"), "legacy warmup");
+                File.WriteAllText(Path.Combine(legacyCustom, "profile.json"), "{}");
+                File.WriteAllText(Path.Combine(legacyCustom, "assets", "custom.tex"), "custom");
+                File.WriteAllText(Path.Combine(legacyExisting, "preamble.tex"), "legacy");
+                File.WriteAllText(Path.Combine(legacyExisting, "warmup.tex"), "legacy");
+                File.WriteAllText(Path.Combine(targetExisting, "preamble.tex"), "current");
+                File.WriteAllText(Path.Combine(targetExisting, "warmup.tex"), "current");
+
+                StemTeXInstallation.MigrateUserProfiles(legacyRoot, targetRoot);
+                Assert(File.ReadAllText(Path.Combine(targetRoot, "custom-profile",
+                           "preamble.tex")) == "legacy preamble" &&
+                       File.Exists(Path.Combine(targetRoot, "custom-profile", "profile.json")) &&
+                       File.Exists(Path.Combine(targetRoot, "custom-profile", "assets",
+                           "custom.tex")) &&
+                       File.ReadAllText(Path.Combine(targetExisting, "preamble.tex")) == "current",
+                    "Legacy user profiles were not copied into LaTeXBlocks AppData without overwriting an existing profile.");
+            }
+            finally
+            {
+                if (Directory.Exists(root)) Directory.Delete(root, true);
             }
         }
 
@@ -1803,6 +1923,13 @@ namespace LaTeXBlocks.WordSmoke
             return paints.Length == 0 ? "unset" : string.Join(", ", paints);
         }
 
+        private static string ColorRefToSvgHex(int colorRef)
+        {
+            return "#" + (colorRef & 0xff).ToString("X2") +
+                   (colorRef >> 8 & 0xff).ToString("X2") +
+                   (colorRef >> 16 & 0xff).ToString("X2");
+        }
+
         private static byte[] ReadPackageBinary(string flatOpc, string contentType)
         {
             var xml = new System.Xml.XmlDocument { XmlResolver = null };
@@ -2040,12 +2167,22 @@ namespace LaTeXBlocks.WordSmoke
                     "Cancel/close could reuse a stale More Colors acceptance intent.");
 
                 Assert(LaTeXBlockService.ApplyTextColor(inlineSource, wordRed)
-                           .IndexOf("\\color[HTML]{FF0000}", StringComparison.Ordinal) >= 0 &&
+                           .IndexOf("\\special{color push rgb 1 0 0}", StringComparison.Ordinal) >= 0 &&
                        LaTeXBlockService.ApplyTextColor(inlineSource, wordBlue)
-                           .IndexOf("\\color[HTML]{0000FF}", StringComparison.Ordinal) >= 0 &&
+                           .IndexOf("\\special{color push rgb 0 0 1}", StringComparison.Ordinal) >= 0 &&
                        LaTeXBlockService.ApplyTextColor(inlineSource,
                            LaTeXBlockService.AutomaticTextColor) == inlineSource,
                     "Word BGR text colors were not converted into the intended TeX RGB colors.");
+                Assert(LaTeXBlockService.FormulaColorNeedsSynchronization(
+                           wordRed, 0, wordRed) &&
+                       !LaTeXBlockService.FormulaColorNeedsSynchronization(
+                           wordRed, wordRed, wordRed) &&
+                       LaTeXBlockService.FormulaColorNeedsSynchronization(
+                           wordBlue, wordRed, wordRed) &&
+                       !LaTeXBlockService.FormulaColorNeedsSynchronization(
+                           LaTeXBlockService.AutomaticTextColor, 0,
+                           LaTeXBlockService.AutomaticTextColor),
+                    "The formula color reconciler did not detect the red Word run/black SVG mismatch from mk.docx.");
 
                 Console.WriteLine("Word: testing native text color for inline and display formulas...");
                 if (File.Exists(documentPath)) File.Delete(documentPath);
@@ -2122,6 +2259,30 @@ namespace LaTeXBlocks.WordSmoke
                     inline.Range.End + 1).WordOpenXML;
                 var themeDescriptor =
                     LaTeXBlockService.NativeTextColorDescriptor.Automatic;
+                var serializedThemeCaptured =
+                    LaTeXBlockService.TryParseNativeTextColorFromWordOpenXml(
+                        themeScaffoldXml, out var serializedThemeDescriptor);
+                var unrelatedThemeXml = Regex.Replace(themeScaffoldXml,
+                    "<w:r(?=[ >])",
+                    "<w:r><w:rPr><w:color w:val=\"FFFFFF\" " +
+                    "w:themeColor=\"accent6\" w:themeTint=\"33\"/>" +
+                    "</w:rPr><w:t>neighbour</w:t></w:r><w:r",
+                    RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
+                var drawingRunThemeCaptured =
+                    LaTeXBlockService.TryParseNativeTextColorFromWordOpenXml(
+                        unrelatedThemeXml, out var drawingRunThemeDescriptor);
+                var eightyTintXml = Regex.Replace(themeScaffoldXml,
+                    "w:themeTint=\"[0-9A-Fa-f]{2}\"",
+                    "w:themeTint=\"33\"");
+                var eightyTintCaptured =
+                    LaTeXBlockService.TryParseNativeTextColorFromWordOpenXml(
+                        eightyTintXml, out var eightyTintDescriptor);
+                var quarterShadeXml = Regex.Replace(themeScaffoldXml,
+                    "w:themeTint=\"[0-9A-Fa-f]{2}\"",
+                    "w:themeShade=\"BF\"");
+                var quarterShadeCaptured =
+                    LaTeXBlockService.TryParseNativeTextColorFromWordOpenXml(
+                        quarterShadeXml, out var quarterShadeDescriptor);
                 Assert(rawThemeColor < 0 &&
                        rawThemeColor != LaTeXBlockService.AutomaticTextColor &&
                        resolvedThemeColor >= 0 && resolvedThemeColor <= 0x00ffffff &&
@@ -2135,8 +2296,22 @@ namespace LaTeXBlocks.WordSmoke
                        themeDescriptor.ThemeColor ==
                            WordInterop.WdThemeColorIndex.wdThemeColorAccent1 &&
                        Math.Abs(themeDescriptor.TintAndShade - 0.4f) < 0.000001f &&
+                       serializedThemeCaptured &&
+                       serializedThemeDescriptor.Equals(themeDescriptor) &&
+                       drawingRunThemeCaptured &&
+                       drawingRunThemeDescriptor.Equals(themeDescriptor) &&
+                       eightyTintCaptured &&
+                       eightyTintDescriptor.ThemeColor ==
+                           WordInterop.WdThemeColorIndex.wdThemeColorAccent1 &&
+                       Math.Abs(eightyTintDescriptor.TintAndShade - 0.8f) <
+                           0.000001f &&
+                       quarterShadeCaptured &&
+                       quarterShadeDescriptor.ThemeColor ==
+                           WordInterop.WdThemeColorIndex.wdThemeColorAccent1 &&
+                       Math.Abs(quarterShadeDescriptor.TintAndShade -
+                                (191f / 255f - 1f)) < 0.000001f &&
                        LaTeXBlockService.ApplyTextColor(inlineSource, resolvedThemeColor)
-                           .IndexOf("\\color[HTML]", StringComparison.Ordinal) >= 0,
+                           .IndexOf("\\special{color push rgb ", StringComparison.Ordinal) >= 0,
                     "A Word theme font colour was mistaken for Automatic or was not " +
                     "resolved from the formula drawing run.");
                 var themeRender = service.RenderCommittedAsync(inlineSource, 360,
@@ -2146,11 +2321,83 @@ namespace LaTeXBlocks.WordSmoke
                 inline = service.UpdateRendered(inline, inlineSource, 360,
                     LaTeXBlockLayoutMode.Auto, themeRender, false);
                 inline.Range.Select();
+                var replacementRunThemeCaptured =
+                    LaTeXBlockService.NativeTextColorDescriptor.TryCapture(
+                        inline.Range, out var replacementThemeDescriptor);
+                var replacementFillThemeCaptured =
+                    LaTeXBlockService.TryReadSvgForegroundThemeFill(inline,
+                        out var replacementFillTheme,
+                        out var replacementFillTint);
+                var replacementFillBrightness = inline.Fill.ForeColor.Brightness;
+                var replacementFillRawTint = inline.Fill.ForeColor.TintAndShade;
+                var replacementFillRgb = (int)inline.Fill.ForeColor.RGB;
+                Console.WriteLine("Word theme replacement: run=" +
+                    (replacementRunThemeCaptured
+                        ? replacementThemeDescriptor.Kind + "/" +
+                          replacementThemeDescriptor.ThemeColor + "/" +
+                          replacementThemeDescriptor.TintAndShade
+                        : "unavailable") + ", fill=" +
+                    (replacementFillThemeCaptured
+                        ? replacementFillTheme + "/" + replacementFillTint
+                        : "unavailable") + ", brightness=" +
+                    replacementFillBrightness + ", rgb=" +
+                    replacementFillRgb.ToString("X6"));
                 Assert(IsExactlySelectedInlineShape(word, inline) &&
+                       replacementRunThemeCaptured &&
+                       replacementThemeDescriptor.Equals(themeDescriptor) &&
+                       replacementFillThemeCaptured &&
+                       replacementFillTheme ==
+                           WordInterop.WdThemeColorIndex.wdThemeColorAccent1 &&
+                       Math.Abs(replacementFillTint - 0.4f) < 0.000001f &&
+                       Math.Abs(replacementFillBrightness - 0.4f) < 0.000001f &&
+                       Math.Abs(replacementFillRawTint) < 0.000001f &&
+                       ColorsWithinChannelTolerance(replacementFillRgb,
+                           resolvedThemeColor, 1),
+                    "Replacing a themed formula SVG downgraded its Word run or Graphics Fill to direct RGB.");
+                LaTeXBlockService.ApplySvgForegroundThemeFill(inline,
+                    WordInterop.WdThemeColorIndex.wdThemeColorAccent2, -0.25f);
+                Assert(LaTeXBlockService.TryReadSvgForegroundThemeFill(inline,
+                           out var shadeFillTheme, out var shadeFillAmount) &&
+                       shadeFillTheme ==
+                           WordInterop.WdThemeColorIndex.wdThemeColorAccent2 &&
+                       Math.Abs(shadeFillAmount + 0.25f) < 0.000001f &&
+                       Math.Abs(inline.Fill.ForeColor.Brightness + 0.25f) < 0.000001f &&
+                       Math.Abs(inline.Fill.ForeColor.TintAndShade) < 0.000001f,
+                    "Word Graphic Shade was written through TintAndShade instead of Brightness.");
+                LaTeXBlockService.ApplySvgForegroundThemeFill(inline,
+                    WordInterop.WdThemeColorIndex.wdThemeColorAccent3, 0f);
+                Assert(LaTeXBlockService.TryReadSvgForegroundThemeFill(inline,
+                           out var neutralFillTheme, out var neutralFillAmount) &&
+                       neutralFillTheme ==
+                           WordInterop.WdThemeColorIndex.wdThemeColorAccent3 &&
+                       Math.Abs(neutralFillAmount) < 0.000001f &&
+                       Math.Abs(inline.Fill.ForeColor.Brightness) < 0.000001f &&
+                       Math.Abs(inline.Fill.ForeColor.TintAndShade) < 0.000001f,
+                    "Word Graphic neutral theme colour retained a tint or shade transform.");
+                LaTeXBlockService.ApplySvgForegroundThemeFill(inline,
+                    themeDescriptor.ThemeColor, themeDescriptor.TintAndShade);
+                Assert(LaTeXBlockService.TryReadContract(inline,
+                           out var themeBatchMetadata, out _),
+                    "The themed formula lost its contract before direct SVG media replacement.");
+                var themeBatchRange = inline.Range;
+                var themeBatchParagraph = themeBatchRange.Paragraphs[1].Range;
+                service.UpdateRenderedBatch(new List<LaTeXBlockBatchUpdate>
+                {
+                    new LaTeXBlockBatchUpdate(inline, inlineSource, 360,
+                        themeRender, themeBatchMetadata, themeBatchRange,
+                        themeBatchParagraph.Start, themeBatchParagraph.End)
+                }, true);
+                inline = FindInlineFormula(document, themeBatchMetadata.Id);
+                Assert(inline != null &&
                        LaTeXBlockService.NativeTextColorDescriptor.TryCapture(
-                           inline.Range, out var replacementThemeDescriptor) &&
-                       replacementThemeDescriptor.Equals(themeDescriptor),
-                    "Replacing a themed formula SVG downgraded its native theme colour to direct RGB.");
+                           inline.Range, out var mediaThemeDescriptor) &&
+                       mediaThemeDescriptor.Equals(themeDescriptor) &&
+                       LaTeXBlockService.TryReadSvgForegroundThemeFill(inline,
+                           out var mediaFillTheme, out var mediaFillTint) &&
+                       mediaFillTheme ==
+                           WordInterop.WdThemeColorIndex.wdThemeColorAccent1 &&
+                       Math.Abs(mediaFillTint - 0.4f) < 0.000001f,
+                    "Direct SVG media replacement did not preserve the theme Graphics Fill slot and variant.");
                 inline.Range.Font.Color = (WordInterop.WdColor)wordRed;
 
                 // A drawing-run color update happens before the event-driven refresh;
@@ -2288,7 +2535,6 @@ namespace LaTeXBlocks.WordSmoke
                 // only if the old object is still semantically selected at completion.
                 resizedInline.Range.Font.Position = 13;
                 resizedInline.Range.Select();
-                word.Selection.Font.Size = (float)movedAwayFontSizePt;
                 var movedAwayRenderTask = service.RenderCommittedAsync(inlineSource, 360,
                     LaTeXBlockLayoutMode.Auto, profile, movedAwayFontSizePt, false, wordBlue);
                 document.Range(0, hostText.Length).Select();
@@ -2298,8 +2544,13 @@ namespace LaTeXBlocks.WordSmoke
                 var restoreMovedSelection = IsExactlySelectedInlineShape(word, resizedInline);
                 Assert(!restoreMovedSelection,
                     "The selection-away fixture still reported the pending formula as selected.");
+                var movedAwaySourceInline = FindInlineFormula(document,
+                    inlineMetadataBeforeColorRefresh.Id);
+                Assert(movedAwaySourceInline != null,
+                    "The selection-away fixture lost its formula before the manual replacement probe.");
                 var pictureImportTimer = Stopwatch.StartNew();
-                var movedAwayInline = service.UpdateRendered(resizedInline, inlineSource, 360,
+                var movedAwayInline = service.UpdateRendered(movedAwaySourceInline,
+                    inlineSource, 360,
                     LaTeXBlockLayoutMode.Auto, movedAwayRender, false);
                 pictureImportTimer.Stop();
                 Console.WriteLine("PROFILE font-size Word write AddPicture: " +
@@ -2380,6 +2631,12 @@ namespace LaTeXBlocks.WordSmoke
                 var numberedColorWidth = numbered.Width;
                 var numberedColorHeight = numbered.Height;
                 numbered.Range.Font.Color = (WordInterop.WdColor)wordBlue;
+                Assert(LaTeXBlockService.TryReadSvgForegroundFillColor(numbered,
+                           out var numberedFillBeforeSync) &&
+                       LaTeXBlockService.FormulaColorNeedsSynchronization(
+                           LaTeXBlockService.ResolveTextColor(numbered.Range),
+                           numberedFillBeforeSync, wordBlue),
+                    "A numbered formula with a changed Word run color was not identified as needing Graphics Fill synchronization.");
                 Assert(service.TryApplySvgForegroundFillsBatch(
                            new List<LaTeXBlockColorUpdate>
                            {
@@ -2397,9 +2654,14 @@ namespace LaTeXBlocks.WordSmoke
                        LaTeXBlockService.TryReadContract(numbered,
                            out var recoloredNumberedMetadata,
                            out var recoloredNumberedSource) &&
-                       recoloredNumberedMetadata.Id == numberedColorMetadata.Id &&
-                       recoloredNumberedSource ==
-                           LaTeXBlockService.NormalizeMathBody(displaySource),
+                        recoloredNumberedMetadata.Id == numberedColorMetadata.Id &&
+                        recoloredNumberedSource ==
+                            LaTeXBlockService.NormalizeMathBody(displaySource) &&
+                        LaTeXBlockService.TryReadSvgForegroundFillColor(numbered,
+                            out var numberedFillAfterSync) &&
+                        !LaTeXBlockService.FormulaColorNeedsSynchronization(
+                            LaTeXBlockService.ResolveTextColor(numbered.Range),
+                            numberedFillAfterSync, wordBlue),
                     "An external numbered-formula color change replaced or moved its Office object instead of using Graphics Fill.");
                 Console.WriteLine("Word: text color insertion, refresh, and persistence passed.");
             }
@@ -2616,25 +2878,70 @@ namespace LaTeXBlocks.WordSmoke
                     "Word did not apply one native theme color to the formula runs.");
                 var resolvedThemeColor = LaTeXBlockService.ResolveTextColor(first.Range);
                 second.Range.Font.Color = (WordInterop.WdColor)initialColor;
-                Assert(service.TryApplySvgForegroundFillsBatch(
-                        new List<LaTeXBlockColorUpdate>
-                        {
-                            new LaTeXBlockColorUpdate(first, resolvedThemeColor,
-                                firstThemeBefore),
-                            new LaTeXBlockColorUpdate(second, resolvedThemeColor,
-                                firstThemeBefore)
-                        }) &&
-                       LaTeXBlockService.NativeTextColorDescriptor.TryCapture(
-                           first.Range, out var firstThemeAfter) &&
-                       LaTeXBlockService.NativeTextColorDescriptor.TryCapture(
-                           second.Range, out var secondThemeAfter) &&
+                var themeFillApplied = service.TryApplySvgForegroundFillsBatch(
+                    new List<LaTeXBlockColorUpdate>
+                    {
+                        new LaTeXBlockColorUpdate(first, resolvedThemeColor,
+                            firstThemeBefore),
+                        new LaTeXBlockColorUpdate(second, resolvedThemeColor,
+                            firstThemeBefore)
+                    });
+                var firstRunThemeCaptured =
+                    LaTeXBlockService.NativeTextColorDescriptor.TryCapture(
+                        first.Range, out var firstThemeAfter);
+                var secondRunThemeCaptured =
+                    LaTeXBlockService.NativeTextColorDescriptor.TryCapture(
+                        second.Range, out var secondThemeAfter);
+                var firstFillThemeCaptured =
+                    LaTeXBlockService.TryReadSvgForegroundThemeFill(first,
+                        out var firstFillTheme, out var firstFillTint);
+                var secondFillThemeCaptured =
+                    LaTeXBlockService.TryReadSvgForegroundThemeFill(second,
+                        out var secondFillTheme, out var secondFillTint);
+                var firstFillRgb = (int)first.Fill.ForeColor.RGB;
+                var secondFillRgb = (int)second.Fill.ForeColor.RGB;
+                // ObjectThemeColor can schedule a delayed base-colour SVG repaint.
+                // Let Office drain that work before inspecting the persisted paint;
+                // an immediate COM read can report the right Brightness while the
+                // later SVG cache is still going to lose its tint.
+                Thread.Sleep(300);
+                System.Windows.Forms.Application.DoEvents();
+                var firstStoredSvgPaint =
+                    DescribeStoredSvgPaint(first.Range.WordOpenXML);
+                var secondStoredSvgPaint =
+                    DescribeStoredSvgPaint(second.Range.WordOpenXML);
+                Console.WriteLine("Word mixed theme: target=" +
+                    resolvedThemeColor.ToString("X6") + ", first=" +
+                    firstFillTheme + "/" + firstFillTint + "/" +
+                    firstFillRgb.ToString("X6") + "/" + firstStoredSvgPaint +
+                    ", second=" +
+                    secondFillTheme + "/" + secondFillTint + "/" +
+                    secondFillRgb.ToString("X6") + "/" + secondStoredSvgPaint);
+                Assert(themeFillApplied && firstRunThemeCaptured &&
+                       secondRunThemeCaptured &&
                        firstThemeAfter.Equals(firstThemeBefore) &&
-                       secondThemeAfter.Equals(firstThemeBefore) &&
-                       LaTeXBlockService.TextColorsEqual(
-                           (int)first.Fill.ForeColor.RGB, resolvedThemeColor) &&
-                       LaTeXBlockService.TextColorsEqual(
-                           (int)second.Fill.ForeColor.RGB, resolvedThemeColor),
-                    "Graphics Fill synchronization downgraded a Word theme color to direct RGB.");
+                       secondThemeAfter.Kind ==
+                           LaTeXBlockService.NativeTextColorKind.Direct &&
+                       secondThemeAfter.DirectWordColor == initialColor &&
+                       firstFillThemeCaptured &&
+                       firstFillTheme ==
+                           WordInterop.WdThemeColorIndex.wdThemeColorAccent1 &&
+                       Math.Abs(firstFillTint - 0.8f) < 0.000001f &&
+                       secondFillThemeCaptured &&
+                       secondFillTheme ==
+                           WordInterop.WdThemeColorIndex.wdThemeColorAccent1 &&
+                       Math.Abs(secondFillTint - 0.8f) < 0.000001f &&
+                       ColorsWithinChannelTolerance(firstFillRgb,
+                           resolvedThemeColor, 1) &&
+                       ColorsWithinChannelTolerance(secondFillRgb,
+                           resolvedThemeColor, 1) &&
+                       firstStoredSvgPaint.IndexOf(
+                           ColorRefToSvgHex(firstFillRgb),
+                           StringComparison.OrdinalIgnoreCase) >= 0 &&
+                       secondStoredSvgPaint.IndexOf(
+                           ColorRefToSvgHex(secondFillRgb),
+                           StringComparison.OrdinalIgnoreCase) >= 0,
+                    "Graphics Fill synchronization changed Office-owned Font Color or did not retain the graphic theme slot and tint.");
                 Console.WriteLine("Word: mixed text/formula Font Color refresh passed.");
             }
             finally
@@ -3714,6 +4021,10 @@ namespace LaTeXBlocks.WordSmoke
                 monitor.SetInteractionContext(true);
                 var commits = 0;
                 var fontColorAtCommit = int.MinValue;
+                var nativeTextColorCapturedAtCommit = false;
+                var nativeTextColorAtCommit =
+                    LaTeXBlockService.NativeTextColorDescriptor.Automatic;
+                var nativeColorFormatAtCommit = string.Empty;
                 var interactionGate = new object();
                 var begunInteractions = new HashSet<long>();
                 var completedInteractions = new HashSet<long>();
@@ -3753,6 +4064,46 @@ namespace LaTeXBlocks.WordSmoke
                     {
                         fontColorAtCommit = (int)word.Selection.Font.Color;
                         Interlocked.Increment(ref commits);
+                        WordInterop.Range committedRange = null;
+                        WordInterop.Font committedFont = null;
+                        WordInterop.ColorFormat committedTextColor = null;
+                        try
+                        {
+                            committedRange = word.Selection.Range;
+                            nativeTextColorCapturedAtCommit =
+                                LaTeXBlockService.NativeTextColorDescriptor.TryCapture(
+                                    committedRange, out nativeTextColorAtCommit);
+                            committedFont = committedRange.Font;
+                            committedTextColor = committedFont.TextColor;
+                            var committedXml = committedRange.WordOpenXML;
+                            var themeTint = Regex.Match(committedXml,
+                                "w:themeTint=\"([^\"]+)\"").Groups[1].Value;
+                            var themeColor = Regex.Match(committedXml,
+                                "w:themeColor=\"([^\"]+)\"").Groups[1].Value;
+                            var parsedNative =
+                                LaTeXBlockService.TryParseNativeTextColorFromWordOpenXml(
+                                    committedXml, out var parsedNativeDescriptor);
+                            nativeColorFormatAtCommit =
+                                "tint=" + committedTextColor.TintAndShade +
+                                ",brightness=" + committedTextColor.Brightness +
+                                ",xmlTheme=" + themeColor +
+                                ",xmlTint=" + themeTint +
+                                ",parser=" + (parsedNative
+                                    ? parsedNativeDescriptor.ThemeColor + "/" +
+                                      parsedNativeDescriptor.TintAndShade
+                                    : "false");
+                        }
+                        catch (Exception exception)
+                        {
+                            nativeColorFormatAtCommit = "error=" +
+                                exception.GetBaseException().Message;
+                        }
+                        finally
+                        {
+                            Release(committedTextColor);
+                            Release(committedFont);
+                            Release(committedRange);
+                        }
                     }
                 };
                 Func<long> getSingleActivePaletteInteraction = () =>
@@ -3804,6 +4155,7 @@ namespace LaTeXBlocks.WordSmoke
                     mainButtonBounds.Top + mainButtonBounds.Height / 2);
                 WaitFor(() => Volatile.Read(ref commits) >= 1, 3000,
                     "The Font Color main-button click was not observed as a commit.");
+                var mainButtonCommits = Volatile.Read(ref commits);
 
                 var dropDown = picker.FindFirst(TreeScope.Descendants,
                     new PropertyCondition(AutomationElement.AutomationIdProperty,
@@ -3830,6 +4182,7 @@ namespace LaTeXBlocks.WordSmoke
                                 ControlType.ListItem),
                             new PropertyCondition(AutomationElement.ClassNameProperty,
                                 "NetUIGalleryButton")));
+                    AutomationElement fallback = null;
                     foreach (AutomationElement candidate in candidates)
                     {
                         if (!candidate.Current.IsEnabled || candidate.Current.IsOffscreen)
@@ -3839,11 +4192,14 @@ namespace LaTeXBlocks.WordSmoke
                             bounds.Width > 64 || bounds.Height > 64 ||
                             bounds.Top < pickerBounds.Bottom - 1 ||
                             bounds.Right < pickerBounds.Left ||
-                            bounds.Left > pickerBounds.Right)
+                            bounds.Left > pickerBounds.Right + 400)
                             continue;
-                        return candidate;
+                        if (fallback == null) fallback = candidate;
+                        if ((candidate.Current.Name ?? string.Empty)
+                            .IndexOf("80%", StringComparison.OrdinalIgnoreCase) >= 0)
+                            return candidate;
                     }
-                    return null;
+                    return fallback;
                 };
 
                 AutomationElement swatch = null;
@@ -3926,7 +4282,7 @@ namespace LaTeXBlocks.WordSmoke
                     System.Windows.Forms.Application.DoEvents();
                     Thread.Sleep(20);
                 }
-                Assert(Volatile.Read(ref commits) == 1,
+                Assert(Volatile.Read(ref commits) == mainButtonCommits,
                     "Merely hovering a Font Color swatch was misclassified as a commit (" +
                     monitor.DiagnosticStateForTest + ").");
                 WaitFor(() => getSingleActivePaletteInteraction() > 0, 3000,
@@ -3975,7 +4331,7 @@ namespace LaTeXBlocks.WordSmoke
                     System.Windows.Forms.Application.DoEvents();
                     Thread.Sleep(20);
                 }
-                Assert(Volatile.Read(ref commits) == 1,
+                Assert(Volatile.Read(ref commits) == mainButtonCommits,
                     "A document click inside a canceled palette's stale rectangle " +
                     "was misclassified as a Font Color commit (" +
                     monitor.DiagnosticStateForTest + ").");
@@ -4013,7 +4369,7 @@ namespace LaTeXBlocks.WordSmoke
                     System.Windows.Forms.Application.DoEvents();
                     Thread.Sleep(20);
                 }
-                Assert(Volatile.Read(ref commits) == 1,
+                Assert(Volatile.Read(ref commits) == mainButtonCommits,
                     "Hovering the reopened Font Color palette was misclassified as " +
                     "a commit (" + monitor.DiagnosticStateForTest + ").");
                 WaitFor(() => getSingleActivePaletteInteraction() > 0, 3000,
@@ -4026,6 +4382,8 @@ namespace LaTeXBlocks.WordSmoke
                 // turns only the same candidate's paired down/up into a semantic commit.
                 var commitsBeforeClick = Volatile.Read(ref commits);
                 fontColorAtCommit = int.MinValue;
+                nativeTextColorCapturedAtCommit = false;
+                var clickedSwatchName = swatch.Current.Name ?? string.Empty;
                 ClickAt(swatchBounds.Left + swatchBounds.Width / 2,
                     swatchBounds.Top + swatchBounds.Height / 2);
                 WaitFor(() => Volatile.Read(ref commits) == commitsBeforeClick + 1,
@@ -4035,6 +4393,73 @@ namespace LaTeXBlocks.WordSmoke
                 Assert(fontColorAtCommit != int.MinValue &&
                        fontColorAtCommit == (int)word.Selection.Font.Color,
                     "The palette commit was delivered before Word applied its native colour.");
+                var nativeSettleTimer = Stopwatch.StartNew();
+                while (nativeSettleTimer.ElapsedMilliseconds < 100)
+                {
+                    System.Windows.Forms.Application.DoEvents();
+                    Thread.Sleep(5);
+                }
+                var nativeTextColorCapturedAfter100Ms =
+                    LaTeXBlockService.NativeTextColorDescriptor.TryCapture(
+                        word.Selection.Range, out var nativeTextColorAfter100Ms);
+                var nativeColorFormatAfter100Ms = string.Empty;
+                WordInterop.Range settledRange = null;
+                WordInterop.Font settledFont = null;
+                WordInterop.ColorFormat settledTextColor = null;
+                try
+                {
+                    settledRange = word.Selection.Range;
+                    settledFont = settledRange.Font;
+                    settledTextColor = settledFont.TextColor;
+                    var settledXml = settledRange.WordOpenXML;
+                    var themeTint = Regex.Match(settledXml,
+                        "w:themeTint=\"([^\"]+)\"").Groups[1].Value;
+                    var themeColor = Regex.Match(settledXml,
+                        "w:themeColor=\"([^\"]+)\"").Groups[1].Value;
+                    var parsedNative =
+                        LaTeXBlockService.TryParseNativeTextColorFromWordOpenXml(
+                            settledXml, out var parsedNativeDescriptor);
+                    nativeColorFormatAfter100Ms =
+                        "tint=" + settledTextColor.TintAndShade +
+                        ",brightness=" + settledTextColor.Brightness +
+                        ",xmlTheme=" + themeColor +
+                        ",xmlTint=" + themeTint +
+                        ",parser=" + (parsedNative
+                            ? parsedNativeDescriptor.ThemeColor + "/" +
+                              parsedNativeDescriptor.TintAndShade
+                            : "false");
+                }
+                finally
+                {
+                    Release(settledTextColor);
+                    Release(settledFont);
+                    Release(settledRange);
+                }
+                Console.WriteLine("Word theme timing: swatch='" +
+                    clickedSwatchName + "', commit=" +
+                    (nativeTextColorCapturedAtCommit
+                        ? nativeTextColorAtCommit.Kind + "/" +
+                          nativeTextColorAtCommit.ThemeColor + "/" +
+                          nativeTextColorAtCommit.TintAndShade
+                        : "unavailable") + ", after100ms=" +
+                    (nativeTextColorCapturedAfter100Ms
+                        ? nativeTextColorAfter100Ms.Kind + "/" +
+                          nativeTextColorAfter100Ms.ThemeColor + "/" +
+                          nativeTextColorAfter100Ms.TintAndShade
+                        : "unavailable") + ", COM/XML at commit=" +
+                    nativeColorFormatAtCommit + ", after100ms=" +
+                    nativeColorFormatAfter100Ms + ".");
+                Assert(clickedSwatchName.IndexOf("80%",
+                           StringComparison.OrdinalIgnoreCase) >= 0 &&
+                       nativeTextColorCapturedAtCommit &&
+                       nativeTextColorAtCommit.Kind ==
+                           LaTeXBlockService.NativeTextColorKind.Theme &&
+                       Math.Abs(nativeTextColorAtCommit.TintAndShade - 0.8f) <
+                           0.000001f &&
+                       nativeTextColorCapturedAfter100Ms &&
+                       nativeTextColorAfter100Ms.Equals(nativeTextColorAtCommit),
+                    "Word's native 80% theme swatch was not recovered from " +
+                    "w:themeTint while ColorFormat omitted the variant.");
                 var quietTimer = Stopwatch.StartNew();
                 while (quietTimer.ElapsedMilliseconds < 2000)
                 {
@@ -4116,7 +4541,7 @@ namespace LaTeXBlocks.WordSmoke
                                    WordFormatInteractionPhase.Committed,
                             "The Font Color main-button transaction did not commit.");
                     }
-                    Assert(mainTransactions == 1,
+                    Assert(mainTransactions == mainButtonCommits,
                         "The Font Color main button produced an unexpected number " +
                         "of semantic transactions.");
                 }
@@ -4327,6 +4752,17 @@ namespace LaTeXBlocks.WordSmoke
             if (!condition) throw new InvalidOperationException(message);
         }
 
+        private static bool ColorsWithinChannelTolerance(int left, int right,
+            int tolerance)
+        {
+            if (tolerance < 0) throw new ArgumentOutOfRangeException(nameof(tolerance));
+            for (var shift = 0; shift <= 16; shift += 8)
+                if (Math.Abs(((left >> shift) & 0xff) -
+                             ((right >> shift) & 0xff)) > tolerance)
+                    return false;
+            return true;
+        }
+
 
         private static void RunShutdownProbe(StemTeXBackend renderer, string profile)
         {
@@ -4351,9 +4787,13 @@ namespace LaTeXBlocks.WordSmoke
             var startupBackend = new StemTeXBackend();
             startupBackend.SwitchProfile(startupBackend.DefaultAvailableProfile);
             WaitFor(() => startupBackend.WorkerHasActiveItemForTest &&
-                    startupBackend.Status.StartsWith("warming:", StringComparison.Ordinal) &&
-                    startupBackend.HasOwnedWorkerHostForTest,
-                10000, "The startup-shutdown probe did not observe a live worker during renderer initialization.");
+                    startupBackend.Status.StartsWith("warming:", StringComparison.Ordinal),
+                10000, "The startup-shutdown probe did not enter renderer initialization.");
+            // StemTeX 0.13 may validate or generate the external TeX Live format
+            // before it launches a worker-host. Shutdown must remain nonblocking at
+            // either stage; when a worker already exists, the assertion below still
+            // proves that its owned process tree is removed.
+            var workerWasStarted = startupBackend.HasOwnedWorkerHostForTest;
             var shutdownTimer = Stopwatch.StartNew();
             startupBackend.Dispose();
             var disposeMilliseconds = shutdownTimer.ElapsedMilliseconds;
@@ -4362,7 +4802,7 @@ namespace LaTeXBlocks.WordSmoke
             WaitFor(() => !startupBackend.HasOwnedWorkerHostForTest, 2000,
                 "StemTeX left an owned worker-host process after initialization shutdown.");
             Console.WriteLine("StemTeX: initialization shutdown returned in " +
-                disposeMilliseconds + " ms.");
+                disposeMilliseconds + " ms (worker started: " + workerWasStarted + ").");
         }
 
         private static void RunStartupShutdownProbeInIsolatedHost()

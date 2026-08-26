@@ -380,6 +380,7 @@ namespace LaTeXBlocks.Word
         internal void SetInteractionContext(bool enabled)
         {
             Interlocked.Exchange(ref interactionContextEnabled, enabled ? 1 : 0);
+            ColorSyncDiagnostics.Write("monitor.context", "enabled=" + enabled);
             if (enabled) return;
             StopPaletteCommitTimer();
             lock (stateGate)
@@ -416,9 +417,12 @@ namespace LaTeXBlocks.Word
                     HookLowLevelKeyboard, lowLevelKeyboardHandler,
                     GetModuleHandle(null), 0);
                 started = true;
+                ColorSyncDiagnostics.Write("monitor.start", "ok process=" +
+                    wordProcessId);
             }
-            catch
+            catch (Exception exception)
             {
+                ColorSyncDiagnostics.Exception("monitor.start", exception);
                 RemoveAutomationHandlers();
                 throw;
             }
@@ -731,6 +735,9 @@ namespace LaTeXBlocks.Word
                 Interlocked.Increment(ref formatCancelsForTest);
             lastFormatSignalForTest = signal.InteractionId + "/" +
                 signal.Phase + "/" + signal.Origin;
+            ColorSyncDiagnostics.Write("monitor.signal", "id=" +
+                signal.InteractionId + " phase=" + signal.Phase +
+                " property=" + signal.Property + " origin=" + signal.Origin);
             pendingFormatSignals.Enqueue(signal);
             if (formatSignalDrainScheduled || disposed) return;
             try
@@ -833,9 +840,16 @@ namespace LaTeXBlocks.Word
                     }
                     formatSignal = pendingFormatSignals.Dequeue();
                 }
-                try { FormatInteraction?.Invoke(this, formatSignal); }
-                catch
+                try
                 {
+                    ColorSyncDiagnostics.Write("monitor.dispatch", "id=" +
+                        formatSignal.InteractionId + " phase=" +
+                        formatSignal.Phase);
+                    FormatInteraction?.Invoke(this, formatSignal);
+                }
+                catch (Exception exception)
+                {
+                    ColorSyncDiagnostics.Exception("monitor.dispatch", exception);
                     // Never let an integration failure escape through Word's native
                     // message pump or suppress the following transaction terminal.
                 }

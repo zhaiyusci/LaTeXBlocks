@@ -100,7 +100,7 @@ namespace LaTeXBlocks.Word
         {
             var kind = NormalizeKind(Kind, Mode, Role);
             if (kind == LaTeXBlockKind.Unspecified)
-                throw new InvalidOperationException("A persisted LaTeX Blocks object needs a kind.");
+                throw new InvalidOperationException("A persisted LaTeXBlocks object needs a kind.");
             var builder = new StringBuilder();
             builder.AppendLine(HeaderLine);
             Append(builder, "kind", FormatKind(kind));

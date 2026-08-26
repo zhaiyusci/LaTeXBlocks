@@ -5,7 +5,7 @@ items below describe intentional current choices.
 
 ## Render TeX as SVG through StemTeX
 
-LaTeX Blocks uses StemTeX's hot TeX renderer and embeds self-contained SVG. It does not convert LaTeX into OMML or
+LaTeXBlocks uses StemTeX's hot TeX renderer and embeds self-contained SVG. It does not convert LaTeX into OMML or
 depend on MathType. SVG preserves the TeX result and keeps rendering separate from Office's incomplete math layout.
 
 ## One visual object, one source
@@ -33,7 +33,7 @@ horizontal word-spacing workaround.
 
 A TeX paragraph line has no content-independent font rectangle: its height and depth are the maxima of the nodes
 actually present on that line. Consequently, a lowercase-only first line can otherwise expose only its x-height, and
-a final line without a descender can otherwise have zero depth. LaTeX Blocks places a zero-width strut in every
+a final line without a descender can otherwise have zero depth. LaTeXBlocks places a zero-width strut in every
 natural-width, single-baseline `hbox`, regardless of whether its mathematics uses inline style or `\displaystyle`.
 Ordinary styled Block text applies the same convention to its outer text lines before `preview` measures the completed
 TeX box. The strut contributes no horizontal advance or visible ink; it only establishes a stable minimum height and
@@ -41,7 +41,7 @@ depth. Taller glyphs, CJK text, and mathematics still enlarge the line naturally
 dimensions. These standard line boxes use `\PreviewBorder=0pt`; a generic preview margin must not add unrelated
 vertical space.
 
-LaTeX Blocks deliberately follows the LaTeX kernel's standard `\strutbox` convention: the minimum height is
+LaTeXBlocks deliberately follows the LaTeX kernel's standard `\strutbox` convention: the minimum height is
 `0.7 × \baselineskip` above the baseline and the minimum depth is `0.3 × \baselineskip` below it. These ratios are a
 typographic line-box policy, **not** measured ascent/descent values for Arial, SimHei, the selected CJK font, or the
 math font. They are retained because they give the two Office hosts stable, profile-independent outer line geometry
@@ -54,7 +54,7 @@ therefore do use the same minimum strut.
 ## PowerPoint has blocks, not inline math
 
 PowerPoint's text system is not a full rich-text layout surface for arbitrary embedded OLE/SVG inline objects. The
-PowerPoint add-in therefore creates only free-standing LaTeX Blocks. It inherits surrounding text size at insertion
+PowerPoint add-in therefore creates only free-standing LaTeXBlocks. It inherits surrounding text size at insertion
 but does not claim a text-run baseline or mutate neighboring text. See [POWERPOINT_SCOPE.md](POWERPOINT_SCOPE.md).
 
 ## Word Blocks reflow their SVG frame, not their picture transform
@@ -90,8 +90,10 @@ and a licensing strategy. The experiments remain under `samples/`; SVG is the su
 
 ## StemTeX is an external dependency, not a submodule
 
-StemTeX has its own source repository and release lifecycle. LaTeX Blocks consumes a staged runtime during development
-and freezes a compatible runtime and profiles into each installer. See [STEMTEX_INTEGRATION.md](STEMTEX_INTEGRATION.md).
+StemTeX has its own source repository and release lifecycle. LaTeXBlocks consumes its staged 0.13 runtime and ships
+the original Profile Creator without maintaining a fork. The installer freezes the patched engine runtime and built-in
+profile source, while package/font resources come from a user-selected system TeX Live tree. See
+[STEMTEX_INTEGRATION.md](STEMTEX_INTEGRATION.md).
 
 ## No broad document watchers
 

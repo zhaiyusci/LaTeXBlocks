@@ -28,7 +28,7 @@ content object; it does not add a container or a second copy of the TeX source.
 The exact version 1 grammar and fields are defined in [MAGIC_HEADER.md](MAGIC_HEADER.md).
 The parser separates the envelope at `% !end-latexblocks`; the remaining text is
 author source, not metadata. Office may normalize the physical newline encoding,
-but LaTeX Blocks does not collapse, trim, or otherwise reinterpret source lines.
+but LaTeXBlocks does not collapse, trim, or otherwise reinterpret source lines.
 
 The stable ID survives edits. Width is the StemTeX typesetting constraint, not a DPI value and not a raster-image
 scale. For a natural-width single-baseline source, depth is measured from an invisible dvisvgm marker at the TeX
@@ -87,7 +87,7 @@ next starts. Runtime selection and profile discovery are specified in [STEMTEX_I
 
 ## Geometry and vertical baseline
 
-Word aligns an inline image through its layout bottom, while `InlineShape.Range.Font.Position` persists only whole points. For TeX depth `d`, LaTeX Blocks applies `Font.Position = -round(d)` and moves the SVG viewBox by the residual `d - round(d)`. `Font.Position` is already relative to the current Word line baseline; neighboring text positions therefore never enter formula placement. `InlineShapes.AddPicture` initially quantizes an SVG's physical dimensions through CSS pixels. LaTeX Blocks therefore converts the final SVG dimensions directly to EMUs (`cx = round(width_pt × 12700)`, `cy = round(height_pt × 12700)`) and writes the exact pair to both `wp:inline/wp:extent` and `pic:spPr/a:xfrm/a:ext`. Every `wp:effectExtent` side (`l`, `t`, `r`, and `b`) is normalized to zero. These are vector-layout coordinates, not a DPI calculation. For auto-width content, the SVG viewport is the exact TeX box: explicit TeX glue remains part of that box, while the add-in supplies no display padding, ink padding, or horizontal-space correction. `InsertXML` reconstructs the containing paragraph, so the add-in duplicates and restores its complete direct `ParagraphFormat`; editing an SVG must not erase indentation, spacing, or equation tab stops. Fixed-width multiline blocks have no single text baseline and retain position zero. A numbered equation is instead one natural-width TeX display box and therefore has one measurable baseline.
+Word aligns an inline image through its layout bottom, while `InlineShape.Range.Font.Position` persists only whole points. For TeX depth `d`, LaTeXBlocks applies `Font.Position = -round(d)` and moves the SVG viewBox by the residual `d - round(d)`. `Font.Position` is already relative to the current Word line baseline; neighboring text positions therefore never enter formula placement. `InlineShapes.AddPicture` initially quantizes an SVG's physical dimensions through CSS pixels. LaTeXBlocks therefore converts the final SVG dimensions directly to EMUs (`cx = round(width_pt × 12700)`, `cy = round(height_pt × 12700)`) and writes the exact pair to both `wp:inline/wp:extent` and `pic:spPr/a:xfrm/a:ext`. Every `wp:effectExtent` side (`l`, `t`, `r`, and `b`) is normalized to zero. These are vector-layout coordinates, not a DPI calculation. For auto-width content, the SVG viewport is the exact TeX box: explicit TeX glue remains part of that box, while the add-in supplies no display padding, ink padding, or horizontal-space correction. `InsertXML` reconstructs the containing paragraph, so the add-in duplicates and restores its complete direct `ParagraphFormat`; editing an SVG must not erase indentation, spacing, or equation tab stops. Fixed-width multiline blocks have no single text baseline and retain position zero. A numbered equation is instead one natural-width TeX display box and therefore has one measurable baseline.
 
 The negative position belongs only to the inline picture character. Word omits that character-level `w:position` and
 `w:sz` when the one-character image range is exported as Flat OPC, so the add-in restores both the TeX design size and
@@ -120,7 +120,7 @@ drawings as one batch and a subsequent Undo remains Word's own formatting action
 
 The commit path rechecks the live native size and colour before replacing the object. If either changed while StemTeX
 was rendering, the stale SVG is discarded and one merged refresh is queued. Word enables Font Color for an exact
-`InlineShape` selection but its built-in command does not modify that drawing run. LaTeX Blocks therefore listens to
+`InlineShape` selection but its built-in command does not modify that drawing run. LaTeXBlocks therefore listens to
 one value-free native-format transaction stream (`Began`, `Committed`, `Canceled`) rather than exposing UIA/MSAA
 details to the document layer. The main button has a direct Invoke. A gallery popup is a separate `NetUIToolWindow`:
 MSAA selection identifies the active hovered swatch, but hover alone never commits; a left-button down/up pair that
@@ -146,9 +146,9 @@ mistaken for user-owned state.
 
 ## Inline word-spacing scaffold
 
-Word can change a U+0020 immediately adjacent to an `InlineShape`: most fonts expand it toward a host-chosen half-em advance, while SimSun can narrow it. This is host layout behavior, independent of SVG width, DPI, drawing-run font, East Asian auto-spacing, and character grid. For an auto-width ordinary-content formula, LaTeX Blocks avoids that direct adjacency by placing one U+2060 WORD JOINER immediately before the image and one immediately after it. The user's U+0020 characters are neither rewritten nor measured, and the SVG carries neither host spacing nor compensating geometry. The boundary pair belongs to the placement scaffold, not to the formula source or title metadata: the authoritative TeX source remains exclusively in `InlineShape.AlternativeText`.
+Word can change a U+0020 immediately adjacent to an `InlineShape`: most fonts expand it toward a host-chosen half-em advance, while SimSun can narrow it. This is host layout behavior, independent of SVG width, DPI, drawing-run font, East Asian auto-spacing, and character grid. For an auto-width ordinary-content formula, LaTeXBlocks avoids that direct adjacency by placing one U+2060 WORD JOINER immediately before the image and one immediately after it. The user's U+0020 characters are neither rewritten nor measured, and the SVG carries neither host spacing nor compensating geometry. The boundary pair belongs to the placement scaffold, not to the formula source or title metadata: the authoritative TeX source remains exclusively in `InlineShape.AlternativeText`.
 
-The pair is an exact invariant, not an insertion-time convenience. On a fresh insertion, LaTeX Blocks creates one
+The pair is an exact invariant, not an insertion-time convenience. On a fresh insertion, LaTeXBlocks creates one
 immediately adjacent joiner on each side. On an edit, it reuses an immediately adjacent existing joiner instead of
 inserting another one, so repeated updates preserve exactly one leading and one trailing U+2060. If an auto formula
 is changed into a fixed-width block, its unshared boundary joiners are removed; a joiner shared with an immediately
@@ -160,7 +160,7 @@ selection is retained; the boundary pair is never permanently included merely to
 
 ## Font-size synchronization
 
-Auto-width formulas store the TeX design size used to render them. LaTeX Blocks listens to Word's native Font Size
+Auto-width formulas store the TeX design size used to render them. LaTeXBlocks listens to Word's native Font Size
 combo-box command and rerenders formulas in the selected range at the new TeX size. Because Word has no general
 formatting-changed event, native formatting paths use a selection-bound snapshot: on entering a selection, the add-in
 records each auto formula's image-character size and colour against that selected drawing identity. The native Font
@@ -172,7 +172,7 @@ differed from inherited Word formatting. The coordinator never retains the mutab
 duplicated-range lease exists only for the affected asynchronous replacements. There is no recurring timer or
 document-wide background scan.
 
-Font size is a renderer input, not an image transform. For an auto-width inline object, LaTeX Blocks reads `Selection.Font.Size`, which is Word's actual typing size. This distinction matters at a run boundary and after changing the size of a collapsed caret: `Selection.Range.Font.Size` can still describe the character to the right even though newly typed text uses another size. For a mixed non-collapsed selection, Word reports `wdUndefined`; replacement then follows Word's native rule and uses the first selected character's insertion size. The resolved size is passed through StemTeX 0.12's native per-request `font_size_pt` API. StemTeX applies the size inside its live TeX worker, so the resulting SVG, natural width, math metrics, script sizes, optical-size choices, and TeX depth are all produced at the requested size. The add-in does not inject `\fontsize` into the user's source and never enlarges a 10 pt SVG to imitate another TeX size. Fixed-width blocks preserve their explicit document design and editor size.
+Font size is a renderer input, not an image transform. For an auto-width inline object, LaTeXBlocks reads `Selection.Font.Size`, which is Word's actual typing size. This distinction matters at a run boundary and after changing the size of a collapsed caret: `Selection.Range.Font.Size` can still describe the character to the right even though newly typed text uses another size. For a mixed non-collapsed selection, Word reports `wdUndefined`; replacement then follows Word's native rule and uses the first selected character's insertion size. The resolved size is passed through StemTeX 0.13's native per-request `font_size_pt` API. StemTeX applies the size inside its live TeX worker, so the resulting SVG, natural width, math metrics, script sizes, optical-size choices, and TeX depth are all produced at the requested size. The add-in does not inject `\fontsize` into the user's source and never enlarges a 10 pt SVG to imitate another TeX size. Fixed-width blocks preserve their explicit document design and editor size.
 
 The Typography control is a one-shot, LaTeX-aware font-size command. It applies the requested size to the selected Word text and rerenders every auto-width LaTeX object in that selection at the same TeX size. This is an explicit user transaction, not a document watcher or timer.
 
@@ -233,7 +233,7 @@ Single, At least, and Multiple spacing allow the inline SVG to participate in th
 paragraph's typography.
 
 The authoritative source may use `\[...\]`, `$$...$$`, `\(...\)`, `$...$`, `displaymath`, or `equation` delimiters.
-For rendering only, LaTeX Blocks removes that outer delimiter and submits `\(\displaystyle <body>\)` through the
+For rendering only, LaTeXBlocks removes that outer delimiter and submits `\(\displaystyle <body>\)` through the
 existing auto-width hbox measurement path. Thus TeX selects display-style fractions, limits, and glyph metrics while
 the resulting single-baseline box receives the same standard minimum strut as an inline formula. The wrapper never
 enters Alternative Text. A full TeX display
@@ -257,7 +257,7 @@ Word `REF` fields can target the individual `LTXEQ_...` bookmark even when sever
 paragraph. The add-in's **Equation Reference** picker enumerates those verified bookmarks and inserts native
 `REF LTXEQ_<id> \\h` fields, surrounded by ordinary parentheses, rather than relying on the built-in dialog.
 
-The **Update Numbers** command updates `SEQ LaTeXBlockEq` fields and then LaTeX Blocks' matching `REF` fields in the
+The **Update Numbers** command updates `SEQ LaTeXBlockEq` fields and then LaTeXBlocks' matching `REF` fields in the
 main document story. It also migrates the former private `SEQ LaTeXEquation` identifier into this public category,
 so an upgraded document retains one numbering sequence. Word Caption Labels are application state rather than DOCX
 data; the stable document-level reference target remains the bookmark around the field result. The command is an
@@ -293,7 +293,7 @@ A render failure therefore leaves both the previous visual output and its author
 
 ## Search and accessibility
 
-Alternative Text is semantically appropriate for a visual object whose mathematical or LaTeX meaning is otherwise unavailable to text-oriented tools. Word's native Ctrl+F does not search it. LaTeX Blocks does not work around that limitation with hidden document text because doing so creates a second layout object and a second source of truth.
+Alternative Text is semantically appropriate for a visual object whose mathematical or LaTeX meaning is otherwise unavailable to text-oriented tools. Word's native Ctrl+F does not search it. LaTeXBlocks does not work around that limitation with hidden document text because doing so creates a second layout object and a second source of truth.
 
 Comprehensive Find supplies the missing host capability: it searches visible document text and Alternative Text in one result list and selects the visual object for an Alternative Text match. The two add-ins share a document-level contract but do not depend on each other's binaries.
 

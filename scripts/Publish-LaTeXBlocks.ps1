@@ -1,6 +1,6 @@
 param(
     [ValidatePattern('^\d+\.\d+\.\d+$')]
-    [string]$Version = '0.2.127',
+    [string]$Version = '0.2.149',
     [string]$StemTeXSourceDir
 )
 
@@ -27,7 +27,8 @@ $vcRedist = Get-ChildItem 'C:\Program Files\Microsoft Visual Studio\18\Community
     Select-Object -First 1
 
 if ([string]::IsNullOrWhiteSpace($StemTeXSourceDir)) {
-    $StemTeXSourceDir = Join-Path $root '..\xetex\stemtex\dist\stemtex-installer\StemTeX'
+    $StemTeXSourceDir = Join-Path $root `
+        '..\xetex\stemtex\dist\package-stage\StemTeX-0.13.0'
 }
 $StemTeXSourceDir = [IO.Path]::GetFullPath($StemTeXSourceDir)
 
@@ -38,17 +39,19 @@ foreach ($required in @(
     $powerPointProject,
     (Join-Path $StemTeXSourceDir 'runtime\VERSION'),
     (Join-Path $StemTeXSourceDir 'runtime\bin\sdk\stemtex-renderer.dll'),
+    (Join-Path $StemTeXSourceDir 'runtime\bin\sdk\stemtex-profile.dll'),
     (Join-Path $StemTeXSourceDir 'runtime\bin\windows\dvisvgmdaemon.dll'),
-    (Join-Path $StemTeXSourceDir 'gui\profiles\xits_cjk\preamble.tex'),
-    (Join-Path $StemTeXSourceDir 'gui\profiles\arial_lete_simhei\preamble.tex')
+    (Join-Path $StemTeXSourceDir 'gui\stemtex-profile-creator.exe'),
+    (Join-Path $StemTeXSourceDir 'gui\profiles\unicodemath\preamble.tex'),
+    (Join-Path $StemTeXSourceDir 'gui\profiles\unicodemath\warmup.tex')
 )) {
     if (-not (Test-Path -LiteralPath $required)) { throw "Required build input was not found: $required" }
 }
 if (-not $vcRedist) { throw 'The VC++ 2015-2022 x64 redistributable was not found in Visual Studio.' }
 
 $stemTeXVersion = [Version]((Get-Content (Join-Path $StemTeXSourceDir 'runtime\VERSION') -Raw).Trim())
-if ($stemTeXVersion -lt [Version]'0.12.0') {
-    throw "LaTeX Blocks requires StemTeX 0.12.0 or newer; found $stemTeXVersion."
+if ($stemTeXVersion -lt [Version]'0.13.0') {
+    throw "LaTeXBlocks requires StemTeX 0.13.0 or newer; found $stemTeXVersion."
 }
 
 $rootPath = [IO.Path]::GetFullPath($root).TrimEnd('\') + '\'
@@ -66,7 +69,10 @@ if ((Test-Path -LiteralPath $installer) -or
 }
 
 $certificate = Get-ChildItem Cert:\CurrentUser\My |
-    Where-Object { $_.Subject -eq 'CN=LaTeX Blocks Development' -and $_.HasPrivateKey -and $_.NotAfter -gt (Get-Date) } |
+    # Accept the previous spaced development subject for signing continuity. New
+    # workstations create only the canonical no-space subject.
+    Where-Object { ($_.Subject -replace '\s', '') -eq 'CN=LaTeXBlocksDevelopment' -and
+        $_.HasPrivateKey -and $_.NotAfter -gt (Get-Date) } |
     Sort-Object NotAfter -Descending |
     Select-Object -First 1
 if (-not $certificate) {

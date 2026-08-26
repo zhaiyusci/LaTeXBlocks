@@ -9,5 +9,5 @@ if ($TargetHost -in @('PowerPoint', 'Both')) {
 foreach ($target in $targets) {
     $key = "HKCU:\Software\Microsoft\Office\$($target.RegistryHost)\Addins\$($target.Project)"
     if (Test-Path -LiteralPath $key) { Remove-Item -LiteralPath $key -Recurse -Force }
-    Write-Output "LaTeX Blocks unregistered from $($target.Host)."
+    Write-Output "LaTeXBlocks unregistered from $($target.Host)."
 }

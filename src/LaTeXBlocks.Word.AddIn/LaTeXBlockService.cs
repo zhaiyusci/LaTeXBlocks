@@ -9,6 +9,7 @@ using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using System.Xml;
+using LaTeXBlocks.OfficeColor;
 using Office = Microsoft.Office.Core;
 using WordInterop = Microsoft.Office.Interop.Word;
 
@@ -58,7 +59,7 @@ namespace LaTeXBlocks.Word
         internal string[] Profiles => renderers.Profiles;
 
         /// <summary>
-        /// Makes the public Word category behind numbered LaTeX Blocks visible to
+        /// Makes the public Word category behind numbered LaTeXBlocks visible to
         /// Word's native Caption and Cross-reference UI. Caption labels live in
         /// Word's application settings, while the actual document target remains
         /// the per-equation bookmark created around the SEQ result.
@@ -294,13 +295,8 @@ namespace LaTeXBlocks.Word
                     mode == LaTeXBlockLayoutMode.Auto, fontSizePt)
                 : await renderers.RenderLatestAsync(profile, renderSource, rendererWidthPt,
                     mode == LaTeXBlockLayoutMode.Auto, fontSizePt);
-            var shellStyle = styledFixedContent && style.HasBackgroundFill
-                ? new LaTeXBlockStyle(style.LineSpacing, 0, style.VerticalAlignment,
-                    style.TextColor, false, style.BackgroundColor,
-                    style.BorderThicknessPt, style.BorderColor)
-                : style;
             var finalSvg = styledFixedContent
-                ? LaTeXBlockSvgFrame.Decorate(result.Bytes, shellStyle,
+                ? LaTeXBlockSvgFrame.Decorate(result.Bytes, style,
                     outerWidthPt ?? widthPt, outerHeightPt)
                 : result.Bytes;
             return new LaTeXBlockRender(WriteSvg(finalSvg), finalSvg, result.DepthPt,
@@ -350,6 +346,9 @@ namespace LaTeXBlocks.Word
             // latent Block-only metadata on the inline formula.
             if (mode != LaTeXBlockLayoutMode.Fixed) style = null;
             var target = application.Selection.Range.Duplicate;
+            var nativeTextColor = NativeTextColorDescriptor.Automatic;
+            var preserveNativeTextColor = mode == LaTeXBlockLayoutMode.Auto &&
+                NativeTextColorDescriptor.TryCapture(target, out nativeTextColor);
             var metadata = LaTeXBlockMetadata.Create(widthPt, render.DepthPt, mode, render.FontSizePt,
                 LaTeXBlockRole.Content, style, kind);
             var document = target.Document;
@@ -380,12 +379,16 @@ namespace LaTeXBlocks.Word
                     }
                     var formulaTarget = document.Range(formulaPosition, formulaPosition);
                     var displayShape = InsertRenderedAt(formulaTarget, source, mode, render,
-                        metadata, false, () => documentMutated = true);
+                        metadata, false, () => documentMutated = true,
+                        preserveNativeTextColor ? nativeTextColor :
+                            (NativeTextColorDescriptor?)null);
                     MoveCaretAfterDisplayFormula(displayShape);
                     return displayShape;
                 }
                 return InsertRenderedAt(target, source, mode, render, metadata, true,
-                    () => documentMutated = true);
+                    () => documentMutated = true,
+                    preserveNativeTextColor ? nativeTextColor :
+                        (NativeTextColorDescriptor?)null);
             }
             catch (Exception exception)
             {
@@ -431,6 +434,9 @@ namespace LaTeXBlocks.Word
             EnsureEquationCategory();
             var document = application.ActiveDocument;
             var target = application.Selection.Range.Duplicate;
+            var nativeTextColor = NativeTextColorDescriptor.Automatic;
+            var preserveNativeTextColor = NativeTextColorDescriptor.TryCapture(
+                target, out nativeTextColor);
             ValidateNumberedEquationTarget(target);
             target.Collapse(WordInterop.WdCollapseDirection.wdCollapseStart);
             var layout = GetNumberedEquationLayout(target, render.FontSizePt);
@@ -453,7 +459,9 @@ namespace LaTeXBlocks.Word
                 document.Range(scaffoldStart, scaffoldStart).Text = leadingBreak + "\t\t()" + trailingBreak;
                 var formulaPosition = scaffoldStart + leadingBreak.Length + 1;
                 var formulaTarget = document.Range(formulaPosition, formulaPosition);
-                var shape = InsertRenderedAt(formulaTarget, source, mode, render, metadata, false);
+                var shape = InsertRenderedAt(formulaTarget, source, mode, render, metadata,
+                    false, null, preserveNativeTextColor ? nativeTextColor :
+                        (NativeTextColorDescriptor?)null);
                 var fieldPosition = shape.Range.End + 2; // after the second tab and literal '('
                 var field = document.Fields.Add(document.Range(fieldPosition, fieldPosition),
                     WordInterop.WdFieldType.wdFieldSequence,
@@ -492,7 +500,8 @@ namespace LaTeXBlocks.Word
         private WordInterop.InlineShape InsertRenderedAt(WordInterop.Range requestedTarget, string source,
             LaTeXBlockLayoutMode mode, LaTeXBlockRender render, LaTeXBlockMetadata metadata,
             bool select,
-            Action markDocumentMutated = null)
+            Action markDocumentMutated = null,
+            NativeTextColorDescriptor? nativeTextColor = null)
         {
             var target = requestedTarget.Duplicate;
             var replacesText = target.Start != target.End;
@@ -510,11 +519,17 @@ namespace LaTeXBlocks.Word
             markDocumentMutated?.Invoke();
             ApplyContractMetadata(shape, source, metadata);
             EnsureInlineWordJoinerBoundaries(shape, metadata);
-            ApplyHostRunFormat(shape, metadata, render.TextColor);
+            ApplyHostRunFormat(shape, metadata, render.TextColor, nativeTextColor);
             // Graphics Fill can make Word recalculate effect extents for some SVG
             // geometries. Normalize only after every host-owned format is final.
             shape = NormalizeWordInlineDrawing(shape, svgSize);
             ApplyHostRunTextFormat(shape, metadata, render.TextColor);
+            if (nativeTextColor.HasValue)
+            {
+                nativeTextColor.Value.ApplyTo(shape.Range);
+                ApplyFormulaForegroundFill(shape, metadata, render.TextColor,
+                    nativeTextColor);
+            }
             if (select)
                 MoveCaretAfterInlineFormula(shape, metadata);
             return shape;
@@ -889,7 +904,9 @@ namespace LaTeXBlocks.Word
             NativeTextColorDescriptor nativeTextColor)
         {
             hostRunFormat?.Apply(shape.Range);
-            ApplyHostRunFormat(shape, metadata, render.TextColor);
+            ApplyHostRunFormat(shape, metadata, render.TextColor,
+                preserveNativeTextColor ? nativeTextColor :
+                    (NativeTextColorDescriptor?)null);
             if (preserveNativeTextColor) nativeTextColor.ApplyTo(shape.Range);
         }
 
@@ -1008,7 +1025,9 @@ namespace LaTeXBlocks.Word
                 replacement = target.InlineShapes.AddPicture(insertionPath, LinkToFile: false, SaveWithDocument: true, Range: target);
                 ApplyContractMetadata(replacement, source, metadata);
                 hostRunFormat.Apply(replacement.Range);
-                ApplyHostRunFormat(replacement, metadata, render.TextColor);
+                ApplyHostRunFormat(replacement, metadata, render.TextColor,
+                    preserveNativeTextColor ? nativeTextColor :
+                        (NativeTextColorDescriptor?)null);
                 // ApplyContract and NormalizeWordInlineDrawing rebuild the drawing run,
                 // and ApplyHostRunFormat deliberately writes the resolved render RGB.
                 // Restore Word's richer native value last so a theme colour remains a
@@ -1021,7 +1040,11 @@ namespace LaTeXBlocks.Word
                 hostRunFormat.Apply(replacement.Range);
                 ApplyHostRunTextFormat(replacement, metadata, render.TextColor);
                 if (preserveNativeTextColor)
+                {
                     nativeTextColor.ApplyTo(replacement.Range);
+                    ApplyFormulaForegroundFill(replacement, metadata,
+                        render.TextColor, nativeTextColor);
+                }
                 if (selectReplacement)
                 {
                     try
@@ -1137,13 +1160,14 @@ namespace LaTeXBlocks.Word
                     following.MoveEnd(WordInterop.WdUnits.wdCharacter, 1) == 1 &&
                     following.Text == "\r";
 
-                application.UndoRecord.StartCustomRecord("Update LaTeX Blocks");
+                application.UndoRecord.StartCustomRecord("Update LaTeXBlocks");
                 undoStarted = true;
                 if (replaceSvgMediaDirectly && TryReplaceWordInlineSvgMediaXml(
                         originalXml, states, formats, out var directMediaXml))
                 {
                     foreach (var state in states)
-                        state.CaptureHostFormat();
+                        state.CaptureHostFormat(
+                            formats[state.Metadata.Id].NativeTextColor);
                     documentMutated = true;
                     var mediaInsertion = originalEnvelope.Duplicate;
                     mediaInsertion.Collapse(
@@ -1198,8 +1222,11 @@ namespace LaTeXBlocks.Word
                         // drawing XML and w:rPr colour are preserved. Replay the value
                         // captured from the old object; never infer it from Font.Color.
                         if (candidateMetadata.Kind != LaTeXBlockKind.LaTeXBlock)
-                            ApplySvgForegroundFill(candidate,
-                                state.SvgForegroundFillColor);
+                            ApplyFormulaForegroundFill(candidate, candidateMetadata,
+                                state.SvgForegroundFillColor,
+                                state.PreserveNativeTextColor
+                                    ? state.NativeTextColor
+                                    : (NativeTextColorDescriptor?)null);
                         restoredTargets++;
                     }
                     if (restoredTargets != states.Count)
@@ -1296,7 +1323,7 @@ namespace LaTeXBlocks.Word
                 throw new InvalidOperationException("The selected image is not a LaTeX Block.");
             if (previous.Role != LaTeXBlockRole.Content || previous.Mode != LaTeXBlockLayoutMode.Fixed)
                 throw new InvalidOperationException(
-                    "Only fixed-width LaTeX Blocks can remain floating. Inline formulas and numbered equations must remain inline.");
+                    "Only fixed-width LaTeXBlocks can remain floating. Inline formulas and numbered equations must remain inline.");
             if (mode != LaTeXBlockLayoutMode.Fixed)
                 throw new InvalidOperationException(
                     "A floating LaTeX Block must remain fixed-width. Convert it back to In Line with Text before changing it to an auto-width formula.");
@@ -2308,11 +2335,28 @@ namespace LaTeXBlocks.Word
         }
 
         private static void ApplyHostRunFormat(WordInterop.InlineShape shape,
-            LaTeXBlockMetadata metadata, int textColor)
+            LaTeXBlockMetadata metadata, int textColor,
+            NativeTextColorDescriptor? nativeTextColor = null)
         {
             ApplyHostRunTextFormat(shape, metadata, textColor);
-            if (metadata.Kind != LaTeXBlockKind.LaTeXBlock)
-                ApplySvgForegroundFill(shape, textColor);
+            ApplyFormulaForegroundFill(shape, metadata, textColor,
+                nativeTextColor);
+        }
+
+        private static void ApplyFormulaForegroundFill(
+            WordInterop.InlineShape shape, LaTeXBlockMetadata metadata,
+            int textColor, NativeTextColorDescriptor? nativeTextColor)
+        {
+            if (metadata.Kind == LaTeXBlockKind.LaTeXBlock) return;
+            if (nativeTextColor.HasValue &&
+                nativeTextColor.Value.Kind == NativeTextColorKind.Theme)
+            {
+                ApplySvgForegroundThemeFill(shape,
+                    nativeTextColor.Value.ThemeColor,
+                    nativeTextColor.Value.TintAndShade);
+                return;
+            }
+            ApplySvgForegroundFill(shape, textColor);
         }
 
         private static void ApplyHostRunTextFormat(WordInterop.InlineShape shape,
@@ -2349,41 +2393,126 @@ namespace LaTeXBlocks.Word
                 shape.LockAspectRatio = Office.MsoTriState.msoFalse;
         }
 
-        // Office calls this property "Graphics Fill", but for an SVG it replaces
-        // only paint that the SVG leaves unspecified.  It is therefore the Block's
-        // foreground/text colour, not LaTeXBlockStyle.BackgroundColor.  The latter
-        // is emitted as an explicit rectangle by LaTeXBlockSvgFrame and must never
-        // flow through this native Office property.
         internal static void ApplySvgForegroundFill(WordInterop.InlineShape shape,
             int textColor)
         {
+            var normalized = NormalizeTextColor(textColor);
+            var color = normalized == AutomaticTextColor
+                ? OfficeGraphicColor.Automatic
+                : OfficeGraphicColor.FromRgb(OfficeRgb.FromColorRef(normalized));
+            WordGraphicColorAdapter.ApplyToFill(shape, color);
+        }
+
+        internal static void ApplySvgForegroundThemeFill(
+            WordInterop.InlineShape shape,
+            WordInterop.WdThemeColorIndex themeColor,
+            float tintAndShade)
+        {
             if (shape == null) throw new ArgumentNullException(nameof(shape));
+            if (themeColor == WordInterop.WdThemeColorIndex.wdNotThemeColor)
+                throw new ArgumentOutOfRangeException(nameof(themeColor));
+            if (float.IsNaN(tintAndShade) || float.IsInfinity(tintAndShade) ||
+                tintAndShade < -1f || tintAndShade > 1f)
+                throw new ArgumentOutOfRangeException(nameof(tintAndShade));
+            if (!WordGraphicColorAdapter.TryFromWordTheme(themeColor,
+                    out var semanticTheme))
+                throw new ArgumentOutOfRangeException(nameof(themeColor));
+            WordGraphicColorAdapter.ApplyToFill(shape,
+                OfficeGraphicColor.FromTheme(semanticTheme,
+                    OfficeColorTransform.FromSignedAdjustment(tintAndShade)));
+        }
+
+        internal static bool TryReadSvgForegroundFillColor(
+            WordInterop.InlineShape shape, out int textColor)
+        {
+            textColor = AutomaticTextColor;
+            if (shape == null) return false;
             WordInterop.FillFormat fill = null;
             WordInterop.ColorFormat foreground = null;
             try
             {
                 fill = shape.Fill;
                 foreground = fill.ForeColor;
-                var color = NormalizeTextColor(textColor);
-                var targetRgb = color == AutomaticTextColor ? 0 : color;
-                var visible = fill.Visible == Office.MsoTriState.msoTrue;
-                var solid = fill.Type == Office.MsoFillType.msoFillSolid;
-                if (visible && solid &&
-                    NormalizeTextColor(foreground.RGB) == targetRgb)
-                    return;
-
-                // Existing formula drawings already have a visible solid fill. Do
-                // not call Solid() again: Word rebuilds the fill state before RGB is
-                // assigned, which can expose an intermediate/default paint frame.
-                if (!visible) fill.Visible = Office.MsoTriState.msoTrue;
-                if (!solid) fill.Solid();
-                foreground.RGB = targetRgb;
+                if (fill.Visible != Office.MsoTriState.msoTrue ||
+                    fill.Type != Office.MsoFillType.msoFillSolid)
+                    return false;
+                textColor = NormalizeTextColor(foreground.RGB);
+                return true;
+            }
+            catch (COMException)
+            {
+                return false;
             }
             finally
             {
                 if (foreground != null) Marshal.ReleaseComObject(foreground);
                 if (fill != null) Marshal.ReleaseComObject(fill);
             }
+        }
+
+        internal static bool TryReadSvgForegroundThemeFill(
+            WordInterop.InlineShape shape,
+            out WordInterop.WdThemeColorIndex themeColor,
+            out float tintAndShade)
+        {
+            themeColor = WordInterop.WdThemeColorIndex.wdNotThemeColor;
+            tintAndShade = 0;
+            if (shape == null) return false;
+            if (!WordGraphicColorAdapter.TryReadFill(shape, out var color) ||
+                color.Kind != OfficeGraphicColorKind.Theme) return false;
+            themeColor = WordGraphicColorAdapter.ToWordTheme(color.Theme);
+            tintAndShade = color.Transform.ToSignedAdjustment();
+            return true;
+        }
+
+        private static WordInterop.WdThemeColorIndex ToGraphicsThemeColor(
+            WordInterop.WdThemeColorIndex wordThemeColor)
+        {
+            switch (wordThemeColor)
+            {
+                case WordInterop.WdThemeColorIndex.wdThemeColorBackground1:
+                    return (WordInterop.WdThemeColorIndex)2;
+                case WordInterop.WdThemeColorIndex.wdThemeColorText1:
+                    return (WordInterop.WdThemeColorIndex)1;
+                case WordInterop.WdThemeColorIndex.wdThemeColorBackground2:
+                    return (WordInterop.WdThemeColorIndex)4;
+                case WordInterop.WdThemeColorIndex.wdThemeColorText2:
+                    return (WordInterop.WdThemeColorIndex)3;
+                default:
+                    var value = (int)wordThemeColor;
+                    if (value < 0 || value > 11)
+                        throw new ArgumentOutOfRangeException(
+                            nameof(wordThemeColor));
+                    // Word Font.TextColor uses WdThemeColorIndex (0-based), while
+                    // the drawing colour behind InlineShape.Fill uses the Office
+                    // MsoThemeColorIndex numeric contract (1-based) despite exposing
+                    // a Word ColorFormat RCW.
+                    return (WordInterop.WdThemeColorIndex)(value + 1);
+            }
+        }
+
+        private static bool TryFromGraphicsThemeColor(
+            WordInterop.WdThemeColorIndex graphicsThemeColor,
+            out WordInterop.WdThemeColorIndex wordThemeColor)
+        {
+            var value = (int)graphicsThemeColor;
+            if (value < 1 || value > 12)
+            {
+                wordThemeColor =
+                    WordInterop.WdThemeColorIndex.wdNotThemeColor;
+                return false;
+            }
+            wordThemeColor = (WordInterop.WdThemeColorIndex)(value - 1);
+            return true;
+        }
+
+        internal static bool FormulaColorNeedsSynchronization(int hostTextColor,
+            int svgForegroundFillColor, int targetTextColor)
+        {
+            var target = NormalizeTextColor(targetTextColor);
+            var targetSvgColor = target == AutomaticTextColor ? 0 : target;
+            return !TextColorsEqual(hostTextColor, target) ||
+                   NormalizeTextColor(svgForegroundFillColor) != targetSvgColor;
         }
 
         internal bool TryApplySvgForegroundFillsBatch(
@@ -2395,7 +2524,10 @@ namespace LaTeXBlocks.Word
                 if (update?.Shape == null ||
                     !TryReadContract(update.Shape, out var metadata, out _) ||
                     metadata.Kind == LaTeXBlockKind.LaTeXBlock)
+                {
+                    ColorSyncDiagnostics.Write("fill-batch", "contract-rejected");
                     return false;
+                }
 
             var undoStarted = false;
             try
@@ -2405,12 +2537,31 @@ namespace LaTeXBlocks.Word
                 undoStarted = true;
                 foreach (var update in updates)
                 {
-                    if (update.TargetNativeTextColor.HasValue &&
-                        (!NativeTextColorDescriptor.TryCapture(update.Shape.Range,
-                             out var liveTextColor) ||
-                         !liveTextColor.Equals(update.TargetNativeTextColor.Value)))
-                        update.TargetNativeTextColor.Value.ApplyTo(update.Shape.Range);
-                    ApplySvgForegroundFill(update.Shape, update.TargetTextColor);
+                    var nativeTextColor = update.TargetNativeTextColor;
+                    ColorSyncDiagnostics.Write("fill-batch", "shape-start native=" +
+                        (nativeTextColor.HasValue
+                            ? nativeTextColor.Value.Kind.ToString()
+                            : "none") + " theme=" +
+                        (nativeTextColor.HasValue
+                            ? ((int)nativeTextColor.Value.ThemeColor).ToString(
+                                CultureInfo.InvariantCulture)
+                            : "n/a") + " tint=" +
+                        (nativeTextColor.HasValue
+                            ? nativeTextColor.Value.TintAndShade.ToString("R",
+                                CultureInfo.InvariantCulture)
+                            : "n/a"));
+                    // This path is entered only after Word's native colour command
+                    // has finished. Word already owns and updated the run colour;
+                    // touching Range.Font again is both redundant and very costly
+                    // for a large selection. Only synchronize the graphic fill.
+                    if (nativeTextColor.HasValue &&
+                        nativeTextColor.Value.Kind == NativeTextColorKind.Theme)
+                        ApplySvgForegroundThemeFill(update.Shape,
+                            nativeTextColor.Value.ThemeColor,
+                            nativeTextColor.Value.TintAndShade);
+                    else
+                        ApplySvgForegroundFill(update.Shape, update.TargetTextColor);
+                    ColorSyncDiagnostics.Write("fill-batch", "shape-done");
                 }
                 return true;
             }
@@ -2518,30 +2669,32 @@ namespace LaTeXBlocks.Word
         /// </summary>
         internal readonly struct NativeTextColorDescriptor : IEquatable<NativeTextColorDescriptor>
         {
-            private NativeTextColorDescriptor(NativeTextColorKind kind, int directWordColor,
-                WordInterop.WdThemeColorIndex themeColor, float tintAndShade)
+            private NativeTextColorDescriptor(OfficeGraphicColor value)
             {
-                Kind = kind;
-                DirectWordColor = directWordColor;
-                ThemeColor = themeColor;
-                TintAndShade = tintAndShade;
+                Value = value;
             }
 
-            internal NativeTextColorKind Kind { get; }
-            internal int DirectWordColor { get; }
-            internal WordInterop.WdThemeColorIndex ThemeColor { get; }
-            internal float TintAndShade { get; }
+            // Compatibility facade for existing Word call sites and smoke tests.
+            // The canonical value is the shared, host-independent model.
+            internal OfficeGraphicColor Value { get; }
+            internal NativeTextColorKind Kind => (NativeTextColorKind)Value.Kind;
+            internal int DirectWordColor => Value.Kind == OfficeGraphicColorKind.Rgb
+                ? OfficeRgb.ToColorRef(Value.Rgb) : AutomaticTextColor;
+            internal WordInterop.WdThemeColorIndex ThemeColor =>
+                Value.Kind == OfficeGraphicColorKind.Theme
+                    ? WordGraphicColorAdapter.ToWordTheme(Value.Theme)
+                    : WordInterop.WdThemeColorIndex.wdNotThemeColor;
+            internal float TintAndShade => Value.Transform.ToSignedAdjustment();
 
             internal static NativeTextColorDescriptor Automatic =>
-                new NativeTextColorDescriptor(NativeTextColorKind.Automatic,
-                    AutomaticTextColor, WordInterop.WdThemeColorIndex.wdNotThemeColor, 0);
+                new NativeTextColorDescriptor(OfficeGraphicColor.Automatic);
 
             internal static NativeTextColorDescriptor Direct(int wordColor)
             {
                 if (wordColor < 0 || wordColor > 0x00ffffff)
                     throw new ArgumentOutOfRangeException(nameof(wordColor));
-                return new NativeTextColorDescriptor(NativeTextColorKind.Direct, wordColor,
-                    WordInterop.WdThemeColorIndex.wdNotThemeColor, 0);
+                return new NativeTextColorDescriptor(OfficeGraphicColor.FromRgb(
+                    OfficeRgb.FromColorRef(wordColor)));
             }
 
             internal static NativeTextColorDescriptor Theme(
@@ -2552,8 +2705,12 @@ namespace LaTeXBlocks.Word
                 if (float.IsNaN(tintAndShade) || float.IsInfinity(tintAndShade) ||
                     tintAndShade < -1f || tintAndShade > 1f)
                     throw new ArgumentOutOfRangeException(nameof(tintAndShade));
-                return new NativeTextColorDescriptor(NativeTextColorKind.Theme, 0,
-                    themeColor, tintAndShade);
+                if (!WordGraphicColorAdapter.TryFromWordTheme(themeColor,
+                        out var semanticTheme))
+                    throw new ArgumentOutOfRangeException(nameof(themeColor));
+                return new NativeTextColorDescriptor(OfficeGraphicColor.FromTheme(
+                    semanticTheme,
+                    OfficeColorTransform.FromSignedAdjustment(tintAndShade)));
             }
 
             internal static bool TryCaptureCollapsedSelection(WordInterop.Selection selection,
@@ -2585,19 +2742,24 @@ namespace LaTeXBlocks.Word
             {
                 descriptor = Automatic;
                 if (range == null) return false;
-                WordInterop.Font font = null;
                 try
                 {
-                    font = range.Font;
-                    return TryCapture(font, out descriptor);
+                    // Font.TextColor is not authoritative for an inline Office
+                    // Graphic: after a native size command Word can report the theme
+                    // slot while transiently returning TintAndShade == 0.  The drawing
+                    // run is the persisted owner of that semantic colour, so read it
+                    // before falling back to COM.  This is independent of formula kind.
+                    if (TryParseNativeTextColorFromWordOpenXml(range.WordOpenXML,
+                            out descriptor))
+                        return true;
+                    if (!WordGraphicColorAdapter.TryCaptureFont(range,
+                            out var semanticColor)) return false;
+                    descriptor = new NativeTextColorDescriptor(semanticColor);
+                    return true;
                 }
                 catch (COMException)
                 {
                     return false;
-                }
-                finally
-                {
-                    if (font != null) Marshal.ReleaseComObject(font);
                 }
             }
 
@@ -2646,39 +2808,12 @@ namespace LaTeXBlocks.Word
 
             internal void ApplyTo(WordInterop.Range range)
             {
-                if (range == null) throw new ArgumentNullException(nameof(range));
-                WordInterop.Font font = null;
-                WordInterop.ColorFormat colorFormat = null;
-                try
-                {
-                    font = range.Font;
-                    if (Kind == NativeTextColorKind.Automatic)
-                    {
-                        font.Color = (WordInterop.WdColor)AutomaticTextColor;
-                    }
-                    else if (Kind == NativeTextColorKind.Direct)
-                    {
-                        font.Color = (WordInterop.WdColor)DirectWordColor;
-                    }
-                    else
-                    {
-                        colorFormat = font.TextColor;
-                        colorFormat.ObjectThemeColor = ThemeColor;
-                        colorFormat.TintAndShade = TintAndShade;
-                    }
-                }
-                finally
-                {
-                    if (colorFormat != null) Marshal.ReleaseComObject(colorFormat);
-                    if (font != null) Marshal.ReleaseComObject(font);
-                }
+                WordGraphicColorAdapter.ApplyToRange(range, Value);
             }
 
             public bool Equals(NativeTextColorDescriptor other)
             {
-                return Kind == other.Kind && DirectWordColor == other.DirectWordColor &&
-                       ThemeColor == other.ThemeColor &&
-                       Math.Abs(TintAndShade - other.TintAndShade) < 0.000001f;
+                return Value.Equals(other.Value);
             }
 
             public override bool Equals(object value)
@@ -2690,11 +2825,7 @@ namespace LaTeXBlocks.Word
             {
                 unchecked
                 {
-                    var hash = (int)Kind;
-                    hash = (hash * 397) ^ DirectWordColor;
-                    hash = (hash * 397) ^ (int)ThemeColor;
-                    hash = (hash * 397) ^ TintAndShade.GetHashCode();
-                    return hash;
+                    return Value.GetHashCode();
                 }
             }
         }
@@ -2773,15 +2904,14 @@ namespace LaTeXBlocks.Word
             var red = textColor & 0xff;
             var green = (textColor >> 8) & 0xff;
             var blue = (textColor >> 16) & 0xff;
-            return "\\begingroup\\color[HTML]{" + red.ToString("X2", CultureInfo.InvariantCulture) +
-                   green.ToString("X2", CultureInfo.InvariantCulture) +
-                   blue.ToString("X2", CultureInfo.InvariantCulture) + "}%\n" +
+            var color = System.Drawing.Color.FromArgb(red, green, blue);
+            return "\\begingroup" + LaTeXBlockStyle.BeginSvgColor(color) + "%\n" +
                    // This percent is part of the wrapper, not the author's source: an
                    // un-commented newline after an inline fragment becomes a TeX
                    // interword glue node inside StemTeXRenderer's measurement hbox.
                    // That would make changing Word Font.Color change the formula's
                    // width, even though colour must affect paint only.
-                   source + "%\n\\endgroup";
+                   source + "%\n\\special{color pop}\\endgroup";
         }
 
         private static bool TryReadTextColor(WordInterop.Font font, out int color,
@@ -2837,6 +2967,126 @@ namespace LaTeXBlocks.Word
             catch (COMException)
             {
                 return false;
+            }
+        }
+
+        internal static bool TryParseNativeTextColorFromWordOpenXml(
+            string wordOpenXml, out NativeTextColorDescriptor descriptor)
+        {
+            descriptor = NativeTextColorDescriptor.Automatic;
+            if (string.IsNullOrWhiteSpace(wordOpenXml)) return false;
+            try
+            {
+                var document = new XmlDocument { XmlResolver = null };
+                document.LoadXml(wordOpenXml);
+                var namespaces = new XmlNamespaceManager(document.NameTable);
+                namespaces.AddNamespace("pkg",
+                    "http://schemas.microsoft.com/office/2006/xmlPackage");
+                namespaces.AddNamespace("w",
+                    "http://schemas.openxmlformats.org/wordprocessingml/2006/main");
+                var wordNamespace =
+                    "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+                // Range.WordOpenXML is not stable about either the pkg:part name or
+                // the wrapper used for a short selection.  The ownership boundary is
+                // stable, though: Word persists an Office Graphic's theme semantics
+                // on the w:r that owns w:drawing.  Never take the first w:color in
+                // the package; paragraph defaults and neighbouring text can carry a
+                // different theme colour.
+                XmlNode colorNode = null;
+                foreach (XmlNode drawingRun in document.SelectNodes(
+                             "//w:r[w:drawing]", namespaces))
+                {
+                    var candidate = drawingRun.SelectSingleNode(
+                        "w:rPr/w:color", namespaces);
+                    if (candidate?.Attributes?["themeColor", wordNamespace] == null)
+                        continue;
+                    colorNode = candidate;
+                    break;
+                }
+                // A few Word builds omit w:drawing from a one-character Flat OPC
+                // wrapper.  Accept a package-wide fallback only when there is one
+                // unambiguous semantic theme colour; never guess among neighbours.
+                if (colorNode == null)
+                {
+                    foreach (XmlNode candidate in document.GetElementsByTagName(
+                                 "color", wordNamespace))
+                    {
+                        if (candidate.Attributes?["themeColor", wordNamespace] == null)
+                            continue;
+                        if (colorNode != null) return false;
+                        colorNode = candidate;
+                    }
+                }
+                if (colorNode == null) return false;
+                var themeValue = colorNode.Attributes?["themeColor",
+                    wordNamespace]?.Value;
+                if (!TryParseWordThemeColor(themeValue, out var themeColor))
+                    return false;
+
+                var tintAndShade = 0f;
+                var tintValue = colorNode.Attributes?["themeTint",
+                    wordNamespace]?.Value;
+                var shadeValue = colorNode.Attributes?["themeShade",
+                    wordNamespace]?.Value;
+                byte modifier;
+                if (!string.IsNullOrWhiteSpace(tintValue))
+                {
+                    if (tintValue.Length != 2 ||
+                        !byte.TryParse(tintValue, NumberStyles.HexNumber,
+                            CultureInfo.InvariantCulture, out modifier))
+                        return false;
+                    tintAndShade = (255 - modifier) / 255f;
+                }
+                else if (!string.IsNullOrWhiteSpace(shadeValue))
+                {
+                    if (shadeValue.Length != 2 ||
+                        !byte.TryParse(shadeValue, NumberStyles.HexNumber,
+                            CultureInfo.InvariantCulture, out modifier))
+                        return false;
+                    tintAndShade = modifier / 255f - 1f;
+                }
+                descriptor = NativeTextColorDescriptor.Theme(themeColor,
+                    tintAndShade);
+                return true;
+            }
+            catch (XmlException)
+            {
+                return false;
+            }
+        }
+
+        private static bool TryParseWordThemeColor(string value,
+            out WordInterop.WdThemeColorIndex themeColor)
+        {
+            switch ((value ?? string.Empty).Trim().ToLowerInvariant())
+            {
+                case "dark1": themeColor = (WordInterop.WdThemeColorIndex)0; return true;
+                case "light1": themeColor = (WordInterop.WdThemeColorIndex)1; return true;
+                case "dark2": themeColor = (WordInterop.WdThemeColorIndex)2; return true;
+                case "light2": themeColor = (WordInterop.WdThemeColorIndex)3; return true;
+                case "accent1": themeColor = (WordInterop.WdThemeColorIndex)4; return true;
+                case "accent2": themeColor = (WordInterop.WdThemeColorIndex)5; return true;
+                case "accent3": themeColor = (WordInterop.WdThemeColorIndex)6; return true;
+                case "accent4": themeColor = (WordInterop.WdThemeColorIndex)7; return true;
+                case "accent5": themeColor = (WordInterop.WdThemeColorIndex)8; return true;
+                case "accent6": themeColor = (WordInterop.WdThemeColorIndex)9; return true;
+                case "hyperlink": themeColor = (WordInterop.WdThemeColorIndex)10; return true;
+                case "followedhyperlink": themeColor = (WordInterop.WdThemeColorIndex)11; return true;
+                case "background1":
+                    themeColor = WordInterop.WdThemeColorIndex.wdThemeColorBackground1;
+                    return true;
+                case "text1":
+                    themeColor = WordInterop.WdThemeColorIndex.wdThemeColorText1;
+                    return true;
+                case "background2":
+                    themeColor = WordInterop.WdThemeColorIndex.wdThemeColorBackground2;
+                    return true;
+                case "text2":
+                    themeColor = WordInterop.WdThemeColorIndex.wdThemeColorText2;
+                    return true;
+                default:
+                    themeColor = WordInterop.WdThemeColorIndex.wdNotThemeColor;
+                    return false;
             }
         }
 
@@ -3190,17 +3440,84 @@ namespace LaTeXBlocks.Word
                 var properties = Regex.Match(run.Value,
                     "<w:rPr\\b(?:[^>]*/>|[^>]*>[\\s\\S]*?</w:rPr>)",
                     RegexOptions.CultureInvariant);
+                NativeTextColorDescriptor? nativeTextColor = null;
+                if (TryParseNativeTextColorFromWordRunXml(run.Value,
+                        out var parsedTextColor))
+                    nativeTextColor = parsedTextColor;
                 formats[metadata.Id] = new BatchInlineXmlFormat(state.SvgSize,
                     state.Metadata.FontSizePt, state.Metadata.DepthPt,
                     properties.Success ? properties.Value : "<w:rPr></w:rPr>",
                     state.Metadata, state.Metadata.Kind == LaTeXBlockKind.LaTeXBlock
                         ? NormalizeSourceText(state.Update.Source)
-                        : NormalizeMathBody(state.Update.Source));
+                        : NormalizeMathBody(state.Update.Source), nativeTextColor);
             }
             if (formats.Count != states.Count)
                 throw new InvalidDataException(
                     "Word batch XML did not contain every original formula run.");
             return formats;
+        }
+
+        private static bool TryParseNativeTextColorFromWordRunXml(string runXml,
+            out NativeTextColorDescriptor descriptor)
+        {
+            descriptor = NativeTextColorDescriptor.Automatic;
+            if (string.IsNullOrWhiteSpace(runXml)) return false;
+            var color = Regex.Match(runXml, "<w:color\\b(?<attributes>[^>]*)/?>",
+                RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
+            if (!color.Success) return false;
+            var attributes = color.Groups["attributes"].Value;
+            var theme = Regex.Match(attributes,
+                "\\bw:themeColor=\"(?<value>[^\"]+)\"",
+                RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
+            if (!theme.Success)
+            {
+                var value = Regex.Match(attributes,
+                    "\\bw:val=\"(?<value>[^\"]+)\"",
+                    RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
+                if (!value.Success) return false;
+                var raw = value.Groups["value"].Value;
+                if (string.Equals(raw, "auto", StringComparison.OrdinalIgnoreCase))
+                {
+                    descriptor = NativeTextColorDescriptor.Automatic;
+                    return true;
+                }
+                if (raw.Length != 6 || !int.TryParse(raw,
+                        NumberStyles.HexNumber, CultureInfo.InvariantCulture,
+                        out var rgb))
+                    return false;
+                descriptor = NativeTextColorDescriptor.Direct(
+                    ((rgb >> 16) & 0xff) | (rgb & 0x00ff00) |
+                    ((rgb & 0xff) << 16));
+                return true;
+            }
+            if (!TryParseWordThemeColor(theme.Groups["value"].Value,
+                    out var themeColor)) return false;
+
+            var adjustment = 0f;
+            var tint = Regex.Match(attributes,
+                "\\bw:themeTint=\"(?<value>[0-9A-Fa-f]{2})\"",
+                RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
+            var shade = Regex.Match(attributes,
+                "\\bw:themeShade=\"(?<value>[0-9A-Fa-f]{2})\"",
+                RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
+            if (tint.Success)
+            {
+                if (!byte.TryParse(tint.Groups["value"].Value,
+                        NumberStyles.HexNumber, CultureInfo.InvariantCulture,
+                        out var modifier))
+                    return false;
+                adjustment = (255 - modifier) / 255f;
+            }
+            else if (shade.Success)
+            {
+                if (!byte.TryParse(shade.Groups["value"].Value,
+                        NumberStyles.HexNumber, CultureInfo.InvariantCulture,
+                        out var modifier))
+                    return false;
+                adjustment = modifier / 255f - 1f;
+            }
+            descriptor = NativeTextColorDescriptor.Theme(themeColor, adjustment);
+            return true;
         }
 
         private static bool TryReplaceWordInlineSvgMediaXml(string flatOpc,
@@ -3839,7 +4156,8 @@ namespace LaTeXBlocks.Word
         {
             internal BatchInlineXmlFormat(SvgPhysicalSize svgSize,
                 double fontSizePt, double depthPt, string runPropertiesXml,
-                LaTeXBlockMetadata metadata, string source)
+                LaTeXBlockMetadata metadata, string source,
+                NativeTextColorDescriptor? nativeTextColor)
             {
                 SvgSize = svgSize;
                 FontSizePt = fontSizePt;
@@ -3847,6 +4165,7 @@ namespace LaTeXBlocks.Word
                 RunPropertiesXml = runPropertiesXml;
                 Metadata = metadata;
                 Source = source;
+                NativeTextColor = nativeTextColor;
             }
 
             internal SvgPhysicalSize SvgSize { get; }
@@ -3855,6 +4174,7 @@ namespace LaTeXBlocks.Word
             internal string RunPropertiesXml { get; }
             internal LaTeXBlockMetadata Metadata { get; }
             internal string Source { get; }
+            internal NativeTextColorDescriptor? NativeTextColor { get; }
         }
 
         private sealed class BatchInlineUpdateState
@@ -3886,15 +4206,24 @@ namespace LaTeXBlocks.Word
             internal bool PreserveNativeTextColor { get; private set; }
             internal int SvgForegroundFillColor { get; private set; }
 
-            internal void CaptureHostFormat()
-            {
+                internal void CaptureHostFormat(
+                    NativeTextColorDescriptor? serializedTextColor = null)
+                {
                 // Word's Flat OPC does not expose every effective Font property for
                 // an inline drawing run. Keep the resolved COM Font snapshot for
                 // those independent properties, plus the host-owned paint state.
                 HostRunFormat = WordInlineRunFormatSnapshot.Capture(Update.Range);
-                PreserveNativeTextColor = NativeTextColorDescriptor.TryCapture(
-                    Update.Range, out var textColor);
-                NativeTextColor = textColor;
+                if (serializedTextColor.HasValue)
+                {
+                    PreserveNativeTextColor = true;
+                    NativeTextColor = serializedTextColor.Value;
+                }
+                else
+                {
+                    PreserveNativeTextColor = NativeTextColorDescriptor.TryCapture(
+                        Update.Range, out var textColor);
+                    NativeTextColor = textColor;
+                }
                 SvgForegroundFillColor = CaptureSvgForegroundFillColor(Update.Shape,
                     Update.Render.TextColor);
             }

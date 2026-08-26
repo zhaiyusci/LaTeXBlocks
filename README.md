@@ -1,12 +1,12 @@
 <p align="center">
-  <img src="assets/branding/latex-blocks-icon.png" alt="LaTeX Blocks" width="180">
+  <img src="assets/branding/latex-blocks-icon.png" alt="LaTeXBlocks" width="180">
 </p>
 
-<h1 align="center">LaTeX Blocks</h1>
+<h1 align="center">LaTeXBlocks</h1>
 
 <p align="center"><strong>Editable LaTeX blocks for Microsoft Word and PowerPoint.</strong></p>
 
-LaTeX Blocks puts editable LaTeX into Microsoft Office as portable SVG objects. StemTeX performs TeX layout and
+LaTeXBlocks puts editable LaTeX into Microsoft Office as portable SVG objects. StemTeX performs TeX layout and
 SVG rendering; the Office add-in owns placement, editing, and persistence. The source of each block remains on the
 visual object itself, so a document continues to display correctly without the renderer installed.
 
@@ -38,20 +38,20 @@ text run or simulate inline baseline behavior; see [PowerPoint scope](docs/POWER
 
 ### Word
 
-The **LaTeX Blocks** Ribbon tab provides **Insert Inline Formula**, **Insert LaTeX Block**, **Insert Numbered
+The **LaTeXBlocks** Ribbon tab provides **Insert Inline Formula**, **Insert LaTeX Block**, **Insert Numbered
 Equation**, **Edit LaTeX Block**, and **Copy as LaTeX**. Select a recognized block to edit its authoritative source.
-Select ordinary Word text containing inline LaTeX Blocks and choose **Copy as LaTeX** to place a LaTeX-safe version
+Select ordinary Word text containing inline LaTeXBlocks and choose **Copy as LaTeX** to place a LaTeX-safe version
 on the clipboard: ordinary text is escaped, each recognized inline Block is replaced by its exact author source,
 and Word-only U+2060 and numbered-equation scaffolds are omitted. Floating Blocks are not part of Word's selected
 text stream and are therefore not included. **Paste from LaTeX** performs the inverse operation for mixed clipboard
 text: escaped text characters such as `\%` become ordinary Word text, while real `$...$`, `\(...\)`, `\[...\]`,
-`$$...$$`, and standard math environments become editable inline or fixed LaTeX Blocks. It is a mixed-text importer,
+`$$...$$`, and standard math environments become editable inline or fixed LaTeXBlocks. It is a mixed-text importer,
 not a complete `.tex` document converter. The selected profile is a preference of the Word host, not of an individual
 block.
 
 A fixed-width **LaTeX Block** owns an outer frame independently of TeX's layout width. That remains true whether Word
 keeps it **In Line with Text** or gives it any floating Layout Option, including **Square**, **In Front of Text**, and
-**Behind Text**. After a native resize, LaTeX Blocks rerenders and reframes the SVG instead of preserving Word's
+**Behind Text**. After a native resize, LaTeXBlocks rerenders and reframes the SVG instead of preserving Word's
 image-scale transform. The commit begins when Word releases the resize gesture; **Reflow Frame** is also available for
 an immediate explicit rerender. Moving or rotating a Block does not rerender it. A floating replacement preserves its
 position and wrapping, and editing source preserves the outer frame in either representation. Auto-width inline
@@ -71,11 +71,11 @@ An editor-confirmed default is literal—its displayed 1.20× leading is applied
 style editor retain their compatible bare-SVG rendering until they are edited.
 
 **Font Color** in Word's Home tab remains the formula-color control for inline and numbered formulas. To recolor one,
-select it and apply Font Color; LaTeX Blocks detects the committed main-button, palette, or More Colors action and
+select it and apply Font Color; LaTeXBlocks detects the committed main-button, palette, or More Colors action and
 queues one asynchronous SVG refresh immediately. Opening or canceling a picker does nothing. The formula remains an
 exact picture selection throughout the visible interaction; the add-in neither polls the document nor changes the
 LaTeX source. The same command also works across an ordinary mixed selection such as text–formula–text: Word owns the
-text colour, while LaTeX Blocks immediately reconciles every selected formula and preserves the complete range
+text colour, while LaTeXBlocks immediately reconciles every selected formula and preserves the complete range
 selection as their SVGs are replaced.
 
 Numbered equations use Word fields. After moving, copying, or deleting complete numbered-equation lines, run
@@ -109,7 +109,10 @@ the SVG shell only clips any overflow. Line spacing affects ordinary paragraph l
 Legacy blocks are unchanged merely by opening a document; their first edit, resize, or reflow uses the current
 left-aligned TeX-box contract with stable ordinary-text line metrics while preserving their stored vertical placement.
 
-PowerPoint and Word save their profile choices independently.
+PowerPoint and Word save their profile choices independently. The **StemTeX** Ribbon group lets the user select the
+system TeX Live root and launch StemTeX 0.13's original **Profile Creator**. Created profiles are stored under
+`%LOCALAPPDATA%\LaTeXBlocks\profiles`, appear in both hosts, and can still be selected independently by Word and
+PowerPoint.
 
 Fixed Blocks are horizontally left-aligned inside their SVG frame in both hosts. Padding defines the left inset, while
 the border is painted inside the outer edge without shrinking the TeX content box; widening a native frame adds space
@@ -119,14 +122,15 @@ on the right, while narrowing it clips the right edge.
 
 LaTeX source is stored solely in Alternative Text, which is the semantic description of the visual object. Word's
 native Ctrl+F does not search Alternative Text. [Comprehensive Find](https://github.com/zhaiyusci/ComprehensiveFind)
-adds a unified search result space for document text and object Alternative Text; LaTeX Blocks deliberately does not
+adds a unified search result space for document text and object Alternative Text; LaTeXBlocks deliberately does not
 create hidden proxy text.
 
 ## Install
 
-The installer is self-contained: it publishes both VSTO add-ins and bundles a compatible private StemTeX runtime.
-It requires 64-bit Windows and 64-bit desktop Microsoft Office. Close Word and PowerPoint before installing or
-upgrading. See [Releasing](docs/RELEASING.md) to make a package from source.
+The installer publishes both VSTO add-ins and bundles the compatible private StemTeX engine runtime and Profile
+Creator. TeX packages and fonts come from a system TeX Live installation; use **TeX Live...** to select its root when
+it is not discovered automatically. LaTeXBlocks requires 64-bit Windows and 64-bit desktop Microsoft Office. Close
+Word and PowerPoint before installing or upgrading. See [Releasing](docs/RELEASING.md) to make a package from source.
 
 ## Documentation
 

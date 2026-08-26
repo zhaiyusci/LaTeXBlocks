@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -22,6 +23,7 @@ namespace LaTeXBlocks.PowerPoint
         private string currentProfile;
         private string backendStartupError;
         private Control powerPointUiDispatcher;
+        private Process profileCreatorProcess;
         private LaTeXBlocksRibbon ribbon;
         private readonly Dictionary<PowerPointShapeKey, PendingBlockFormat> pendingBlockFormats =
             new Dictionary<PowerPointShapeKey, PendingBlockFormat>();
@@ -48,6 +50,7 @@ namespace LaTeXBlocks.PowerPoint
 
         private void ThisAddIn_Startup(object sender, EventArgs e)
         {
+            var backendAttempted = false;
             try
             {
                 powerPointUiDispatcher = new Control();
@@ -55,6 +58,7 @@ namespace LaTeXBlocks.PowerPoint
                 Application.WindowBeforeDoubleClick += Application_WindowBeforeDoubleClick;
                 Application.WindowSelectionChange += Application_WindowSelectionChange;
                 Application.AfterShapeSizeChange += Application_AfterShapeSizeChange;
+                backendAttempted = true;
                 var pool = Renderers;
                 currentProfile = LoadCurrentProfile(pool);
                 pool.SwitchProfile(currentProfile);
@@ -62,10 +66,9 @@ namespace LaTeXBlocks.PowerPoint
             catch (Exception exception)
             {
                 backendStartupError = exception.Message;
-                // Startup can fail after Office event sinks or the UI dispatcher have
-                // already been created. Leave the add-in disabled-but-clean instead
-                // of retaining callbacks into a half-initialized host object.
-                ReleaseHostResources();
+                // Missing TeX Live is recoverable from the Ribbon. Preserve the UI
+                // dispatcher and event sinks when only renderer initialization failed.
+                if (!backendAttempted) ReleaseHostResources();
             }
         }
 
@@ -77,6 +80,8 @@ namespace LaTeXBlocks.PowerPoint
             try { rendererPool?.Dispose(); } catch { }
             rendererPool = null;
             blocks = null;
+            try { profileCreatorProcess?.Dispose(); } catch { }
+            profileCreatorProcess = null;
             try { powerPointUiDispatcher?.Dispose(); } catch { }
             powerPointUiDispatcher = null;
         }
@@ -657,7 +662,7 @@ namespace LaTeXBlocks.PowerPoint
         {
             if (shuttingDown) return;
             MessageBox.Show(new LaTeXBlocksRibbon.PowerPointWindow(Application),
-                exception.GetBaseException().Message, "LaTeX Blocks",
+                exception.GetBaseException().Message, "LaTeXBlocks",
                 MessageBoxButtons.OK, MessageBoxIcon.Error);
             ribbon?.InvalidateBlockControls();
         }
@@ -738,7 +743,7 @@ namespace LaTeXBlocks.PowerPoint
                     catch (Exception exception)
                     {
                         MessageBox.Show(new LaTeXBlocksRibbon.PowerPointWindow(Application),
-                            exception.Message, "LaTeX Blocks", MessageBoxButtons.OK,
+                            exception.Message, "LaTeXBlocks", MessageBoxButtons.OK,
                             MessageBoxIcon.Error);
                     }
                 }))) return;
@@ -831,6 +836,105 @@ namespace LaTeXBlocks.PowerPoint
         {
             using (var about = new Branding.AboutForm("PowerPoint"))
                 about.ShowDialog(new LaTeXBlocksRibbon.PowerPointWindow(Application));
+        }
+
+        internal void ConfigureTexLiveRoot()
+        {
+            if (shuttingDown) throw new ObjectDisposedException(nameof(ThisAddIn));
+            string selectedRoot;
+            var owner = new LaTeXBlocksRibbon.PowerPointWindow(Application);
+            if (!StemTeXUserTools.TryChooseTexLiveRoot(owner, out selectedRoot)) return;
+
+            var previousSetting = StemTeXInstallation.ReadConfiguredTexLiveRoot();
+            StemTeXInstallation.WriteConfiguredTexLiveRoot(selectedRoot);
+            try
+            {
+                ResetRendererBackend();
+            }
+            catch
+            {
+                try { StemTeXInstallation.WriteConfiguredTexLiveRoot(previousSetting); }
+                catch { }
+                throw;
+            }
+            MessageBox.Show(owner, "LaTeXBlocks now uses:\n" + selectedRoot +
+                "\n\nWord will use this TeX Live tree the next time its renderer starts.",
+                "LaTeXBlocks", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+
+        internal void ShowProfileCreator()
+        {
+            if (shuttingDown) throw new ObjectDisposedException(nameof(ThisAddIn));
+            if (profileCreatorProcess != null)
+            {
+                try
+                {
+                    if (!profileCreatorProcess.HasExited)
+                        throw new InvalidOperationException("StemTeX Profile Creator is already open.");
+                }
+                catch (InvalidOperationException) { throw; }
+                profileCreatorProcess.Dispose();
+                profileCreatorProcess = null;
+            }
+            profileCreatorProcess = StemTeXUserTools.StartProfileCreator(ProfileCreatorExited);
+        }
+
+        private void ProfileCreatorExited(object sender, EventArgs e)
+        {
+            var process = sender as Process;
+            var exitCode = -1;
+            try { if (process != null) exitCode = process.ExitCode; }
+            catch { }
+            if (!PostToPowerPointUi(() =>
+            {
+                if (ReferenceEquals(profileCreatorProcess, process)) profileCreatorProcess = null;
+                try
+                {
+                    if (exitCode != 0)
+                        throw new InvalidOperationException(
+                            "StemTeX Profile Creator exited with code " + exitCode + ".");
+                    ResetRendererBackend();
+                }
+                catch (Exception exception)
+                {
+                    MessageBox.Show(new LaTeXBlocksRibbon.PowerPointWindow(Application),
+                        exception.GetBaseException().Message, "LaTeXBlocks",
+                        MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+                finally { try { process?.Dispose(); } catch { } }
+            }))
+            {
+                try { process?.Dispose(); } catch { }
+            }
+        }
+
+        private void ResetRendererBackend()
+        {
+            var replacement = new RenderHostClientBackend();
+            string profile = null;
+            foreach (var candidate in replacement.Profiles)
+            {
+                if (string.Equals(candidate, currentProfile, StringComparison.OrdinalIgnoreCase))
+                {
+                    profile = candidate;
+                    break;
+                }
+            }
+            if (profile == null) profile = LoadCurrentProfile(replacement);
+            try { replacement.SwitchProfile(profile); }
+            catch { replacement.Dispose(); throw; }
+
+            Interlocked.Increment(ref blockFormatSequence);
+            pendingBlockFormats.Clear();
+            blockFormatsInFlight.Clear();
+            CancelAllPendingNativeFrameGestures();
+
+            var previous = rendererPool;
+            rendererPool = replacement;
+            blocks = null;
+            currentProfile = profile;
+            backendStartupError = null;
+            try { previous?.Dispose(); } catch { }
         }
 
         private void InternalStartup()

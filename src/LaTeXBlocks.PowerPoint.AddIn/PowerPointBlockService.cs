@@ -5,6 +5,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
+using LaTeXBlocks.OfficeColor;
 using Office = Microsoft.Office.Core;
 using PowerPointInterop = Microsoft.Office.Interop.PowerPoint;
 
@@ -119,6 +120,9 @@ namespace LaTeXBlocks.PowerPoint
             // A fixed LaTeX Block owns text and background paint in TeX. Office
             // colour APIs are intentionally absent from this path.
             var styleIsApplied = styleWasExplicit || !style.IsDefault;
+            var texColor = styleIsApplied
+                ? TeXColor.Explicit(style.TextColor)
+                : TeXColor.InheritOffice;
             var authoredFrameWidthPt = outerWidthPt ?? widthPt;
             var contentWidthPt = styleIsApplied
                 ? Math.Max(0.1, authoredFrameWidthPt - 2 * style.PaddingPt)
@@ -126,7 +130,7 @@ namespace LaTeXBlocks.PowerPoint
             var contentHeightPt = styleIsApplied && outerHeightPt.HasValue
                 ? Math.Max(0.1, outerHeightPt.Value - 2 * style.PaddingPt)
                 : (double?)null;
-            var renderSource = !styleIsApplied
+            var renderSource = texColor.Kind == TeXColorKind.InheritOffice
                 // Styled requests reset PreviewBorder globally at TeX shipout. The
                 // next unstyled request must restore the legacy profile border.
                 ? "\\global\\PreviewBorder=1pt\n" + source
@@ -146,14 +150,9 @@ namespace LaTeXBlocks.PowerPoint
                     false, fontSizePt)
                 : await renderers.RenderLatestAsync(profile, renderSource, rendererWidthPt,
                     false, fontSizePt);
-            var shellStyle = styleIsApplied && style.HasBackgroundFill
-                ? new LaTeXBlockStyle(style.LineSpacing, 0, style.VerticalAlignment,
-                    style.TextColor, false, style.BackgroundColor,
-                    style.BorderThicknessPt, style.BorderColor)
-                : style;
             var finalSvg = !styleIsApplied
                 ? result.Bytes
-                : LaTeXBlockSvgFrame.Decorate(result.Bytes, shellStyle,
+                : LaTeXBlockSvgFrame.Decorate(result.Bytes, style,
                     authoredFrameWidthPt, outerHeightPt);
             return new LaTeXBlockRender(WriteSvg(finalSvg), finalSvg, result.DepthPt,
                 fontSizePt, styleIsApplied);
@@ -260,6 +259,10 @@ namespace LaTeXBlocks.PowerPoint
             var rotation = oldShape.Rotation;
             var oldName = oldShape.Name;
             var oldZ = TryGetZOrder(oldShape);
+            var officeGraphicColor = OfficeGraphicColor.Automatic;
+            var preserveOfficeGraphicColor = !styleIsApplied &&
+                PowerPointGraphicColorAdapter.TryReadFill(oldShape,
+                    out officeGraphicColor);
             var metadata = new LaTeXBlockMetadata(previous.Id, widthPt, render.DepthPt,
                 LaTeXBlockLayoutMode.Fixed, render.FontSizePt, LaTeXBlockRole.Content,
                 0, 0, null, LaTeXBlockKind.LaTeXBlock);
@@ -274,6 +277,9 @@ namespace LaTeXBlocks.PowerPoint
                 replacement.Rotation = rotation;
                 ApplyContract(replacement, source, metadata, style, styleIsApplied,
                     TemporaryShapeName(metadata.Id), sourceSize.WidthPt, sourceSize.HeightPt);
+                if (preserveOfficeGraphicColor)
+                    PowerPointGraphicColorAdapter.ApplyToFill(replacement,
+                        officeGraphicColor);
 
                 // While the old shape still exists, place the newly inserted topmost
                 // shape immediately above it. Deleting the old shape then leaves the

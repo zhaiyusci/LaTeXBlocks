@@ -170,7 +170,7 @@ def build_font(source_path: Path, output_path: Path) -> dict[str, object]:
     fb.setupMaxp()
     fb.font["OS/2"].fsSelection = 0x40  # REGULAR
     fb.font["head"].macStyle = 0
-    fb.font["name"].setName("Copyright 2026 LaTeX Blocks font-glyph spike", 0, 3, 1, 0x409)
+    fb.font["name"].setName("Copyright 2026 LaTeXBlocks font-glyph spike", 0, 3, 1, 0x409)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fb.save(output_path)

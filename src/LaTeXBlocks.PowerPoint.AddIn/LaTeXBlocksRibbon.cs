@@ -29,6 +29,8 @@ namespace LaTeXBlocks.PowerPoint
         }
         public void OnInsertBlock(Office.IRibbonControl control) { Run(addIn.ShowInsertBlockEditor); }
         public void OnEditBlock(Office.IRibbonControl control) { Run(addIn.ShowEditBlockEditor); }
+        public void OnConfigureTexLive(Office.IRibbonControl control) { Run(addIn.ConfigureTexLiveRoot); }
+        public void OnProfileCreator(Office.IRibbonControl control) { Run(addIn.ShowProfileCreator); }
         public void OnAbout(Office.IRibbonControl control) { Run(addIn.ShowAbout); }
         public string GetLayoutWidthText(Office.IRibbonControl control)
         {
@@ -73,7 +75,7 @@ namespace LaTeXBlocks.PowerPoint
             catch (Exception exception)
             {
                 MessageBox.Show(new PowerPointWindow(addIn.PowerPointApplication), exception.Message,
-                    "LaTeX Blocks", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    "LaTeXBlocks", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
             finally { InvalidateBlockControls(); }
         }

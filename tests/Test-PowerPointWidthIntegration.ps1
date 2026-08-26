@@ -368,14 +368,14 @@ try {
         Release-ComObject $candidate
     }
     if ($null -eq $addIn) {
-        throw 'PowerPoint did not expose the LaTeX Blocks COM add-in.'
+        throw 'PowerPoint did not expose the LaTeXBlocks COM add-in.'
     }
     if (-not $addIn.Connect) {
         $addIn.Connect = $true
         Start-Sleep -Milliseconds 1200
     }
     if (-not $addIn.Connect) {
-        throw 'PowerPoint did not connect the LaTeX Blocks add-in.'
+        throw 'PowerPoint did not connect the LaTeXBlocks add-in.'
     }
 
     $presentation = $application.Presentations.Open($presentationPath, 0, 0, 0)

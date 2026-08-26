@@ -58,7 +58,7 @@
   </defs>
 
   <rect width="1100" height="390" fill="#f7f9fc"/>
-  <text x="40" y="45" class="title">LaTeX Blocks — Ribbon icon concepts</text>
+  <text x="40" y="45" class="title">LaTeXBlocks — Ribbon icon concepts</text>
   <text x="40" y="70" class="subtitle">One visual grammar, tested conceptually at 32 px; functional meaning comes before decoration.</text>
 
   <g transform="translate(40 100)">

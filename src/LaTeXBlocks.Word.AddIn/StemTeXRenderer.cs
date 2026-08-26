@@ -1,11 +1,9 @@
 using System;
-using System.Collections.Generic;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
-using Microsoft.Win32;
 
 #if POWERPOINT
 namespace LaTeXBlocks.PowerPoint
@@ -16,10 +14,6 @@ namespace LaTeXBlocks.Word
     internal sealed class StemTeXRenderer : IDisposable
     {
         private const int SvgOutputFormat = 1;
-        // StemTeX 0.12 is the first bundled runtime for this host. Keep the
-        // native contract explicit so an old STEMTEX_HOME cannot silently
-        // substitute the 0.11 runtime for the packaged binary.
-        private static readonly Version RequiredRuntimeVersion = new Version(0, 12, 0);
         private readonly object gate = new object();
         // RenderSvg keeps gate for the native render so create/destroy remain strictly
         // serialized. Cancellation must not wait for that lock, but it still needs a
@@ -28,6 +22,7 @@ namespace LaTeXBlocks.Word
         private readonly object cancellationGate = new object();
         private readonly string stemTeXHome;
         private readonly string runtimeRoot;
+        private readonly string texmfRoot;
         private readonly string profileRoot;
         private IntPtr library;
         private IntPtr renderer;
@@ -39,14 +34,16 @@ namespace LaTeXBlocks.Word
         private long cancellationRetryGeneration;
         private int nativeCancelAttempts;
 
-        internal StemTeXRenderer(string profile = "unicodemath_cjk")
+        internal StemTeXRenderer(string profile = "unicodemath")
         {
-            stemTeXHome = ResolveStemTeXHome(profile);
+            stemTeXHome = StemTeXInstallation.ResolveStemTeXHome();
             runtimeRoot = Path.Combine(stemTeXHome, "runtime");
-            profileRoot = Path.Combine(stemTeXHome, "gui", "profiles", profile);
+            texmfRoot = StemTeXInstallation.ResolveTexLiveRoot();
+            profileRoot = StemTeXInstallation.ResolveProfileRoot(stemTeXHome, profile);
         }
 
         internal string StemTeXHome => stemTeXHome;
+        internal string TexmfRoot => texmfRoot;
         internal string ProfileRoot => profileRoot;
         internal bool NativeRenderInProgressForTest
         {
@@ -68,14 +65,7 @@ namespace LaTeXBlocks.Word
 
         internal static string[] DiscoverProfiles()
         {
-            var root = Path.Combine(ResolveStemTeXHome(null), "gui", "profiles");
-            var profiles = new List<string>();
-            foreach (var directory in Directory.GetDirectories(root))
-            {
-                if (File.Exists(Path.Combine(directory, "preamble.tex"))) profiles.Add(Path.GetFileName(directory));
-            }
-            profiles.Sort(StringComparer.OrdinalIgnoreCase);
-            return profiles.ToArray();
+            return StemTeXInstallation.DiscoverProfiles();
         }
 
         internal StemTeXSvgResult RenderSvg(string source, double widthPt, bool autoWidth = false,
@@ -165,12 +155,14 @@ namespace LaTeXBlocks.Word
 
                 using (var home = new NativeUtf8(stemTeXHome))
                 using (var runtime = new NativeUtf8(runtimeRoot))
+                using (var texmf = new NativeUtf8(texmfRoot))
                 using (var profile = new NativeUtf8(profileRoot))
                 {
                     var config = new StemTeXConfig
                     {
                         RepoRoot = home.Pointer,
                         RuntimeRoot = runtime.Pointer,
+                        TexmfRoot = texmf.Pointer,
                         ProfileRoot = profile.Pointer,
                         RequestTimeoutMs = 90000,
                         XdvipdfmxTimeoutMs = 90000,
@@ -202,72 +194,6 @@ namespace LaTeXBlocks.Word
                 catch { }
                 throw;
             }
-        }
-
-        private static string ResolveStemTeXHome(string profile)
-        {
-            var candidates = new List<string>();
-            var configured = Environment.GetEnvironmentVariable("STEMTEX_HOME");
-            if (!string.IsNullOrWhiteSpace(configured))
-            {
-                var configuredHome = ValidateStemTeXHome(configured, profile);
-                if (configuredHome != null) return configuredHome;
-                throw new DirectoryNotFoundException("STEMTEX_HOME does not contain a usable StemTeX runtime: " + configured);
-            }
-            try
-            {
-                using (var key = Registry.CurrentUser.OpenSubKey(@"Software\LaTeXBlocks"))
-                {
-                    var installedHome = key?.GetValue("StemTeXHome") as string;
-                    if (!string.IsNullOrWhiteSpace(installedHome)) candidates.Add(installedHome);
-                }
-            }
-            catch { }
-            var systemRoot = Path.GetPathRoot(Environment.SystemDirectory);
-            if (!string.IsNullOrWhiteSpace(systemRoot)) candidates.Add(Path.Combine(systemRoot, "StemTeX"));
-            candidates.Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Scholia", "StemTeX"));
-            candidates.Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "StemTeX"));
-            // Installed runtimes precede development stages so an equal-version dev
-            // tree cannot silently override the self-contained package. A strictly
-            // newer development build can still win; STEMTEX_HOME remains the explicit
-            // override for deterministic development and diagnostics.
-            var documents = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
-            candidates.Add(Path.Combine(documents, "xetex", "stemtex", "dist", "stemtex-installer", "StemTeX"));
-            candidates.Add(Path.Combine(documents, "xetex", "stemtex", "build", "stemtex-check-stage"));
-
-            string bestHome = null;
-            Version bestVersion = null;
-            foreach (var candidate in candidates)
-            {
-                var home = ValidateStemTeXHome(candidate, profile);
-                if (home == null) continue;
-                Version version;
-                var versionFile = Path.Combine(home, "runtime", "VERSION");
-                var versionText = File.Exists(versionFile) ? File.ReadAllText(versionFile).Trim() : "0.0.0";
-                if (!Version.TryParse(versionText, out version)) version = new Version(0, 0);
-                if (bestHome == null || version.CompareTo(bestVersion) > 0) { bestHome = home; bestVersion = version; }
-            }
-            if (bestHome != null) return bestHome;
-            throw new DirectoryNotFoundException(
-                "StemTeX with SVG support was not found. Install StemTeX or set STEMTEX_HOME to its installation root.");
-        }
-
-        private static string ValidateStemTeXHome(string candidate, string profile)
-        {
-            if (string.IsNullOrWhiteSpace(candidate)) return null;
-            var home = Path.GetFullPath(candidate);
-            Version runtimeVersion;
-            var versionFile = Path.Combine(home, "runtime", "VERSION");
-            if (!File.Exists(versionFile) ||
-                !Version.TryParse(File.ReadAllText(versionFile).Trim(), out runtimeVersion) ||
-                runtimeVersion.CompareTo(RequiredRuntimeVersion) < 0) return null;
-            var profilesRoot = Path.Combine(home, "gui", "profiles");
-            var hasProfile = profile == null
-                ? Directory.Exists(profilesRoot) && Directory.GetFiles(profilesRoot, "preamble.tex", SearchOption.AllDirectories).Length > 0
-                : File.Exists(Path.Combine(profilesRoot, profile, "preamble.tex"));
-            return File.Exists(Path.Combine(home, "runtime", "bin", "sdk", "stemtex-renderer.dll")) &&
-                   File.Exists(Path.Combine(home, "runtime", "bin", "windows", "dvisvgmdaemon.dll")) && hasProfile
-                ? home : null;
         }
 
         public void Dispose()

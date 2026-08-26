@@ -1,6 +1,8 @@
 # Architecture
 
-LaTeX Blocks is an Office integration layer, not a second TeX engine. StemTeX owns TeX layout and SVG rendering;
+The host/render colour boundary is specified in [COLOR_MODEL.md](COLOR_MODEL.md).
+
+LaTeXBlocks is an Office integration layer, not a second TeX engine. StemTeX owns TeX layout and SVG rendering;
 Word and PowerPoint own document/slide placement, host UI, and persistence. This separation is the central design
 constraint.
 
@@ -117,8 +119,10 @@ narrower object model is specified in [POWERPOINT_SCOPE.md](POWERPOINT_SCOPE.md)
 ## Profile and runtime boundary
 
 Profiles belong to a host session preference rather than to a document object: Word and PowerPoint persist separate
-choices. The renderer discovers usable profiles from the selected StemTeX installation. Runtime discovery,
-compatibility, and packaging are specified in [STEMTEX_INTEGRATION.md](STEMTEX_INTEGRATION.md).
+choices. The renderer discovers both installed profiles and Profile Creator output under the user's local application
+data. Both hosts share the configured system TeX Live package/font tree but do not share their selected profile.
+Runtime discovery, compatibility, and packaging are specified in
+[STEMTEX_INTEGRATION.md](STEMTEX_INTEGRATION.md).
 
 ## Source layout
 
@@ -127,7 +131,7 @@ src/LaTeXBlocks.Word.AddIn/        Word VSTO entry point, Word service, and shar
 src/LaTeXBlocks.PowerPoint.AddIn/  PowerPoint VSTO entry point and slide-object service
 tests/                             Real Office smoke tests
 scripts/                           Explicit build, registration, test, and publishing workflows
-installer/                         Self-contained per-user installer
+installer/                         Per-user installer for the add-ins and private StemTeX engine runtime
 ```
 
 The PowerPoint project links the shared renderer, metadata, and editor code where appropriate, but its service

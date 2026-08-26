@@ -14,8 +14,8 @@ namespace LaTeXBlocks.Word
     // Host-neutral SVG shell composition for styled fixed blocks.  TeX produces
     // the complete content layout box; this class gives it a precise outer
     // viewport without scaling glyphs. Both Office hosts therefore share padding,
-    // border and crop semantics exactly. Fixed Block foreground and background
-    // paint are already authored by TeX; the Office host owns no colour channel.
+    // background, border and crop semantics exactly. Fixed Block foreground paint
+    // is authored by a package-independent dvisvgm colour special in TeX.
     internal static class LaTeXBlockSvgFrame
     {
         internal static byte[] Decorate(byte[] svgBytes, LaTeXBlockStyle style,

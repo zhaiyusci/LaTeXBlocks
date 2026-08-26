@@ -1,5 +1,5 @@
 #ifndef MyAppVersion
-#define MyAppVersion "0.2.127"
+#define MyAppVersion "0.2.149"
 #endif
 #ifndef SourceDir
   #error SourceDir must point to the Word local VSTO directory
@@ -34,12 +34,13 @@
 
 [Setup]
 AppId={{B92AF36F-487D-4656-91A8-0FD09B8BD4A1}
-AppName=LaTeX Blocks
+AppName=LaTeXBlocks
 AppVersion={#MyAppVersion}
 AppPublisher=Y. Zhai
 AppPublisherURL=https://github.com/zhaiyusci/LaTeXBlocks
 AppSupportURL=https://github.com/zhaiyusci/LaTeXBlocks/issues
-DefaultDirName={localappdata}\Programs\LaTeX Blocks
+DefaultDirName={localappdata}\Programs\LaTeXBlocks
+UsePreviousAppDir=no
 DisableDirPage=auto
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
@@ -54,8 +55,8 @@ CloseApplications=yes
 CloseApplicationsFilter=WINWORD.EXE,POWERPNT.EXE
 VersionInfoVersion={#MyAppVersion}.0
 VersionInfoCompany=Y. Zhai
-VersionInfoDescription=LaTeX Blocks for Microsoft Office
-VersionInfoProductName=LaTeX Blocks
+VersionInfoDescription=LaTeXBlocks for Microsoft Office
+VersionInfoProductName=LaTeXBlocks
 VersionInfoProductVersion={#MyAppVersion}
 SetupIconFile=..\assets\branding\latex-blocks-icon.ico
 UninstallDisplayIcon={app}\LaTeXBlocks.ico
@@ -64,29 +65,37 @@ UninstallDisplayIcon={app}\LaTeXBlocks.ico
 Source: "..\assets\branding\latex-blocks-icon.ico"; DestDir: "{app}"; DestName: "LaTeXBlocks.ico"; Flags: ignoreversion
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#PowerPointSourceDir}\*"; DestDir: "{app}\PowerPoint"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "{#StemTeXSourceDir}\runtime\*"; DestDir: "{app}\StemTeX\runtime"; Excludes: "texmf-var\fonts\cache\*,*.aux,*.log,*.xdv,*.pdf,*.synctex.gz"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "{#StemTeXSourceDir}\gui\profiles\*"; DestDir: "{app}\StemTeX\gui\profiles"; Excludes: "*.aux,*.log,*.xdv,*.pdf,*.synctex.gz"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#StemTeXSourceDir}\runtime\*"; DestDir: "{app}\StemTeX\runtime"; Excludes: "texmf-dist\*,texmf-var\*,*.aux,*.log,*.xdv,*.pdf,*.synctex.gz"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#StemTeXSourceDir}\gui\*"; DestDir: "{app}\StemTeX\gui"; Excludes: "*.aux,*.log,*.xdv,*.pdf,*.synctex.gz"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#CertPath}"; DestDir: "{tmp}"; DestName: "LaTeXBlocks-publisher.cer"; Flags: ignoreversion deleteafterinstall
 Source: "{#VcRedistPath}"; DestDir: "{tmp}"; DestName: "vc_redist.x64.exe"; Flags: ignoreversion deleteafterinstall
 
 [InstallDelete]
+; 0.2.130 standardized the product directory. This exact legacy application
+; directory contained packaged binaries only; user profiles live elsewhere.
+Type: filesandordirs; Name: "{localappdata}\Programs\LaTeX Blocks"
+Type: filesandordirs; Name: "{app}\StemTeX\runtime\texmf-dist"
+Type: filesandordirs; Name: "{app}\StemTeX\runtime\texmf-var"
 Type: filesandordirs; Name: "{app}\StemTeX\gui\profiles\arial_lmodern_simhei"
 Type: filesandordirs; Name: "{app}\StemTeX\gui\profiles\arial_lete_yahei"
+Type: filesandordirs; Name: "{app}\StemTeX\gui\profiles\arial_lete_simhei"
+Type: filesandordirs; Name: "{app}\StemTeX\gui\profiles\unicodemath_cjk"
+Type: filesandordirs; Name: "{app}\StemTeX\gui\profiles\xits_cjk"
 
 [Registry]
 Root: HKCU; Subkey: "Software\LaTeXBlocks"; ValueType: string; ValueName: "StemTeXHome"; ValueData: "{app}\StemTeX"; Flags: uninsdeletevalue uninsdeletekeyifempty
-Root: HKCU; Subkey: "Software\Microsoft\Office\Word\Addins\LaTeXBlocks.Word.AddIn"; ValueType: string; ValueName: "FriendlyName"; ValueData: "LaTeX Blocks"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Microsoft\Office\Word\Addins\LaTeXBlocks.Word.AddIn"; ValueType: string; ValueName: "FriendlyName"; ValueData: "LaTeXBlocks"; Flags: uninsdeletekey
 Root: HKCU; Subkey: "Software\Microsoft\Office\Word\Addins\LaTeXBlocks.Word.AddIn"; ValueType: string; ValueName: "Description"; ValueData: "Editable, searchable LaTeX blocks rendered by StemTeX"; Flags: uninsdeletekey
 Root: HKCU; Subkey: "Software\Microsoft\Office\Word\Addins\LaTeXBlocks.Word.AddIn"; ValueType: dword; ValueName: "LoadBehavior"; ValueData: "3"; Flags: uninsdeletekey
 Root: HKCU; Subkey: "Software\Microsoft\Office\Word\Addins\LaTeXBlocks.Word.AddIn"; ValueType: string; ValueName: "Manifest"; ValueData: "{code:GetManifestUri}"; Flags: uninsdeletekey
-Root: HKCU; Subkey: "Software\Microsoft\Office\PowerPoint\Addins\LaTeXBlocks.PowerPoint.AddIn"; ValueType: string; ValueName: "FriendlyName"; ValueData: "LaTeX Blocks"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Microsoft\Office\PowerPoint\Addins\LaTeXBlocks.PowerPoint.AddIn"; ValueType: string; ValueName: "FriendlyName"; ValueData: "LaTeXBlocks"; Flags: uninsdeletekey
 Root: HKCU; Subkey: "Software\Microsoft\Office\PowerPoint\Addins\LaTeXBlocks.PowerPoint.AddIn"; ValueType: string; ValueName: "Description"; ValueData: "Editable, searchable LaTeX blocks for slides rendered by StemTeX"; Flags: uninsdeletekey
 Root: HKCU; Subkey: "Software\Microsoft\Office\PowerPoint\Addins\LaTeXBlocks.PowerPoint.AddIn"; ValueType: dword; ValueName: "LoadBehavior"; ValueData: "3"; Flags: uninsdeletekey
 Root: HKCU; Subkey: "Software\Microsoft\Office\PowerPoint\Addins\LaTeXBlocks.PowerPoint.AddIn"; ValueType: string; ValueName: "Manifest"; ValueData: "{code:GetPowerPointManifestUri}"; Flags: uninsdeletekey
 
 [Run]
-Filename: "{sys}\certutil.exe"; Parameters: "-user -f -addstore Root ""{tmp}\LaTeXBlocks-publisher.cer"""; StatusMsg: "Trusting the LaTeX Blocks development publisher..."; Flags: runhidden waituntilterminated
-Filename: "{sys}\certutil.exe"; Parameters: "-user -f -addstore TrustedPublisher ""{tmp}\LaTeXBlocks-publisher.cer"""; StatusMsg: "Registering the LaTeX Blocks publisher..."; Flags: runhidden waituntilterminated
+Filename: "{sys}\certutil.exe"; Parameters: "-user -f -addstore Root ""{tmp}\LaTeXBlocks-publisher.cer"""; StatusMsg: "Trusting the LaTeXBlocks development publisher..."; Flags: runhidden waituntilterminated
+Filename: "{sys}\certutil.exe"; Parameters: "-user -f -addstore TrustedPublisher ""{tmp}\LaTeXBlocks-publisher.cer"""; StatusMsg: "Registering the LaTeXBlocks publisher..."; Flags: runhidden waituntilterminated
 Filename: "{tmp}\vc_redist.x64.exe"; Parameters: "/install /quiet /norestart"; Verb: "runas"; StatusMsg: "Installing the Microsoft Visual C++ x64 runtime..."; Check: NeedsVCRuntime; Flags: shellexec waituntilterminated
 Filename: "{code:GetVstoInstallerPath}"; Parameters: "/Uninstall ""{code:GetManifestUri}"" /Silent"; StatusMsg: "Removing an earlier Word ClickOnce registration..."; Flags: runhidden waituntilterminated
 Filename: "{code:GetVstoInstallerPath}"; Parameters: "/Uninstall ""{code:GetPowerPointManifestUri}"" /Silent"; StatusMsg: "Removing an earlier PowerPoint ClickOnce registration..."; Flags: runhidden waituntilterminated
@@ -102,19 +111,19 @@ begin
   Result := True;
   if RegQueryStringValue(HKLM64, 'SOFTWARE\Microsoft\Office\ClickToRun\Configuration',
        'Platform', OfficePlatform) and (CompareText(OfficePlatform, 'x86') = 0) then begin
-    MsgBox('LaTeX Blocks requires 64-bit Microsoft Office because StemTeX is an x64 native runtime.',
+    MsgBox('LaTeXBlocks requires 64-bit Microsoft Office because StemTeX is an x64 native runtime.',
       mbError, MB_OK);
     Result := False;
     exit;
   end;
   if not RegQueryDWordValue(HKLM64, 'SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full',
        'Release', DotNetRelease) or (DotNetRelease < 528040) then begin
-    MsgBox('LaTeX Blocks requires Microsoft .NET Framework 4.8.', mbError, MB_OK);
+    MsgBox('LaTeXBlocks requires Microsoft .NET Framework 4.8.', mbError, MB_OK);
     Result := False;
     exit;
   end;
   if not FileExists(GetVstoInstallerPath('')) then begin
-    MsgBox('LaTeX Blocks requires Microsoft Visual Studio 2010 Tools for Office Runtime.',
+    MsgBox('LaTeXBlocks requires Microsoft Visual Studio 2010 Tools for Office Runtime.',
       mbError, MB_OK);
     Result := False;
   end;
@@ -150,9 +159,9 @@ begin
     self-contained installed files. }
   AddInKey := 'Software\Microsoft\Office\Word\Addins\LaTeXBlocks.Word.AddIn';
   if not RegWriteStringValue(HKCU, AddInKey, 'Manifest', GetManifestUri('') + '|vstolocal') then
-    RaiseException('Could not register the installed LaTeX Blocks manifest.');
+    RaiseException('Could not register the installed LaTeXBlocks manifest.');
   if not RegWriteDWordValue(HKCU, AddInKey, 'LoadBehavior', 3) then
-    RaiseException('Could not enable the installed LaTeX Blocks add-in.');
+    RaiseException('Could not enable the installed LaTeXBlocks add-in.');
 end;
 
 procedure RegisterInstalledPowerPointManifest;
@@ -161,9 +170,9 @@ var
 begin
   AddInKey := 'Software\Microsoft\Office\PowerPoint\Addins\LaTeXBlocks.PowerPoint.AddIn';
   if not RegWriteStringValue(HKCU, AddInKey, 'Manifest', GetPowerPointManifestUri('') + '|vstolocal') then
-    RaiseException('Could not register the installed PowerPoint LaTeX Blocks manifest.');
+    RaiseException('Could not register the installed PowerPoint LaTeXBlocks manifest.');
   if not RegWriteDWordValue(HKCU, AddInKey, 'LoadBehavior', 3) then
-    RaiseException('Could not enable the installed PowerPoint LaTeX Blocks add-in.');
+    RaiseException('Could not enable the installed PowerPoint LaTeXBlocks add-in.');
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);

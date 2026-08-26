@@ -1,6 +1,6 @@
-# LaTeX Blocks Magic Header v1
+# LaTeXBlocks Magic Header v1
 
-LaTeX Blocks stores its portable object contract and author source together in
+LaTeXBlocks stores its portable object contract and author source together in
 the Office object's `AlternativeText`. `Title` is always empty. Word and
 PowerPoint use the same format.
 
@@ -113,6 +113,6 @@ This is a second paragraph.
 - Editors, renderers, and export operate on author source, never on the header.
 - Comprehensive Find is unchanged and continues to search raw
   `AlternativeText`, including the header.
-- An object is a LaTeX Blocks object only when the complete v1 header and all
+- An object is a LaTeXBlocks object only when the complete v1 header and all
   required fields parse successfully.
 - No legacy Title/JSON or tag format is read.
