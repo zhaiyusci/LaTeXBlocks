@@ -147,7 +147,7 @@ namespace LaTeXBlocks.PowerPoint
             using (var editor = new LaTeXBlockEditorForm(Blocks, source, metadata.WidthPt,
                 metadata.FontSizePt,
                 currentProfile ?? Renderers.DefaultAvailableProfile,
-                SetCurrentProfile, true, style, frameHeightPt, frameWidthPt))
+                SetCurrentProfile, true, style, null, null))
             {
                 if (editor.ShowDialog(new LaTeXBlocksRibbon.PowerPointWindow(Application)) ==
                     DialogResult.OK)
@@ -158,7 +158,7 @@ namespace LaTeXBlocks.PowerPoint
                     RunShapeMutation(() => Blocks.UpdateRendered(shape,
                         editor.AcceptedSource, editor.AcceptedWidthPt,
                         editor.AcceptedRender, true, null, null,
-                        editor.AcceptedStyle, true));
+                        editor.AcceptedStyle, true, true));
                 }
             }
         }
@@ -180,7 +180,7 @@ namespace LaTeXBlocks.PowerPoint
             EnsureBackendAvailable();
             if (!PowerPointRibbonContract.TryParseLayoutWidthPt(text, out var widthPt))
                 throw new ArgumentException(
-                    "Enter a typesetting width from 30 to 450 pt.", nameof(text));
+                    "Enter a typesetting width from 30 to 2000 pt.", nameof(text));
             if (!Blocks.TryGetSelectedBlock(out var shape, out var metadata))
                 throw new InvalidOperationException("Select one LaTeX Block first.");
             QueueBlockFormat(shape, metadata, widthPt, null);
@@ -327,7 +327,9 @@ namespace LaTeXBlocks.PowerPoint
                 var render = await service.RenderCommittedAsync(pending.Source,
                     pending.TargetWidthPt, pending.Profile,
                     pending.TargetFontSizePt, pending.Style,
-                    pending.TargetFrameHeightPt, pending.TargetFrameWidthPt,
+                    pending.ConstrainFrameHeight
+                        ? pending.TargetFrameHeightPt : (double?)null,
+                    pending.TargetFrameWidthPt,
                     pending.StyleIsApplied)
                     .ConfigureAwait(false);
                 PostToPowerPointUi(() => CompleteBlockFormat(service, pending, render));
@@ -385,8 +387,11 @@ namespace LaTeXBlocks.PowerPoint
                     out _) && PowerPointBlockService.GetShapeKey(selectedShape)
                     .Equals(pending.Key);
                 RunShapeMutation(() => service.UpdateRendered(shape, pending.Source,
-                    pending.TargetWidthPt, render, keepSelected, pending.TargetFrameHeightPt,
-                    pending.TargetFrameWidthPt, pending.Style, pending.StyleIsApplied));
+                    pending.TargetWidthPt, render, keepSelected,
+                    pending.ConstrainFrameHeight
+                        ? pending.TargetFrameHeightPt : (double?)null,
+                    pending.TargetFrameWidthPt, pending.Style, pending.StyleIsApplied,
+                    !pending.ConstrainFrameHeight));
                 pendingBlockFormats.Remove(pending.Key);
                 ribbon?.InvalidateBlockControls();
             }

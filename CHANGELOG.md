@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.155] — 2026-10-27
+
+- Route every Word and PowerPoint Block through StemTeX's automatic-height block renderer. First/final line metrics, list geometry, and leading-display handling now have one renderer-owned policy rather than a per-block option.
+- Raise PowerPoint's typesetting-width limit from 450 pt to 2000 pt and make the editor's preview divider visibly draggable while remembering its position for the Office session.
+- Update the bundled StemTeX runtime and the unmodified Profile Creator distribution to 0.15.0. This brings the localized creator and optional QR-code profile recipe.
+- Stop writing the short-lived Full-line-height style field; old tags and Word magic headers containing it remain readable and are interpreted with the new unconditional automatic-height behavior.
+- Let the SVG returned by StemTeX determine the host Block height after insert, source/style edit, width change, and font-size change. Only an actual native vertical resize supplies an explicit fixed-height viewport.
+
 ## [0.2.149] — 2026-08-26
 
 - Fix the real native Font Size event path: its asynchronous commit guard now compares the request against the formula's Office Graphic Fill rather than Word's transient `Font.TextColor=Automatic`, so valid rerenders are no longer silently discarded.

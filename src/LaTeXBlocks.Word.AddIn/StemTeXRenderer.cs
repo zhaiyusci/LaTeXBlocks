@@ -69,7 +69,8 @@ namespace LaTeXBlocks.Word
         }
 
         internal StemTeXSvgResult RenderSvg(string source, double widthPt, bool autoWidth = false,
-            double fontSizePt = 10, Func<bool> cancelBeforeNativeRender = null)
+            double fontSizePt = 10, Func<bool> cancelBeforeNativeRender = null,
+            bool blockLayout = false)
         {
             if (string.IsNullOrWhiteSpace(source)) throw new ArgumentException("LaTeX source cannot be empty.", nameof(source));
             if (widthPt <= 0) throw new ArgumentOutOfRangeException(nameof(widthPt));
@@ -79,7 +80,9 @@ namespace LaTeXBlocks.Word
             {
                 ThrowIfDisposed();
                 EnsureRenderer();
-                var markedSource = AddMeasurementMarkers(source, autoWidth);
+                if (autoWidth && blockLayout)
+                    throw new ArgumentException("StemTeX block layout requires a fixed width.", nameof(autoWidth));
+                var markedSource = blockLayout ? source : AddMeasurementMarkers(source, autoWidth);
                 var renderWidth = autoWidth ? 2000.0 : widthPt;
                 using (var sourceUtf8 = new NativeUtf8(markedSource))
                 {
@@ -101,8 +104,16 @@ namespace LaTeXBlocks.Word
                     }
                     try
                     {
-                        ok = api.RenderOutputBytesWithFontSize(renderer, sourceUtf8.Pointer, renderWidth, fontSizePt,
-                            SvgOutputFormat, out bytes, out result, out errorCode, out error);
+                        if (blockLayout)
+                        {
+                            ok = api.RenderBlock(renderer, sourceUtf8.Pointer, renderWidth, fontSizePt,
+                                SvgOutputFormat, out result, out errorCode, out error);
+                        }
+                        else
+                        {
+                            ok = api.RenderOutputBytesWithFontSize(renderer, sourceUtf8.Pointer, renderWidth, fontSizePt,
+                                SvgOutputFormat, out bytes, out result, out errorCode, out error);
+                        }
                     }
                     finally
                     {
@@ -119,11 +130,23 @@ namespace LaTeXBlocks.Word
                             throw new StemTeXException(errorCode, ReadUtf8(error) ?? "StemTeX render failed.");
                         }
 
-                        var size = checked((int)bytes.Size.ToUInt64());
-                        var managedBytes = new byte[size];
-                        if (size > 0) Marshal.Copy(bytes.Data, managedBytes, 0, size);
+                        byte[] managedBytes;
                         double depthPt;
-                        managedBytes = ProcessMeasurementMarkers(managedBytes, autoWidth, out depthPt);
+                        if (blockLayout)
+                        {
+                            var outputPath = ReadUtf8(result.OutputPath);
+                            if (string.IsNullOrWhiteSpace(outputPath) || !File.Exists(outputPath))
+                                throw new InvalidDataException("StemTeX block render returned no readable SVG file.");
+                            managedBytes = File.ReadAllBytes(outputPath);
+                            depthPt = 0;
+                        }
+                        else
+                        {
+                            var size = checked((int)bytes.Size.ToUInt64());
+                            managedBytes = new byte[size];
+                            if (size > 0) Marshal.Copy(bytes.Data, managedBytes, 0, size);
+                            managedBytes = ProcessMeasurementMarkers(managedBytes, autoWidth, out depthPt);
+                        }
                         return new StemTeXSvgResult(
                             managedBytes,
                             ReadUtf8(result.SummaryJson),
@@ -549,6 +572,10 @@ namespace LaTeXBlocks.Word
                 double fontSizePt, int format, out StemTeXOutputBytes bytes, out StemTeXRenderOutputResult result,
                 out int errorCode, out IntPtr error);
             [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+            internal delegate int RenderBlockDelegate(IntPtr renderer, IntPtr source, double widthPt,
+                double fontSizePt, int format, out StemTeXRenderOutputResult result,
+                out int errorCode, out IntPtr error);
+            [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
             internal delegate void FreeOutputBytesDelegate(ref StemTeXOutputBytes bytes);
             [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
             internal delegate void FreeOutputResultDelegate(ref StemTeXRenderOutputResult result);
@@ -564,6 +591,7 @@ namespace LaTeXBlocks.Word
                 Create = Load<CreateDelegate>(module, "stemtex_renderer_create");
                 RenderOutputBytesWithFontSize = Load<RenderOutputBytesWithFontSizeDelegate>(module,
                     "stemtex_renderer_render_output_bytes_with_font_size");
+                RenderBlock = Load<RenderBlockDelegate>(module, "stemtex_renderer_render_block");
                 FreeOutputBytes = Load<FreeOutputBytesDelegate>(module, "stemtex_renderer_free_output_bytes");
                 FreeOutputResult = Load<FreeOutputResultDelegate>(module, "stemtex_renderer_free_output_result");
                 FreeString = Load<FreeStringDelegate>(module, "stemtex_renderer_free_string");
@@ -573,6 +601,7 @@ namespace LaTeXBlocks.Word
 
             internal CreateDelegate Create { get; }
             internal RenderOutputBytesWithFontSizeDelegate RenderOutputBytesWithFontSize { get; }
+            internal RenderBlockDelegate RenderBlock { get; }
             internal FreeOutputBytesDelegate FreeOutputBytes { get; }
             internal FreeOutputResultDelegate FreeOutputResult { get; }
             internal FreeStringDelegate FreeString { get; }

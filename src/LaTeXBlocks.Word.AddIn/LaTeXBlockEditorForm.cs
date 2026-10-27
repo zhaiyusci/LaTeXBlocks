@@ -80,8 +80,11 @@ namespace LaTeXBlocks.Word
                         : LaTeXBlockKind.InlineMath;
             mathEditor = kind != LaTeXBlockKind.LaTeXBlock;
             this.lockModeToFixed = lockModeToFixed;
-            previewFrameHeightPt = outerHeightPt;
-            previewFrameWidthPt = outerWidthPt;
+            // Ordinary source/style edits are automatic-height operations. Feeding
+            // the old Word frame height back into TeX would turn the preview into a
+            // fixed-height vbox and hide StemTeX's newly measured block height.
+            previewFrameHeightPt = null;
+            previewFrameWidthPt = null;
             style = style ?? new LaTeXBlockStyle(textColor: ToDrawingColor(textColor));
             this.textColor = style.TextColor;
             backgroundColor = style.BackgroundColor;

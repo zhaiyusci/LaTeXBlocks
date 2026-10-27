@@ -151,21 +151,21 @@ namespace LaTeXBlocks.Word
         }
 
         public Task<StemTeXSvgResult> RenderLatestAsync(string profile, string source, double widthPt,
-            bool autoWidth, double fontSizePt = 10)
+            bool autoWidth, double fontSizePt = 10, bool blockLayout = false)
         {
-            return RenderAsync("renderLatest", profile, source, widthPt, autoWidth, fontSizePt);
+            return RenderAsync("renderLatest", profile, source, widthPt, autoWidth, fontSizePt, blockLayout);
         }
 
         public Task<StemTeXSvgResult> RenderQueuedAsync(string profile, string source, double widthPt,
-            bool autoWidth, double fontSizePt = 10)
+            bool autoWidth, double fontSizePt = 10, bool blockLayout = false)
         {
-            return RenderAsync("renderQueued", profile, source, widthPt, autoWidth, fontSizePt);
+            return RenderAsync("renderQueued", profile, source, widthPt, autoWidth, fontSizePt, blockLayout);
         }
 
         public StemTeXSvgResult RenderSvg(string profile, string source, double widthPt, bool autoWidth,
-            double fontSizePt = 10)
+            double fontSizePt = 10, bool blockLayout = false)
         {
-            return RenderLatestAsync(profile, source, widthPt, autoWidth, fontSizePt).GetAwaiter().GetResult();
+            return RenderLatestAsync(profile, source, widthPt, autoWidth, fontSizePt, blockLayout).GetAwaiter().GetResult();
         }
 
         public void CancelLatestPreview()
@@ -232,7 +232,7 @@ namespace LaTeXBlocks.Word
         }
 
         private Task<StemTeXSvgResult> RenderAsync(string command, string profile, string source, double widthPt,
-            bool autoWidth, double fontSizePt)
+            bool autoWidth, double fontSizePt, bool blockLayout)
         {
             var canonical = CanonicalProfile(profile);
             lock (gate)
@@ -250,7 +250,8 @@ namespace LaTeXBlocks.Word
                 Source = source,
                 WidthPt = widthPt,
                 AutoWidth = autoWidth,
-                FontSizePt = fontSizePt
+                FontSizePt = fontSizePt,
+                BlockLayout = blockLayout
             });
         }
 
@@ -582,6 +583,8 @@ namespace LaTeXBlocks.Word
         internal bool? AutoWidth { get; set; }
         [DataMember(Name = "fontSizePt", EmitDefaultValue = false)]
         internal double? FontSizePt { get; set; }
+        [DataMember(Name = "blockLayout", EmitDefaultValue = false)]
+        internal bool? BlockLayout { get; set; }
     }
 
     [DataContract]

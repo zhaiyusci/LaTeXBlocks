@@ -13,11 +13,11 @@ only for independent slide blocks, as described in [PowerPoint scope](POWERPOINT
 
 ## Supported runtime contract
 
-LaTeXBlocks requires StemTeX **0.13.0 or newer**. A usable runtime root has all of the following:
+LaTeXBlocks requires StemTeX **0.15.0 or newer**. A usable runtime root has all of the following:
 
 ```text
 <StemTeXHome>/
-  runtime/VERSION                         # parseable semantic version, >= 0.13.0
+  runtime/VERSION                         # parseable semantic version, >= 0.15.0
   runtime/bin/sdk/stemtex-renderer.dll
   runtime/bin/sdk/stemtex-profile.dll
   runtime/bin/windows/dvisvgmdaemon.dll
@@ -26,11 +26,12 @@ LaTeXBlocks requires StemTeX **0.13.0 or newer**. A usable runtime root has all 
 ```
 
 The version gate is necessary but not sufficient. `stemtex-renderer.dll` must be an x64 build compatible with the
-0.13 native ABI and export these Cdecl entry points. They are loaded by `LaTeXBlocks.RenderHost.host`, not by an
+0.15 native ABI and export these Cdecl entry points. They are loaded by `LaTeXBlocks.RenderHost.host`, not by an
 Office add-in:
 
 - `stemtex_renderer_create`
 - `stemtex_renderer_render_output_bytes_with_font_size`
+- `stemtex_renderer_render_block`
 - `stemtex_renderer_free_output_bytes`
 - `stemtex_renderer_free_output_result`
 - `stemtex_renderer_free_string`
@@ -39,9 +40,10 @@ Office add-in:
 
 The render host supplies three independent paths when creating the renderer: the private StemTeX engine runtime, the
 system TeX Live package/font tree, and the selected profile directory. Each pipe render request supplies the TeX
-source, typesetting width, auto-width flag, and real TeX design size in points. The
+source, typesetting width, auto-width flag, block-layout flag, and real TeX design size in points. The
 per-request font-size API is important: the Office host never fakes a new TeX size by scaling a previously rendered
-SVG. The RenderHost returns self-contained SVG bytes plus outcome metadata; the add-in consumes the returned TeX box
+SVG. The block-layout flag maps directly to `stemtex_renderer_render_block`; LaTeXBlocks reads its returned SVG file
+before releasing the native result and does not reproduce the renderer's first/final-line logic. The RenderHost returns self-contained SVG bytes plus outcome metadata; the add-in consumes the returned TeX box
 metrics to place the SVG in the Office document.
 
 ## Runtime discovery
@@ -128,11 +130,11 @@ For local development, build StemTeX separately and point `STEMTEX_HOME` at its 
 runtime is required. The release script's default stage is:
 
 ```text
-..\xetex\stemtex\dist\package-stage\StemTeX-0.13.0
+..\xetex\stemtex\dist\package-stage\StemTeX-0.15.0
 ```
 
 relative to this repository. It can be overridden with
-`scripts\Publish-LaTeXBlocks.ps1 -StemTeXSourceDir <stage>`. Publishing validates StemTeX 0.13, both native SDK
+`scripts\Publish-LaTeXBlocks.ps1 -StemTeXSourceDir <stage>`. Publishing validates StemTeX 0.15.0, both native SDK
 libraries, the original Profile Creator executable, and the `unicodemath` profile before producing an installer.
 
 The installer copies the selected stage's patched runtime, GUI/Profile Creator, and installed profile sources into its

@@ -15,7 +15,7 @@ Word or PowerPoint to load it.
 - A system TeX Live tree containing `texmf-dist` and `texmf-dist\web2c` (for example `C:\texlive\2026`). The Ribbon's
   **TeX Live...** command stores a custom location under the current user's LaTeXBlocks settings.
 - A usable StemTeX installation. For development and publishing, the expected staged distribution is
-  `..\xetex\stemtex\dist\package-stage\StemTeX-0.13.0` relative to this repository. It must be StemTeX 0.13 or newer
+  `..\xetex\stemtex\dist\package-stage\StemTeX-0.15.0` relative to this repository. It must be StemTeX 0.15.0 or newer
   and include the x64 runtime, `stemtex-profile-creator.exe`, its native profile SDK, and the `unicodemath` profile.
 
 The release installer bundles StemTeX's patched engine runtime and Profile Creator, the VSTO manifests, and the VC++

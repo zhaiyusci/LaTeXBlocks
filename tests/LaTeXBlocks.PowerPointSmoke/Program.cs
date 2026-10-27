@@ -92,8 +92,8 @@ namespace LaTeXBlocks.PowerPointSmoke
                        out normalizedTexLiveRoot) &&
                    string.Equals(normalizedTexLiveRoot, texLiveRoot,
                        StringComparison.OrdinalIgnoreCase) &&
-                   StemTeXInstallation.RequiredRuntimeVersion >= new Version(0, 13, 0),
-                "LaTeXBlocks did not normalize the accepted system TeX Live directory forms for StemTeX 0.13.");
+                   StemTeXInstallation.RequiredRuntimeVersion >= new Version(0, 15, 0),
+                "LaTeXBlocks did not normalize the accepted system TeX Live directory forms for StemTeX 0.15.0.");
             Assert(LaTeXBlockEditorForm.IsTransientPreviewNavigationFailure(
                        new COMException("busy", unchecked((int)0x8001010A))) &&
                    LaTeXBlockEditorForm.IsTransientPreviewNavigationFailure(
@@ -107,7 +107,8 @@ namespace LaTeXBlocks.PowerPointSmoke
                        out var parsedWidthPt) &&
                    Math.Abs(parsedWidthPt - 360.5) < 0.001 &&
                    !PowerPointRibbonContract.TryParseLayoutWidthPt("29.9", out _) &&
-                   !PowerPointRibbonContract.TryParseLayoutWidthPt("450.1", out _) &&
+                   PowerPointRibbonContract.TryParseLayoutWidthPt("1999.5", out _) &&
+                   !PowerPointRibbonContract.TryParseLayoutWidthPt("2000.1", out _) &&
                    !PowerPointRibbonContract.TryParseLayoutWidthPt("wide", out _) &&
                    Math.Abs(BlockLayoutWidthPolicy.DefaultPt - 360) < 0.001 &&
                    Math.Abs(BlockLayoutWidthPolicy.StepPt - 0.5) < 0.001,
@@ -179,7 +180,9 @@ namespace LaTeXBlocks.PowerPointSmoke
                            inheritedSize, profile, backend.SwitchProfile, false))
                 {
                     Assert(editor.Source == editorSource &&
-                           editor.SourceLineCountForTest == 3,
+                           editor.SourceLineCountForTest == 3 &&
+                           editor.MaximumWidthPtForTest == 2000 &&
+                           editor.PreviewHeightIsAdjustableForTest,
                         "The PowerPoint editor collapsed LF source lines instead of displaying them as CRLF lines.");
                     editor.StartPosition = System.Windows.Forms.FormStartPosition.Manual;
                     editor.Location = new System.Drawing.Point(100, 100);
@@ -295,7 +298,7 @@ namespace LaTeXBlocks.PowerPointSmoke
                        styledStyle.ToString().IndexOf("valign=middle", StringComparison.Ordinal) >= 0 &&
                        LaTeXBlockStyle.ReadFromTag("LaTeXBlocksStyle/1;leading=1.5;" +
                            "padding=8;valign=middle;text=183766;fill=F1F5FF;" +
-                           "border=1.25;bordercolor=3362A2").Equals(styledStyle) &&
+                           "border=1.25;bordercolor=3362A2;lineheight=full").Equals(styledStyle) &&
                        LaTeXBlockStyle.ReadFromTag(null).Equals(LaTeXBlockStyle.Default) &&
                        LaTeXBlockStyle.ReadFromTag("LaTeXBlocksStyle/1;leading=not-a-number;" +
                            "padding=not-a-number;border=not-a-number")
@@ -308,19 +311,19 @@ namespace LaTeXBlocks.PowerPointSmoke
                            StringComparison.Ordinal) &&
                        styledWrapper.IndexOf("\\renewcommand{\\baselinestretch}{1.5}",
                            StringComparison.Ordinal) >= 0 &&
-                       styledWrapper.IndexOf("\\setbox\\strutbox", StringComparison.Ordinal) >= 0 &&
+                       styledWrapper.IndexOf("\\setbox\\strutbox", StringComparison.Ordinal) < 0 &&
                        styledWrapper.IndexOf("\\setlength{\\parindent}{0pt}", StringComparison.Ordinal) >= 0 &&
                        styledWrapper.IndexOf("\\setlength{\\leftskip}{0pt}", StringComparison.Ordinal) >= 0 &&
                        styledWrapper.IndexOf("\\parshape=0", StringComparison.Ordinal) >= 0 &&
                        styledWrapper.IndexOf("\\everypar{}", StringComparison.Ordinal) >= 0 &&
-                       styledWrapper.IndexOf("\\noindent\\strut%", StringComparison.Ordinal) >= 0 &&
-                       styledWrapper.IndexOf("\\ifhmode\\strut\\fi", StringComparison.Ordinal) >= 0 &&
+                       styledWrapper.IndexOf("\\noindent\\strut%", StringComparison.Ordinal) < 0 &&
+                       styledWrapper.IndexOf("\\ifhmode\\strut\\fi", StringComparison.Ordinal) < 0 &&
                        styledWrapper.IndexOf("\\fbox", StringComparison.Ordinal) < 0 &&
                        styledWrapper.IndexOf("\\colorbox", StringComparison.Ordinal) < 0 &&
                        styledWrapper.IndexOf("\\vbox to ", StringComparison.Ordinal) < 0 &&
                        styledWrapper.IndexOf(styledSource + "%\r\n",
                            StringComparison.Ordinal) >= 0,
-                    "The PowerPoint TeX wrapper did not establish stable outer text-line metrics.");
+                    "The PowerPoint TeX wrapper still authored line-height struts instead of delegating them to StemTeX.");
                 var fixedBoxWrapper = styledStyle.WrapSource(styledSource, inheritedSize,
                     true, 200, 80);
                 Assert(fixedBoxWrapper.IndexOf("\\special{color push rgb 0.094118 0.215686 0.4}",
@@ -347,6 +350,12 @@ namespace LaTeXBlocks.PowerPointSmoke
                 var bottomBoxWrapper = new LaTeXBlockStyle(1.2, 0,
                     LaTeXBlockVerticalAlignment.Bottom).WrapSource(styledSource, inheritedSize,
                         true, 200, 80);
+                const string itemizeSource =
+                    "% leading comment\r\n\\begin{itemize}\\item first\\item second\\end{itemize}";
+                var itemizeBoxWrapper = LaTeXBlockStyle.Default.WrapSource(itemizeSource,
+                    inheritedSize, true, 200, 80);
+                var fullHeightItemizeBoxWrapper = styledStyle.WrapSource(itemizeSource,
+                    inheritedSize, true, 200, 80);
                 Assert(fixedBoxWrapper.IndexOf("\\setlength{\\hsize}{200pt}",
                            StringComparison.Ordinal) >= 0 &&
                        fixedBoxWrapper.IndexOf("\\setbox2=\\vbox to 80pt", StringComparison.Ordinal) >= 0 &&
@@ -357,10 +366,15 @@ namespace LaTeXBlocks.PowerPointSmoke
                        bottomBoxWrapper.IndexOf("\\vss\\box0\\vss%", StringComparison.Ordinal) < 0 &&
                        fixedBoxWrapper.IndexOf("\\hbox to 200pt{\\box2\\hss}",
                             StringComparison.Ordinal) >= 0 &&
-                       topBoxWrapper.IndexOf("\\noindent\\strut%", StringComparison.Ordinal) >= 0 &&
-                       fixedBoxWrapper.IndexOf("\\noindent\\strut%", StringComparison.Ordinal) >= 0 &&
-                       bottomBoxWrapper.IndexOf("\\noindent\\strut%", StringComparison.Ordinal) >= 0,
-                    "A fixed Block did not combine stable text-line metrics with TeX Top/Middle/Bottom placement.");
+                       topBoxWrapper.IndexOf("\\noindent\\strut%", StringComparison.Ordinal) < 0 &&
+                       fixedBoxWrapper.IndexOf("\\noindent\\strut%", StringComparison.Ordinal) < 0 &&
+                       bottomBoxWrapper.IndexOf("\\noindent\\strut%", StringComparison.Ordinal) < 0 &&
+                       itemizeBoxWrapper.IndexOf("\\noindent\\strut%", StringComparison.Ordinal) < 0 &&
+                       fullHeightItemizeBoxWrapper.IndexOf("\\noindent\\strut%", StringComparison.Ordinal) < 0 &&
+                       fullHeightItemizeBoxWrapper.IndexOf("\\setbox\\strutbox", StringComparison.Ordinal) < 0 &&
+                       itemizeBoxWrapper.IndexOf(itemizeSource + "%\r\n",
+                           StringComparison.Ordinal) >= 0,
+                    "A fixed Block style wrapper still authored line-height struts instead of delegating them to StemTeX.");
                 var typographicBoxStyle = new LaTeXBlockStyle(1.2, 0);
                 var lowercaseRender = service.RenderPreviewAsync("a", 180, profile,
                     inheritedSize, typographicBoxStyle, null, null, true).GetAwaiter().GetResult();
@@ -386,7 +400,8 @@ namespace LaTeXBlocks.PowerPointSmoke
                        Math.Abs(ReadSvgViewBoxY(lowercaseRender.SvgBytes) -
                            ReadSvgViewBoxY(descenderRender.SvgBytes)) < 0.05,
                     "A lowercase-only PowerPoint Block collapsed to its ink instead of a full TeX line box.");
-                var displayWrapper = typographicBoxStyle.WrapSource("\\[E=mc^2\\]",
+                var naturalDisplayStyle = new LaTeXBlockStyle(1.2, 0);
+                var displayWrapper = naturalDisplayStyle.WrapSource("\\[E=mc^2\\]",
                     inheritedSize, true);
                 Assert(displayWrapper.IndexOf("\\noindent\\strut", StringComparison.Ordinal) < 0 &&
                        displayWrapper.IndexOf("\\setbox\\strutbox", StringComparison.Ordinal) < 0 &&
@@ -395,12 +410,12 @@ namespace LaTeXBlocks.PowerPointSmoke
                            StringComparison.Ordinal) >= 0,
                     "A display-style Block did not remain clean inside the shared TeX layout box.");
                 var bareDisplayResult = backend.RenderQueuedAsync(profile,
-                    "\\global\\PreviewBorder=0pt\n\\[E=mc^2\\]", 180, false,
-                    inheritedSize).GetAwaiter().GetResult();
+                    "\\[E=mc^2\\]\n\\global\\PreviewBorder=0pt%", 180, false,
+                    inheritedSize, true).GetAwaiter().GetResult();
                 var expectedDisplaySvg = LaTeXBlockSvgFrame.Decorate(bareDisplayResult.Bytes,
-                    typographicBoxStyle, 180, null);
+                    naturalDisplayStyle, 180, null);
                 var styledDisplayRender = service.RenderPreviewAsync("\\[E=mc^2\\]", 180, profile,
-                    inheritedSize, typographicBoxStyle, null, null, true).GetAwaiter().GetResult();
+                    inheritedSize, naturalDisplayStyle, null, null, true).GetAwaiter().GetResult();
                 var expectedDisplayWidth =
                     PowerPointBlockService.ReadSvgWidthPt(expectedDisplaySvg);
                 var expectedDisplayHeight =

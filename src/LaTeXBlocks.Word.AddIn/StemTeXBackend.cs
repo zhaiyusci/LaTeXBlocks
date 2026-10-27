@@ -25,12 +25,12 @@ namespace LaTeXBlocks.Word
         void SwitchProfile(string profile);
         void WarmUp(string profile);
         Task<StemTeXSvgResult> RenderLatestAsync(string profile, string source, double widthPt, bool autoWidth,
-            double fontSizePt = 10);
+            double fontSizePt = 10, bool blockLayout = false);
         void CancelLatestPreview();
         Task<StemTeXSvgResult> RenderQueuedAsync(string profile, string source, double widthPt, bool autoWidth,
-            double fontSizePt = 10);
+            double fontSizePt = 10, bool blockLayout = false);
         StemTeXSvgResult RenderSvg(string profile, string source, double widthPt, bool autoWidth,
-            double fontSizePt = 10);
+            double fontSizePt = 10, bool blockLayout = false);
     }
 
     // Mirrors the StemTeX GUI lifecycle: one global profile, one renderer, and one
@@ -142,7 +142,7 @@ namespace LaTeXBlocks.Word
         }
 
         public Task<StemTeXSvgResult> RenderLatestAsync(string profile, string source, double widthPt, bool autoWidth,
-            double fontSizePt = 10)
+            double fontSizePt = 10, bool blockLayout = false)
         {
             var canonical = CanonicalProfile(profile);
             SwitchProfile(canonical);
@@ -158,7 +158,7 @@ namespace LaTeXBlocks.Word
                 latestRequestId = requestId;
                 status = "queued:" + requestId;
                 queue.Enqueue(new BackendWorkItem(
-                    () => ExecuteRender(canonical, source, widthPt, autoWidth, fontSizePt,
+                    () => ExecuteRender(canonical, source, widthPt, autoWidth, fontSizePt, blockLayout,
                         requestGeneration, requestId, true, completion),
                     () => completion.TrySetCanceled(), true));
                 previewToCancel = ActiveLatestPreviewRenderer_NoLock();
@@ -192,7 +192,7 @@ namespace LaTeXBlocks.Word
         // later preview must never silently discard a width/font change already
         // committed by the user.
         public Task<StemTeXSvgResult> RenderQueuedAsync(string profile, string source,
-            double widthPt, bool autoWidth, double fontSizePt = 10)
+            double widthPt, bool autoWidth, double fontSizePt = 10, bool blockLayout = false)
         {
             var canonical = CanonicalProfile(profile);
             SwitchProfile(canonical);
@@ -207,7 +207,7 @@ namespace LaTeXBlocks.Word
                 requestId = ++nextRequestId;
                 status = "queued:" + requestId;
                 queue.Enqueue(new BackendWorkItem(
-                    () => ExecuteRender(canonical, source, widthPt, autoWidth, fontSizePt,
+                    () => ExecuteRender(canonical, source, widthPt, autoWidth, fontSizePt, blockLayout,
                         requestGeneration, requestId, false, completion),
                     () => completion.TrySetCanceled()));
             }
@@ -216,9 +216,9 @@ namespace LaTeXBlocks.Word
         }
 
         public StemTeXSvgResult RenderSvg(string profile, string source, double widthPt, bool autoWidth,
-            double fontSizePt = 10)
+            double fontSizePt = 10, bool blockLayout = false)
         {
-            return RenderLatestAsync(profile, source, widthPt, autoWidth, fontSizePt).GetAwaiter().GetResult();
+            return RenderLatestAsync(profile, source, widthPt, autoWidth, fontSizePt, blockLayout).GetAwaiter().GetResult();
         }
 
         private void InitializeRenderer(string profile, long requestedGeneration)
@@ -288,7 +288,7 @@ namespace LaTeXBlocks.Word
         }
 
         private void ExecuteRender(string profile, string source, double widthPt, bool autoWidth,
-            double fontSizePt, long requestGeneration, long requestId, bool latestOnly,
+            double fontSizePt, bool blockLayout, long requestGeneration, long requestId, bool latestOnly,
             TaskCompletionSource<StemTeXSvgResult> completion)
         {
             lock (gate)
@@ -306,7 +306,7 @@ namespace LaTeXBlocks.Word
                 if (renderer == null || !string.Equals(rendererProfile, profile, StringComparison.OrdinalIgnoreCase))
                     throw new InvalidOperationException("StemTeX renderer is not ready for profile " + profile + ".");
                 RememberOwnedWorkerHosts();
-                var result = RenderWithTransientRetry(source, widthPt, autoWidth, fontSizePt,
+                var result = RenderWithTransientRetry(source, widthPt, autoWidth, fontSizePt, blockLayout,
                     requestGeneration, requestId, latestOnly);
                 RememberOwnedWorkerHosts();
                 lock (gate)
@@ -397,12 +397,12 @@ namespace LaTeXBlocks.Word
         }
 
         private StemTeXSvgResult RenderWithTransientRetry(string source, double widthPt, bool autoWidth,
-            double fontSizePt, long requestGeneration, long requestId, bool latestOnly)
+            double fontSizePt, bool blockLayout, long requestGeneration, long requestId, bool latestOnly)
         {
             try
             {
                 return renderer.RenderSvg(source, widthPt, autoWidth, fontSizePt,
-                    () => IsRequestSuperseded(requestGeneration, requestId, latestOnly));
+                    () => IsRequestSuperseded(requestGeneration, requestId, latestOnly), blockLayout);
             }
             catch (StemTeXException exception) when (
                 exception.ErrorCode == WorkerRestartingError || exception.ErrorCode == WorkerBusyError)
@@ -419,7 +419,7 @@ namespace LaTeXBlocks.Word
                         (latestOnly && requestId != latestRequestId))
                         throw new TaskCanceledException("StemTeX request was superseded.");
                 return renderer.RenderSvg(source, widthPt, autoWidth, fontSizePt,
-                    () => IsRequestSuperseded(requestGeneration, requestId, latestOnly));
+                    () => IsRequestSuperseded(requestGeneration, requestId, latestOnly), blockLayout);
             }
         }
 

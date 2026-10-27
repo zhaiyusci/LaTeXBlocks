@@ -72,7 +72,8 @@ resizes compose correctly. The native drag may be
 temporarily shown as a Word picture transform, but the persisted replacement has no such scale transform. For a
 floating replacement the add-in temporarily returns the shape to the inline representation, then restores its relative
 reference frame, left/top position, wrapping type/side/distances, overlap setting, layout-in-cell, anchor lock, and
-rotation. Editing source or TeX measure keeps the same outer frame in either representation. This option applies only
+rotation. An ordinary source, style, font-size, or TeX-measure edit takes the new StemTeX width and automatic height;
+only a native vertical resize supplies an explicit fixed height for that reflow. This option applies only
 to fixed-width ordinary content. Auto-width formulas remain inline for their U+2060 word-spacing scaffold, and
 numbered equations remain inline for their tab/`SEQ`/bookmark layout.
 
@@ -201,7 +202,7 @@ The large temporary StemTeX canvas is solely a measurement surface. Its width is
 
 ### Fixed-width LaTeX block
 
-Fixed mode is reserved for an explicit user-sized Block. It preserves the caller's outer frame and supports display math, multiple lines, and paragraph-like LaTeX content inside that frame. It deliberately keeps the requested typesetting canvas. Such content does not have one meaningful surrounding-text baseline, so multiline Blocks remain at Word position zero. Its editor exposes TeX font size, line spacing, uniform padding, Top/Middle/Bottom vertical placement, text color, fill, and border controls. The authored outer frame minus padding becomes an exact TeX box with zero paragraph indentation. TeX owns leading, text color, horizontal left alignment, and vertical placement inside its fixed-height `vbox`. Ordinary text receives stable first/final line height and depth so x-height-only content cannot touch a Top-aligned content edge; standalone display math remains unwrapped. The SVG shell only adds padding, fill, an inside border, and clipping; it neither aligns the content again nor uses a Word Shape Fill/Line or TeX `\fbox`.
+Fixed mode is the fixed-width, automatic-height Block path. It supports display math, multiple lines, and paragraph-like LaTeX content. Such content does not have one meaningful surrounding-text baseline, so multiline Blocks remain at Word position zero. Its editor exposes TeX font size, line spacing, uniform padding, Top/Middle/Bottom vertical placement, text color, fill, and border controls. The selected width minus padding becomes the TeX measure with zero paragraph indentation; StemTeX's returned height becomes the Office object height. Every Fixed Block uses StemTeX 0.15's `stemtex_renderer_render_block`; StemTeX supplies minimum first-line ascent and final-line depth while preserving tall content and natural leading-display spacing. LaTeXBlocks does not inject first/last-line struts or infer source structure. A native vertical resize is the one operation that creates a fixed-height `vbox`, at which point TeX owns Top/Middle/Bottom placement. The SVG shell only adds padding, fill, an inside border, and clipping; it neither aligns the content again nor uses a Word Shape Fill/Line or TeX `\fbox`.
 
 Objects created before the mode field existed parse as `fixed`, preserving their former behavior. An inline fixed
 Content Block can be explicitly converted between modes. A floating Block remains fixed while it owns a physical

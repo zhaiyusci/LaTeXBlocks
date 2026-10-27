@@ -1,5 +1,5 @@
 #ifndef MyAppVersion
-#define MyAppVersion "0.2.149"
+#define MyAppVersion "0.2.155"
 #endif
 #ifndef SourceDir
   #error SourceDir must point to the Word local VSTO directory

@@ -253,6 +253,9 @@ namespace LaTeXBlocks.Word
             // Auto formulas and numbered equations deliberately remain on Word's
             // native font-colour path and never acquire a block-style wrapper.
             var styledFixedContent = mode == LaTeXBlockLayoutMode.Fixed && style != null;
+            var fixedBlock = mode == LaTeXBlockLayoutMode.Fixed;
+            var naturalDisplayBlock = fixedBlock && !outerHeightPt.HasValue &&
+                StemTeXRenderer.StartsWithFullDisplayOrPageWidthEnvironment(renderSource);
             var rendererWidthPt = widthPt;
             if (styledFixedContent)
             {
@@ -278,27 +281,55 @@ namespace LaTeXBlocks.Word
             else
             {
                 textColor = NormalizeTextColor(textColor);
-                // Styled block requests set PreviewBorder globally at TeX shipout.
-                // A natural-width hbox now owns a standard zero-width TeX strut, so
-                // Auto content and natural-width displaystyle math use no unrelated
-                // preview border. Legacy unstyled Fixed renders retain the historical
-                // 1pt border. Set either value on every request so one Block cannot
-                // leak viewport state into the next request in the warm worker.
-                renderSource = "\\global\\PreviewBorder=" +
-                    (mode == LaTeXBlockLayoutMode.Auto ? "0pt\n" : "1pt\n") +
-                    (mode == LaTeXBlockLayoutMode.Auto
-                        ? renderSource
-                        : ApplyTextColor(renderSource, textColor));
+                if (fixedBlock)
+                {
+                    // Keep user source first and intact. StemTeX's block renderer
+                    // must see leading displays/environments itself in order to own
+                    // their automatic vertical bounds. Word applies foreground via
+                    // Graphic Fill after insertion.
+                    renderSource = naturalDisplayBlock
+                        ? source
+                        : ApplyTextColor(source, textColor);
+                }
+                else
+                {
+                    // Natural-width formulas retain the existing measured-hbox
+                    // renderer. Reset shared preview state for the warm worker.
+                    renderSource = "\\global\\PreviewBorder=0pt\n" + renderSource;
+                }
             }
             var result = committed
                 ? await renderers.RenderQueuedAsync(profile, renderSource, rendererWidthPt,
-                    mode == LaTeXBlockLayoutMode.Auto, fontSizePt)
+                    mode == LaTeXBlockLayoutMode.Auto, fontSizePt,
+                    fixedBlock)
                 : await renderers.RenderLatestAsync(profile, renderSource, rendererWidthPt,
-                    mode == LaTeXBlockLayoutMode.Auto, fontSizePt);
-            var finalSvg = styledFixedContent
-                ? LaTeXBlockSvgFrame.Decorate(result.Bytes, style,
-                    outerWidthPt ?? widthPt, outerHeightPt)
-                : result.Bytes;
+                    mode == LaTeXBlockLayoutMode.Auto, fontSizePt,
+                    fixedBlock);
+            byte[] finalSvg;
+            if (styledFixedContent)
+            {
+                // The TeX wrapper normally owns Block foreground. A literal
+                // leading display deliberately stays unwrapped so StemTeX can
+                // recognize it; the outer SVG fill supplies the same default
+                // colour without changing its TeX geometry.
+                finalSvg = LaTeXBlockSvgFrame.Decorate(result.Bytes, style,
+                    outerWidthPt ?? widthPt, outerHeightPt, naturalDisplayBlock);
+            }
+            else if (naturalDisplayBlock)
+            {
+                var normalized = NormalizeTextColor(textColor);
+                var displayColor = normalized == AutomaticTextColor
+                    ? System.Drawing.Color.Black
+                    : System.Drawing.Color.FromArgb(normalized & 0xff,
+                        (normalized >> 8) & 0xff, (normalized >> 16) & 0xff);
+                finalSvg = LaTeXBlockSvgFrame.Decorate(result.Bytes,
+                    new LaTeXBlockStyle(textColor: displayColor),
+                    outerWidthPt ?? widthPt, outerHeightPt, true);
+            }
+            else
+            {
+                finalSvg = result.Bytes;
+            }
             return new LaTeXBlockRender(WriteSvg(finalSvg), finalSvg, result.DepthPt,
                 fontSizePt, textColor, result.Bytes, styledFixedContent ? style : null);
         }

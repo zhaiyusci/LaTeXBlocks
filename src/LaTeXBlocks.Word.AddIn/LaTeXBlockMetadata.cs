@@ -222,7 +222,8 @@ namespace LaTeXBlocks.Word
         {
             style = LaTeXBlockStyle.Default;
             var keys = new[] { "line-spacing", "padding-pt", "vertical-alignment",
-                "text-color", "background-color", "border-width-pt", "border-color" };
+                "text-color", "background-color", "border-width-pt", "border-color",
+                "full-line-height" };
             hasStyle = false;
             foreach (var key in keys) hasStyle |= fields.ContainsKey(key);
             if (!hasStyle) return true;
@@ -256,6 +257,14 @@ namespace LaTeXBlocks.Word
                     LaTeXBlockStyle.MaximumBorderThicknessPt, out borderWidth)) return false;
             if (fields.TryGetValue("border-color", out var borderText) &&
                 !TryColor(borderText, out border)) return false;
+            if (fields.TryGetValue("full-line-height", out var fullLineHeightText))
+            {
+                // Compatibility with the short-lived opt-in field. Automatic
+                // height is now unconditional, but malformed legacy metadata is
+                // still rejected rather than silently reinterpreted.
+                if (fullLineHeightText != "true" && fullLineHeightText != "false")
+                    return false;
+            }
             style = new LaTeXBlockStyle(leading, padding, vertical, text,
                 hasBackground, background, borderWidth, border);
             return true;

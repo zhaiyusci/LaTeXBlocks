@@ -149,11 +149,16 @@ namespace LaTeXBlocks.Word
                 {
                     borderColor = color;
                 }
+                else if (string.Equals(key, "lineheight", StringComparison.OrdinalIgnoreCase))
+                {
+                    // LaTeXBlocks 0.2.153 briefly persisted this option. StemTeX's
+                    // automatic-height block renderer is now unconditional, so the
+                    // legacy field is deliberately accepted and ignored.
+                }
             }
 
             style = new LaTeXBlockStyle(lineSpacing, paddingPt, verticalAlignment, textColor,
-                hasBackgroundFill, backgroundColor, borderThicknessPt,
-                borderColor);
+                hasBackgroundFill, backgroundColor, borderThicknessPt, borderColor);
             return true;
         }
 
@@ -180,7 +185,7 @@ namespace LaTeXBlocks.Word
             style = null;
             if (string.IsNullOrWhiteSpace(value)) return false;
             var parts = value.Split(',');
-            if (parts.Length != 8 ||
+            if ((parts.Length != 8 && parts.Length != 9) ||
                 !string.Equals(parts[0], "1", StringComparison.Ordinal)) return false;
             if (!double.TryParse(parts[1], NumberStyles.Float, CultureInfo.InvariantCulture,
                     out var lineSpacing) ||
@@ -204,10 +209,15 @@ namespace LaTeXBlocks.Word
             var backgroundColor = Color.White;
             if (hasBackgroundFill && !TryParseHexColor(parts[5], out backgroundColor))
                 return false;
+            if (parts.Length == 9)
+            {
+                // Accept the short-lived ninth field for backward compatibility,
+                // but automatic height is no longer a style choice.
+                if (parts[8] != "0" && parts[8] != "1") return false;
+            }
 
             style = new LaTeXBlockStyle(lineSpacing, paddingPt, verticalAlignment, textColor,
-                hasBackgroundFill, backgroundColor, borderThicknessPt,
-                borderColor);
+                hasBackgroundFill, backgroundColor, borderThicknessPt, borderColor);
             return true;
         }
 
@@ -229,20 +239,8 @@ namespace LaTeXBlocks.Word
             var hasFixedHeight = contentHeightPt.HasValue && contentHeightPt.Value > 0;
             var standaloneDisplay =
                 StemTeXRenderer.StartsWithFullDisplayOrPageWidthEnvironment(source);
-            if (standaloneDisplay && !hasFixedHeight &&
-                TextColor.ToArgb() == Color.Black.ToArgb())
-            {
-                // The renderer already supplies the requested page-width box. A
-                // second vbox around a complete display invokes TeX's display skips
-                // in a nested vertical list and adds roughly one \topskip. Keep
-                // the display itself in the same outer mode as an unstyled request.
-                // With the default black foreground, SVG decoration owns every
-                // remaining visual style property and no TeX colour whatsit is needed.
-                var display = new StringBuilder();
-                display.AppendLine("\\global\\PreviewBorder=0pt%");
-                display.Append(source);
-                return display.ToString();
-            }
+            if (standaloneDisplay && !hasFixedHeight)
+                return WrapLeadingDisplayForStemTeXBlock(source);
 
             var tex = new StringBuilder();
             // The host wrapper may already be in horizontal mode. Remove only a
@@ -281,9 +279,9 @@ namespace LaTeXBlocks.Word
             tex.AppendLine("\\hangindent=0pt\\hangafter=1\\parshape=0%");
             tex.AppendLine("\\everypar{}%");
             tex.AppendLine("\\setbox0=\\vbox{%");
-            // A standalone display already owns a vertical TeX list. Do not insert
-            // *anything* which opens a paragraph before or after it: \noindent,
-            // \color and \par can all change a tight preview's display geometry.
+            // A standalone display already owns a vertical TeX list. Full-line
+            // metrics are delegated to StemTeX's block renderer and never authored
+            // here as synthetic paragraphs or struts.
             if (standaloneDisplay)
             {
                 // Explicit colours authored in TeX remain local overrides.
@@ -292,15 +290,6 @@ namespace LaTeXBlocks.Word
             }
             else
             {
-                // TeX derives a paragraph line's height/depth from the glyphs on
-                // that line. A lone lowercase run would therefore expose only its
-                // x-height at the top of a fixed Block. Define the Block's stable
-                // typographic line box from the selected baseline distance and put
-                // it on the first and final text lines. Tall content can still grow
-                // beyond it naturally. This remains entirely inside TeX; the SVG
-                // shell does not infer or add any vertical offset.
-                tex.AppendLine("\\setbox\\strutbox=\\hbox{\\vrule height .7\\baselineskip depth .3\\baselineskip width 0pt}%");
-                tex.AppendLine("\\noindent\\strut%");
                 // Preserve the author source byte-for-byte, including terminal and
                 // repeated line endings. The wrapper's percent is outside the
                 // source: when the source has no terminal newline it prevents our
@@ -309,7 +298,6 @@ namespace LaTeXBlocks.Word
                 // newline or paragraph break.
                 tex.Append(source);
                 tex.AppendLine("%");
-                tex.AppendLine("\\ifhmode\\strut\\fi");
                 tex.AppendLine("\\par");
             }
             tex.AppendLine("}%");
@@ -367,6 +355,16 @@ namespace LaTeXBlocks.Word
             return "\\special{color push rgb " + FormatColorComponent(color.R) + " " +
                    FormatColorComponent(color.G) + " " +
                    FormatColorComponent(color.B) + "}";
+        }
+
+        private static string WrapLeadingDisplayForStemTeXBlock(string source)
+        {
+            // Keep the literal display token first so StemTeX owns display
+            // recognition and its natural vertical geometry. PowerPoint applies
+            // the chosen default foreground while composing the SVG shell; Word
+            // continues to use Office Graphic Fill. Explicit SVG/TeX colours remain
+            // child overrides in either host.
+            return source + "\n\\global\\PreviewBorder=0pt%";
         }
 
         private static string FormatColorComponent(byte component)

@@ -105,8 +105,8 @@ namespace LaTeXBlocks.WordSmoke
                            out normalizedTexLiveRoot) &&
                        string.Equals(normalizedTexLiveRoot, texLiveRoot,
                            StringComparison.OrdinalIgnoreCase) &&
-                       StemTeXInstallation.RequiredRuntimeVersion >= new Version(0, 13, 0),
-                    "LaTeXBlocks did not normalize the accepted system TeX Live directory forms for StemTeX 0.13.");
+                       StemTeXInstallation.RequiredRuntimeVersion >= new Version(0, 15, 0),
+                    "LaTeXBlocks did not normalize the accepted system TeX Live directory forms for StemTeX 0.15.0.");
                 Console.WriteLine("StemTeX: testing immediate shutdown during renderer initialization...");
                 RunStartupShutdownProbeInIsolatedHost();
                 renderer = new StemTeXBackend();
@@ -290,12 +290,24 @@ namespace LaTeXBlocks.WordSmoke
                     inlineLineBoxFontSizePt);
                 var inlineDescender = renderer.RenderSvg(profile, "g", 360, true,
                     inlineLineBoxFontSizePt);
+                var blockLowercase = renderer.RenderSvg(profile, "a", 180, false,
+                    inlineLineBoxFontSizePt, true);
+                var blockCapital = renderer.RenderSvg(profile, "A", 180, false,
+                    inlineLineBoxFontSizePt, true);
+                var blockDescender = renderer.RenderSvg(profile, "g", 180, false,
+                    inlineLineBoxFontSizePt, true);
                 var inlineLowercaseHeightPt = LaTeXBlockService.ReadSvgHeightPt(
                     inlineLowercase.Bytes);
                 var inlineCapitalHeightPt = LaTeXBlockService.ReadSvgHeightPt(
                     inlineCapital.Bytes);
                 var inlineDescenderHeightPt = LaTeXBlockService.ReadSvgHeightPt(
                     inlineDescender.Bytes);
+                var blockLowercaseHeightPt = LaTeXBlockService.ReadSvgHeightPt(
+                    blockLowercase.Bytes);
+                var blockCapitalHeightPt = LaTeXBlockService.ReadSvgHeightPt(
+                    blockCapital.Bytes);
+                var blockDescenderHeightPt = LaTeXBlockService.ReadSvgHeightPt(
+                    blockDescender.Bytes);
                 var expectedInlineLineHeightPt = inlineLineBoxFontSizePt * 1.2 *
                     texPointToWordPoint;
                 var expectedInlineLineDepthPt = expectedInlineLineHeightPt * 0.3;
@@ -310,6 +322,10 @@ namespace LaTeXBlocks.WordSmoke
                        Math.Abs(inlineCapital.DepthPt - expectedInlineLineDepthPt) < 0.1 &&
                        Math.Abs(inlineDescender.DepthPt - expectedInlineLineDepthPt) < 0.1,
                     "An auto-width single-baseline box did not use one standard TeX strut without preview padding.");
+                Assert(Math.Abs(blockLowercaseHeightPt - blockCapitalHeightPt) < 0.05 &&
+                       Math.Abs(blockLowercaseHeightPt - blockDescenderHeightPt) < 0.05 &&
+                       blockLowercaseHeightPt > 0 && blockLowercase.DepthPt == 0,
+                    "StemTeX block layout did not own stable first/final line metrics.");
                 Assert(Math.Abs(LaTeXBlockService.ReadSvgWidthPt(autoSvg.Bytes) -
                                 LaTeXBlockService.ReadSvgWidthPt(coloredAutoSvg.Bytes)) < 0.01,
                     "The TeX color wrapper changed the auto-width formula's logical box.");
@@ -411,8 +427,18 @@ namespace LaTeXBlocks.WordSmoke
                        styledEnvelope.StartsWith("% !latexblocks 1\r\n",
                            StringComparison.Ordinal) &&
                        styledEnvelope.IndexOf("% background-color: #F0EED0",
-                           StringComparison.Ordinal) >= 0,
+                           StringComparison.Ordinal) >= 0 &&
+                       styledEnvelope.IndexOf("% full-line-height:",
+                           StringComparison.Ordinal) < 0,
                     "A fixed Block style did not round-trip through its Magic Header.");
+                var legacyFullLineHeightEnvelope = styledEnvelope.Replace(
+                    LaTeXBlockMetadata.EndLine,
+                    "% full-line-height: false\r\n" + LaTeXBlockMetadata.EndLine);
+                Assert(LaTeXBlockMetadata.TryParse(legacyFullLineHeightEnvelope,
+                           out var legacyFullLineHeightMetadata, out var legacyStyleSource) &&
+                       legacyStyleSource == "Styled source" &&
+                       legacyFullLineHeightMetadata.Style.Equals(styledBlockStyle),
+                    "A legacy Full-line-height field was not accepted and normalized to automatic height.");
                 Assert(!LaTeXBlockMetadata.TryParse(
                            "{\"version\":1,\"type\":\"latex-block\"}", out _) &&
                        !LaTeXBlockMetadata.TryParse(
@@ -438,26 +464,29 @@ namespace LaTeXBlocks.WordSmoke
                 var explicitDefaultStyle = LaTeXBlockStyle.Default;
                 var explicitDefaultSource = explicitDefaultStyle.WrapSource("\\[E=mc^2\\]",
                     14, true);
-                Assert(explicitDefaultSource.IndexOf("\\renewcommand{\\baselinestretch}{1.2}",
-                           StringComparison.Ordinal) >= 0 &&
-                       explicitDefaultSource.StartsWith("\\ifhmode\\unskip\\fi%",
+                Assert(explicitDefaultSource.StartsWith("\\[E=mc^2\\]",
                            StringComparison.Ordinal) &&
+                       explicitDefaultSource.IndexOf("\\[E=mc^2\\]",
+                           StringComparison.Ordinal) >= 0 &&
+                       explicitDefaultSource.IndexOf("\\renewcommand{\\baselinestretch}",
+                           StringComparison.Ordinal) < 0 &&
                        explicitDefaultSource.IndexOf("\\noindent\\strut", StringComparison.Ordinal) < 0 &&
                        explicitDefaultSource.IndexOf("\\setbox\\strutbox", StringComparison.Ordinal) < 0 &&
                        explicitDefaultSource.IndexOf("\\setlength{\\parindent}{0pt}",
-                           StringComparison.Ordinal) >= 0 &&
+                           StringComparison.Ordinal) < 0 &&
                        explicitDefaultSource.IndexOf("\\setlength{\\leftskip}{0pt}",
-                           StringComparison.Ordinal) >= 0 &&
-                       explicitDefaultSource.IndexOf("\\parshape=0", StringComparison.Ordinal) >= 0 &&
+                           StringComparison.Ordinal) < 0 &&
+                       explicitDefaultSource.IndexOf("\\parshape=0", StringComparison.Ordinal) < 0 &&
                        explicitDefaultSource.IndexOf("\\color{latexblocksforeground}",
                            StringComparison.Ordinal) < 0,
                     "A standalone Word display Block did not remain clean inside the shared TeX layout box.");
                 var styledSource = styledBlockStyle.WrapSource("\\[E=mc^2\\]", 14);
                 Assert(styledSource.IndexOf("\\colorbox", StringComparison.Ordinal) < 0 &&
                        styledSource.IndexOf("\\fbox", StringComparison.Ordinal) < 0 &&
+                       styledSource.TrimStart().StartsWith("\\[", StringComparison.Ordinal) &&
                        styledSource.IndexOf("\\special{color push rgb 0.070588 0.203922 0.337255}",
-                           StringComparison.Ordinal) >= 0,
-                    "The Word display Block did not define its foreground in TeX.");
+                           StringComparison.Ordinal) < 0,
+                    "The Word display Block obscured StemTeX's literal display detection.");
                 var fixedWordBoxSource = styledBlockStyle.WrapSource(
                     "First paragraph.\\par Second paragraph.", 14, true, 160, 42);
                 var topWordBoxSource = new LaTeXBlockStyle(1.2, 0,
@@ -466,6 +495,12 @@ namespace LaTeXBlocks.WordSmoke
                 var bottomWordBoxSource = new LaTeXBlockStyle(1.2, 0,
                     LaTeXBlockVerticalAlignment.Bottom).WrapSource(
                         "First paragraph.\\par Second paragraph.", 14, true, 160, 42);
+                const string itemizeSource =
+                    "% leading comment\r\n\\begin{itemize}\\item first\\item second\\end{itemize}";
+                var itemizeWordBoxSource = LaTeXBlockStyle.Default.WrapSource(
+                    itemizeSource, 14, true, 160, 42);
+                var fullHeightItemizeWordBoxSource = styledBlockStyle.WrapSource(
+                    itemizeSource, 14, true, 160, 42);
                 Assert(fixedWordBoxSource.IndexOf("\\setlength{\\parindent}{0pt}",
                            StringComparison.Ordinal) >= 0 &&
                        fixedWordBoxSource.IndexOf("\\setlength{\\hsize}{160pt}",
@@ -485,15 +520,92 @@ namespace LaTeXBlocks.WordSmoke
                        bottomWordBoxSource.IndexOf("\\vss\\box0\\vss%",
                             StringComparison.Ordinal) < 0 &&
                        topWordBoxSource.IndexOf("\\noindent\\strut%",
-                            StringComparison.Ordinal) >= 0 &&
+                            StringComparison.Ordinal) < 0 &&
                        fixedWordBoxSource.IndexOf("\\noindent\\strut%",
-                            StringComparison.Ordinal) >= 0 &&
+                            StringComparison.Ordinal) < 0 &&
                        bottomWordBoxSource.IndexOf("\\noindent\\strut%",
+                            StringComparison.Ordinal) < 0 &&
+                       itemizeWordBoxSource.IndexOf("\\noindent\\strut%",
+                            StringComparison.Ordinal) < 0 &&
+                       fullHeightItemizeWordBoxSource.IndexOf("\\noindent\\strut%",
+                            StringComparison.Ordinal) < 0 &&
+                       fullHeightItemizeWordBoxSource.IndexOf("\\setbox\\strutbox",
+                            StringComparison.Ordinal) < 0 &&
+                       itemizeWordBoxSource.IndexOf(itemizeSource + "%\r\n",
                             StringComparison.Ordinal) >= 0,
-                    "Word did not combine stable text-line metrics with TeX Top/Middle/Bottom placement.");
+                    "Word's style wrapper still authored line-height struts instead of delegating them to StemTeX.");
+                var delegatedLowercase = renderer.RenderSvg(profile,
+                    styledBlockStyle.WrapSource("a", 14, true, 160), 160, false, 14, true);
+                var delegatedCapital = renderer.RenderSvg(profile,
+                    styledBlockStyle.WrapSource("A", 14, true, 160), 160, false, 14, true);
+                var delegatedDescender = renderer.RenderSvg(profile,
+                    styledBlockStyle.WrapSource("g", 14, true, 160), 160, false, 14, true);
+                var delegatedItemize = renderer.RenderSvg(profile,
+                    styledBlockStyle.WrapSource(itemizeSource, 14, true, 160),
+                    160, false, 14, true);
+                const string multiParagraphSource =
+                    "First automatic-height line.\\par\nSecond line.\\par\nThird line.";
+                var delegatedMultiParagraph = renderer.RenderSvg(profile,
+                    styledBlockStyle.WrapSource(multiParagraphSource, 14, true, 160),
+                    160, false, 14, true);
+                var delegatedDisplay = renderer.RenderSvg(profile,
+                    styledBlockStyle.WrapSource("\\[E=mc^2\\]", 14, true, 160),
+                    160, false, 14, true);
+                var nativeDisplay = renderer.RenderSvg(profile,
+                    "\\[E=mc^2\\]\n\\global\\PreviewBorder=0pt%", 160,
+                    false, 14, true);
+                var delegatedLowercaseHeight = LaTeXBlockService.ReadSvgHeightPt(
+                    delegatedLowercase.Bytes);
+                Console.WriteLine("StemTeX: delegated block heights lower/capital/descender/itemize/display/native-display=" +
+                    delegatedLowercaseHeight + "/" +
+                    LaTeXBlockService.ReadSvgHeightPt(delegatedCapital.Bytes) + "/" +
+                    LaTeXBlockService.ReadSvgHeightPt(delegatedDescender.Bytes) + "/" +
+                    LaTeXBlockService.ReadSvgHeightPt(delegatedItemize.Bytes) + "/" +
+                    LaTeXBlockService.ReadSvgHeightPt(delegatedMultiParagraph.Bytes) + "/" +
+                    LaTeXBlockService.ReadSvgHeightPt(delegatedDisplay.Bytes) + "/" +
+                    LaTeXBlockService.ReadSvgHeightPt(nativeDisplay.Bytes) + "pt.");
+                var renderedBlockDirectory = Path.Combine(artifactDirectory,
+                    "automatic-height-svg");
+                Directory.CreateDirectory(renderedBlockDirectory);
+                File.WriteAllBytes(Path.Combine(renderedBlockDirectory, "single-line.svg"),
+                    delegatedLowercase.Bytes);
+                File.WriteAllBytes(Path.Combine(renderedBlockDirectory, "multi-paragraph.svg"),
+                    delegatedMultiParagraph.Bytes);
+                File.WriteAllBytes(Path.Combine(renderedBlockDirectory, "itemize.svg"),
+                    delegatedItemize.Bytes);
+                File.WriteAllBytes(Path.Combine(renderedBlockDirectory, "display.svg"),
+                    delegatedDisplay.Bytes);
+                File.WriteAllBytes(Path.Combine(renderedBlockDirectory,
+                    "native-display.svg"), nativeDisplay.Bytes);
+                Console.WriteLine("StemTeX: wrote actual automatic-height SVGs to " +
+                    renderedBlockDirectory);
+                Assert(Math.Abs(delegatedLowercaseHeight - LaTeXBlockService.ReadSvgHeightPt(
+                           delegatedCapital.Bytes)) < 0.05 &&
+                       Math.Abs(delegatedLowercaseHeight - LaTeXBlockService.ReadSvgHeightPt(
+                           delegatedDescender.Bytes)) < 0.05 &&
+                       LaTeXBlockService.ReadSvgHeightPt(delegatedItemize.Bytes) >
+                           delegatedLowercaseHeight &&
+                       LaTeXBlockService.ReadSvgHeightPt(delegatedMultiParagraph.Bytes) >
+                           delegatedLowercaseHeight * 2.5 &&
+                       Math.Abs(LaTeXBlockService.ReadSvgHeightPt(delegatedDisplay.Bytes) -
+                           LaTeXBlockService.ReadSvgHeightPt(nativeDisplay.Bytes)) < 0.05,
+                    "The LaTeXBlocks style wrapper prevented StemTeX block layout from owning first/final line geometry.");
+                var automaticShell = LaTeXBlockSvgFrame.Decorate(
+                    delegatedMultiParagraph.Bytes, styledBlockStyle, 177, null, true);
+                var fixedShell = LaTeXBlockSvgFrame.Decorate(
+                    delegatedMultiParagraph.Bytes, styledBlockStyle, 177, 120, true);
+                Assert(Math.Abs(LaTeXBlockService.ReadSvgHeightPt(automaticShell) -
+                           (LaTeXBlockService.ReadSvgHeightPt(
+                               delegatedMultiParagraph.Bytes) +
+                            2 * styledBlockStyle.PaddingPt)) < 0.05 &&
+                       Math.Abs(LaTeXBlockService.ReadSvgHeightPt(fixedShell) - 120) < 0.05,
+                    "The SVG shell did not distinguish renderer-owned automatic height from an explicit fixed height.");
                 var styledSvgBytes = LaTeXBlockSvgFrame.Decorate(svg.Bytes, styledBlockStyle,
                     213.25, 89.75);
                 var styledSvgText = Encoding.UTF8.GetString(styledSvgBytes);
+                var embeddedForegroundSvgText = Encoding.UTF8.GetString(
+                    LaTeXBlockSvgFrame.Decorate(svg.Bytes, styledBlockStyle,
+                        213.25, 89.75, true));
                 var shellTopStyle = new LaTeXBlockStyle(styledBlockStyle.LineSpacing,
                     styledBlockStyle.PaddingPt, LaTeXBlockVerticalAlignment.Top,
                     styledBlockStyle.TextColor, styledBlockStyle.HasBackgroundFill,
@@ -514,7 +626,10 @@ namespace LaTeXBlocks.WordSmoke
                        styledSvgText.IndexOf("data-latexblocks-border='1'", StringComparison.Ordinal) >= 0 &&
                        styledSvgText.IndexOf("#F0EED0", StringComparison.Ordinal) >= 0 &&
                        styledSvgText.IndexOf("#654321", StringComparison.Ordinal) >= 0 &&
-                       styledSvgText.IndexOf("fill='#123456'", StringComparison.OrdinalIgnoreCase) < 0,
+                       styledSvgText.IndexOf("fill='#123456'", StringComparison.OrdinalIgnoreCase) < 0 &&
+                       embeddedForegroundSvgText.IndexOf(
+                           "data-latexblocks-foreground='1' fill='#123456'",
+                           StringComparison.OrdinalIgnoreCase) >= 0,
                     "The shared styled SVG frame did not preserve Word's shell while leaving foreground to Graphics Fill.");
                 Assert(string.Equals(Encoding.UTF8.GetString(topShell),
                            Encoding.UTF8.GetString(bottomShell), StringComparison.Ordinal),
@@ -691,6 +806,12 @@ namespace LaTeXBlocks.WordSmoke
                 var commentedDisplaySvg = renderer.RenderSvg(profile, preparedCommentedDisplay, 360, true, 10);
                 Assert(commentedDisplaySvg.Bytes.Length > 0,
                     "A legal trailing TeX comment swallowed the generated display or measurement boundary.");
+
+                if (args != null && args.Contains("--renderer-only"))
+                {
+                    Console.WriteLine("StemTeX renderer-only smoke test passed.");
+                    return 0;
+                }
 
                 Console.WriteLine("Word: starting an isolated application instance...");
                 var existingWordProcesses = new HashSet<int>();
@@ -1977,11 +2098,16 @@ namespace LaTeXBlocks.WordSmoke
                 remote.SwitchProfile(profile);
                 var result = remote.RenderQueuedAsync(profile, "$E=mc^2$", 180, true, 11)
                     .GetAwaiter().GetResult();
+                var blockResult = remote.RenderQueuedAsync(profile, "a", 180, false, 11, true)
+                    .GetAwaiter().GetResult();
                 Assert(result != null && result.Bytes != null && result.Bytes.Length > 0 &&
                        Encoding.UTF8.GetString(result.Bytes).IndexOf("<svg", StringComparison.OrdinalIgnoreCase) >= 0,
                     "The isolated RenderHost did not return SVG output.");
                 Assert(result.DepthPt > 0,
                     "The isolated RenderHost lost the TeX baseline-depth result.");
+                Assert(blockResult != null && blockResult.Bytes != null &&
+                       blockResult.Bytes.Length > 0 && blockResult.DepthPt == 0,
+                    "The isolated RenderHost did not pass StemTeX block layout through the protocol.");
                 Assert(remote.Status.StartsWith("ready:", StringComparison.OrdinalIgnoreCase),
                     "The isolated RenderHost did not report a ready renderer after a completed request.");
             }

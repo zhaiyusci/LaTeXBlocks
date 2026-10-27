@@ -19,7 +19,8 @@ namespace LaTeXBlocks.Word
     internal static class LaTeXBlockSvgFrame
     {
         internal static byte[] Decorate(byte[] svgBytes, LaTeXBlockStyle style,
-            double requestedFrameWidthPt, double? requestedFrameHeightPt)
+            double requestedFrameWidthPt, double? requestedFrameHeightPt,
+            bool embedForeground = false)
         {
             if (svgBytes == null || svgBytes.Length == 0)
                 throw new ArgumentException("StemTeX returned an empty SVG.", nameof(svgBytes));
@@ -115,8 +116,12 @@ namespace LaTeXBlocks.Word
             result.Append(rootTag);
             result.Append('\n');
             result.Append(frame);
+            if (embedForeground)
+                result.Append("<g data-latexblocks-foreground='1' fill='")
+                    .Append(SvgColor(style.TextColor)).Append("'>\n");
             result.Append(svg, root.Index + root.Length,
                 closingIndex - (root.Index + root.Length));
+            if (embedForeground) result.Append("</g>\n");
             result.Append(border);
             result.Append(svg, closingIndex, svg.Length - closingIndex);
             return Encoding.UTF8.GetBytes(result.ToString());

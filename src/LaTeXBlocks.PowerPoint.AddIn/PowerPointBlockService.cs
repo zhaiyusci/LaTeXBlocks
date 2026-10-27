@@ -107,7 +107,7 @@ namespace LaTeXBlocks.PowerPoint
         {
             if (string.IsNullOrWhiteSpace(source))
                 throw new ArgumentException("LaTeX source cannot be empty.", nameof(source));
-            // The 30–450 pt range belongs to the editor/Ribbon controls. Existing
+            // The 30–2000 pt range belongs to the editor/Ribbon controls. Existing
             // documents and direct shape gestures keep the broader host contract,
             // but native frame fitting must at least be able to use the same lower
             // endpoint that the user can enter in the Ribbon.
@@ -131,9 +131,10 @@ namespace LaTeXBlocks.PowerPoint
                 ? Math.Max(0.1, outerHeightPt.Value - 2 * style.PaddingPt)
                 : (double?)null;
             var renderSource = texColor.Kind == TeXColorKind.InheritOffice
-                // Styled requests reset PreviewBorder globally at TeX shipout. The
-                // next unstyled request must restore the legacy profile border.
-                ? "\\global\\PreviewBorder=1pt\n" + source
+                // Keep the leading source token visible to StemTeX's block renderer
+                // so it can recognize displays/environments and determine their
+                // automatic vertical bounds.
+                ? source
                 : style.WrapSource(source, fontSizePt, true,
                     LaTeXBlockStyle.ToTeXLengthPt(contentWidthPt),
                     contentHeightPt.HasValue
@@ -147,13 +148,13 @@ namespace LaTeXBlocks.PowerPoint
             // to imitate a different TeX design size.
             var result = committed
                 ? await renderers.RenderQueuedAsync(profile, renderSource, rendererWidthPt,
-                    false, fontSizePt)
+                    false, fontSizePt, true)
                 : await renderers.RenderLatestAsync(profile, renderSource, rendererWidthPt,
-                    false, fontSizePt);
+                    false, fontSizePt, true);
             var finalSvg = !styleIsApplied
                 ? result.Bytes
                 : LaTeXBlockSvgFrame.Decorate(result.Bytes, style,
-                    authoredFrameWidthPt, outerHeightPt);
+                    authoredFrameWidthPt, outerHeightPt, true);
             return new LaTeXBlockRender(WriteSvg(finalSvg), finalSvg, result.DepthPt,
                 fontSizePt, styleIsApplied);
         }
@@ -219,7 +220,7 @@ namespace LaTeXBlocks.PowerPoint
             string source, double widthPt, LaTeXBlockRender render,
             bool selectReplacement = true, double? frameHeightPt = null,
             double? frameWidthPt = null, LaTeXBlockStyle style = null,
-            bool styleWasExplicit = false)
+            bool styleWasExplicit = false, bool automaticHeight = false)
         {
             if (oldShape == null) throw new ArgumentNullException(nameof(oldShape));
             if (render == null) throw new ArgumentNullException(nameof(render));
@@ -237,7 +238,9 @@ namespace LaTeXBlocks.PowerPoint
             // layout width. Native size gestures have already queued a fresh TeX
             // layout request before they reach this replacement step; this method
             // only embeds that unscaled result in the requested host frame.
-            var requestedFrameHeightPt = frameHeightPt ?? ReadFrameHeightPt(oldShape);
+            var requestedFrameHeightPt = automaticHeight
+                ? ReadSvgHeightPt(render.SvgBytes)
+                : frameHeightPt ?? ReadFrameHeightPt(oldShape);
             var requestedFrameWidthPt = frameWidthPt ?? ReadFrameWidthPt(oldShape);
             // A non-default render already contains its complete SVG shell:
             // padding, background, and border. Its vertical placement was resolved

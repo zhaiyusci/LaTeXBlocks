@@ -158,9 +158,10 @@ namespace LaTeXBlocks.RenderHost
             double widthPt;
             bool autoWidth;
             double fontSizePt;
+            bool blockLayout;
             RenderHostResponse error;
             if (!TryValidateRenderRequest(request, out profile, out source, out widthPt, out autoWidth,
-                out fontSizePt, out error))
+                out fontSizePt, out blockLayout, out error))
             {
                 return new HostCommandOutcome(error, false);
             }
@@ -170,12 +171,14 @@ namespace LaTeXBlocks.RenderHost
                 StemTeXSvgResult render;
                 if (latestOnly)
                 {
-                    render = await backend.RenderLatestAsync(profile, source, widthPt, autoWidth, fontSizePt)
+                    render = await backend.RenderLatestAsync(profile, source, widthPt, autoWidth, fontSizePt,
+                            blockLayout)
                         .ConfigureAwait(false);
                 }
                 else
                 {
-                    render = await backend.RenderQueuedAsync(profile, source, widthPt, autoWidth, fontSizePt)
+                    render = await backend.RenderQueuedAsync(profile, source, widthPt, autoWidth, fontSizePt,
+                            blockLayout)
                         .ConfigureAwait(false);
                 }
 
@@ -241,13 +244,15 @@ namespace LaTeXBlocks.RenderHost
         }
 
         private bool TryValidateRenderRequest(RenderHostRequest request, out string profile, out string source,
-            out double widthPt, out bool autoWidth, out double fontSizePt, out RenderHostResponse error)
+            out double widthPt, out bool autoWidth, out double fontSizePt, out bool blockLayout,
+            out RenderHostResponse error)
         {
             profile = null;
             source = request.Source;
             widthPt = request.WidthPt ?? 360.0;
             autoWidth = request.AutoWidth ?? false;
             fontSizePt = request.FontSizePt ?? 10.0;
+            blockLayout = request.BlockLayout ?? false;
             error = null;
 
             try { profile = ResolveProfile(request.Profile, false); }
@@ -278,6 +283,12 @@ namespace LaTeXBlocks.RenderHost
             {
                 error = Error(request.Id, "invalid_request",
                     "fontSizePt must be a finite value from 1 through 200.");
+                return false;
+            }
+            if (autoWidth && blockLayout)
+            {
+                error = Error(request.Id, "invalid_request",
+                    "blockLayout requires a fixed-width render request.");
                 return false;
             }
             return true;

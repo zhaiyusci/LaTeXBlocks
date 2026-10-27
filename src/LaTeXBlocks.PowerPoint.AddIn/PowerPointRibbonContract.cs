@@ -18,7 +18,7 @@ namespace LaTeXBlocks.PowerPoint
                    "<button id=\"LaTeXBlocks.PowerPoint.Insert\" label=\"Insert Block\" size=\"large\" getImage=\"GetCommandImage\" onAction=\"OnInsertBlock\"/>" +
                    "<button id=\"LaTeXBlocks.PowerPoint.Edit\" label=\"Edit Block\" size=\"large\" imageMso=\"" +
                    EditBlockImageMso + "\" onAction=\"OnEditBlock\"/>" +
-                   "<editBox id=\"" + LayoutWidthControlId + "\" label=\"Typesetting width (pt)\" sizeString=\"000.0\" getText=\"GetLayoutWidthText\" getEnabled=\"GetLayoutWidthEnabled\" onChange=\"OnLayoutWidthChanged\"/>" +
+                   "<editBox id=\"" + LayoutWidthControlId + "\" label=\"Typesetting width (pt)\" sizeString=\"0000.0\" getText=\"GetLayoutWidthText\" getEnabled=\"GetLayoutWidthEnabled\" onChange=\"OnLayoutWidthChanged\"/>" +
                    "<editBox id=\"" + FontSizeControlId + "\" label=\"TeX size (pt)\" sizeString=\"000.0\" getText=\"GetFontSizeText\" getEnabled=\"GetFontSizeEnabled\" onChange=\"OnFontSizeChanged\"/>" +
                    "</group><group id=\"LaTeXBlocks.PowerPoint.StemTeX\" label=\"StemTeX\">" +
                    "<button id=\"LaTeXBlocks.PowerPoint.TeXLive\" label=\"TeX Live...\" imageMso=\"FileOpen\" onAction=\"OnConfigureTexLive\"/>" +

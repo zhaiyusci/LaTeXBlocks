@@ -171,6 +171,9 @@ namespace LaTeXBlocks.RenderHost
 
         [DataMember(Name = "fontSizePt", EmitDefaultValue = false)]
         internal double? FontSizePt { get; set; }
+
+        [DataMember(Name = "blockLayout", EmitDefaultValue = false)]
+        internal bool? BlockLayout { get; set; }
     }
 
     [DataContract]

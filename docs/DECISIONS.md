@@ -35,8 +35,8 @@ A TeX paragraph line has no content-independent font rectangle: its height and d
 actually present on that line. Consequently, a lowercase-only first line can otherwise expose only its x-height, and
 a final line without a descender can otherwise have zero depth. LaTeXBlocks places a zero-width strut in every
 natural-width, single-baseline `hbox`, regardless of whether its mathematics uses inline style or `\displaystyle`.
-Ordinary styled Block text applies the same convention to its outer text lines before `preview` measures the completed
-TeX box. The strut contributes no horizontal advance or visible ink; it only establishes a stable minimum height and
+For every Fixed Block, StemTeX 0.15's block API applies the corresponding convention
+inside the renderer; LaTeXBlocks does not synthesize first/final line nodes or expose a competing option. The strut contributes no horizontal advance or visible ink; it only establishes a stable minimum height and
 depth. Taller glyphs, CJK text, and mathematics still enlarge the line naturally because TeX retains the maximum
 dimensions. These standard line boxes use `\PreviewBorder=0pt`; a generic preview margin must not add unrelated
 vertical space.

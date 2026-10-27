@@ -15,8 +15,8 @@ optionally Authenticode-signs the installer, and writes a SHA-256 checksum.
 - Install a system TeX Live tree for release smoke testing. Its root must contain `texmf-dist` and
   `texmf-dist\web2c`.
 - Provide a staged StemTeX distribution. By default the script uses
-  `..\xetex\stemtex\dist\package-stage\StemTeX-0.13.0`; override it with `-StemTeXSourceDir` when necessary. It must
-  contain StemTeX `0.13.0` or newer, the renderer and profile SDK libraries, the original
+  `..\xetex\stemtex\dist\package-stage\StemTeX-0.15.0`; override it with `-StemTeXSourceDir` when necessary. It must
+  contain StemTeX `0.15.0` or newer, the renderer and profile SDK libraries, the original
   `stemtex-profile-creator.exe`, and the `unicodemath` profile source.
 - Close Word and PowerPoint before installing or manually checking the result.
 

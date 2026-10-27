@@ -1293,7 +1293,7 @@ namespace LaTeXBlocks.Word
                 SetCurrentProfile, true, metadata.FontSizePt, null,
                 metadata.Kind == LaTeXBlockKind.DisplayMath ||
                 metadata.Kind == LaTeXBlockKind.NumberedMath, textColor, style,
-                outerHeightPt, outerWidthPt, floatingShape != null, metadata.Kind))
+                null, null, floatingShape != null, metadata.Kind))
             {
                 if (editor.ShowDialog(new LaTeXBlocksRibbon.WordWindow(Application)) == DialogResult.OK)
                 {
@@ -1311,29 +1311,14 @@ namespace LaTeXBlocks.Word
                                     editor.WidthPt, editor.CurrentRender, editor.Kind);
                                 return;
                             }
-                            // In Line with Text is only a Word layout choice. A fixed
-                            // Content Block can still have an author-sized outer frame,
-                            // so editing TeX must preserve that frame. Styled previews
-                            // already used this exact frame for their TeX content box;
-                            // only a legacy unstyled result needs SVG reframing here.
-                            var inlineRender = metadata.Mode == LaTeXBlockLayoutMode.Fixed &&
-                                metadata.Role == LaTeXBlockRole.Content &&
-                                acceptedStyle == null
-                                ? Blocks.FrameFloatingRender(editor.CurrentRender,
-                                    inlineShape.Width, inlineShape.Height)
-                                : editor.CurrentRender;
                             Blocks.UpdateRendered(inlineShape, editor.Source, editor.WidthPt,
-                                editor.Mode, inlineRender, true, acceptedStyle, editor.Kind);
+                                editor.Mode, editor.CurrentRender, true, acceptedStyle,
+                                editor.Kind);
                         }
                         else
                         {
-                            // A floating Block owns an outer Word frame.  Editing its
-                            // TeX changes the inner layout, not the frame the user
-                            // placed and sized. The editor preview already rendered
-                            // against that exact frame and composed its SVG shell once.
-                            var framedRender = editor.CurrentRender;
                             Blocks.UpdateFloatingRendered(floatingShape, editor.Source,
-                                editor.WidthPt, editor.Mode, framedRender, true,
+                                editor.WidthPt, editor.Mode, editor.CurrentRender, true,
                                 acceptedStyle);
                         }
                     });
@@ -1820,6 +1805,8 @@ namespace LaTeXBlocks.Word
             // describes the last committed SVG, and is deliberately not used here:
             // while TeX renders, a move/rotation must not look like another resize.
             var widthChanged = !FrameExtentsEqual(targetFrameWidthPt, previousFrameWidthPt);
+            var heightChanged = !FrameExtentsEqual(targetFrameHeightPt,
+                previousFrameHeightPt);
             if (!force && !LaTeXBlockService.HasNativeFrameGeometryChanged(
                     previousFrameWidthPt, previousFrameHeightPt, targetFrameWidthPt,
                     targetFrameHeightPt))
@@ -1835,7 +1822,7 @@ namespace LaTeXBlocks.Word
                 : previousLayoutWidthPt;
             return new BlockFrameReflowRequest(inlineShape, floatingShape, shapeKey, metadata, source,
                 targetWidthPt, targetFrameWidthPt, targetFrameHeightPt, textColor,
-                restoreSelection);
+                restoreSelection, heightChanged);
         }
 
         private static bool FrameExtentsEqual(double left, double right)
@@ -2000,7 +1987,8 @@ namespace LaTeXBlocks.Word
             var pending = new PendingBlockFrameReflow(key, request.InlineShape,
                 request.FloatingShape, request.Metadata, source, profile, request.TargetWidthPt,
                 request.TargetFrameWidthPt, request.TargetFrameHeightPt, request.TextColor,
-                restoreSelection, Interlocked.Increment(ref blockFrameReflowSequence));
+                restoreSelection, request.ConstrainFrameHeight,
+                Interlocked.Increment(ref blockFrameReflowSequence));
             pendingBlockFrameReflows[key] = pending;
             RememberExpectedBlockFrame(request);
             StartNextBlockFrameReflow(key);
@@ -2042,7 +2030,8 @@ namespace LaTeXBlocks.Word
                     pending.TargetWidthPt, LaTeXBlockLayoutMode.Fixed, pending.Profile,
                     pending.BaseMetadata.FontSizePt, false,
                     textColor, style,
-                    style != null ? pending.TargetFrameHeightPt : (double?)null,
+                    style != null && pending.ConstrainFrameHeight
+                        ? pending.TargetFrameHeightPt : (double?)null,
                     style != null ? pending.TargetFrameWidthPt : (double?)null,
                     pending.BaseMetadata.Kind)
                     .ConfigureAwait(false);
@@ -2053,7 +2042,9 @@ namespace LaTeXBlocks.Word
                 var framedRender = style != null
                     ? render
                     : service.FrameFloatingRender(render, pending.TargetFrameWidthPt,
-                        pending.TargetFrameHeightPt);
+                        pending.ConstrainFrameHeight
+                            ? pending.TargetFrameHeightPt
+                            : LaTeXBlockService.ReadSvgHeightPt(render.SvgBytes));
                 await InvokeOnWordUiAsync(() => CompleteBlockFrameReflow(service,
                     pending, framedRender)).ConfigureAwait(false);
             }
@@ -2132,7 +2123,8 @@ namespace LaTeXBlocks.Word
                             pending.InlineShape, pending.FloatingShape, pending.ShapeKey,
                             currentMetadata, currentSource, pending.TargetWidthPt,
                             pending.TargetFrameWidthPt, pending.TargetFrameHeightPt,
-                            liveTextColor, pending.RestoreSelection));
+                            liveTextColor, pending.RestoreSelection,
+                            pending.ConstrainFrameHeight));
                         return;
                     }
                 }
@@ -2717,7 +2709,8 @@ namespace LaTeXBlocks.Word
             internal BlockFrameReflowRequest(WordInterop.InlineShape inlineShape,
                 WordInterop.Shape floatingShape, long shapeKey, LaTeXBlockMetadata metadata,
                 string source, double targetWidthPt, double targetFrameWidthPt,
-                double targetFrameHeightPt, int textColor, bool restoreSelection)
+                double targetFrameHeightPt, int textColor, bool restoreSelection,
+                bool constrainFrameHeight)
             {
                 InlineShape = inlineShape;
                 FloatingShape = floatingShape;
@@ -2729,6 +2722,7 @@ namespace LaTeXBlocks.Word
                 TargetFrameHeightPt = targetFrameHeightPt;
                 TextColor = LaTeXBlockService.NormalizeTextColor(textColor);
                 RestoreSelection = restoreSelection;
+                ConstrainFrameHeight = constrainFrameHeight;
             }
 
             internal WordInterop.InlineShape InlineShape { get; }
@@ -2743,12 +2737,13 @@ namespace LaTeXBlocks.Word
             internal double TargetFrameHeightPt { get; }
             internal int TextColor { get; }
             internal bool RestoreSelection { get; }
+            internal bool ConstrainFrameHeight { get; }
 
             internal BlockFrameReflowRequest WithFormat(double targetWidthPt, int textColor)
             {
                 return new BlockFrameReflowRequest(InlineShape, FloatingShape, ShapeKey,
                     Metadata, Source, targetWidthPt, TargetFrameWidthPt, TargetFrameHeightPt,
-                    textColor, RestoreSelection);
+                    textColor, RestoreSelection, false);
             }
         }
 
@@ -2875,7 +2870,8 @@ namespace LaTeXBlocks.Word
             internal PendingBlockFrameReflow(long shapeKey, WordInterop.InlineShape inlineShape,
                 WordInterop.Shape floatingShape, LaTeXBlockMetadata baseMetadata,
                 string source, string profile, double targetWidthPt, double targetFrameWidthPt,
-                double targetFrameHeightPt, int textColor, bool restoreSelection, long sequence)
+                double targetFrameHeightPt, int textColor, bool restoreSelection,
+                bool constrainFrameHeight, long sequence)
             {
                 ShapeKey = shapeKey;
                 InlineShape = inlineShape;
@@ -2888,6 +2884,7 @@ namespace LaTeXBlocks.Word
                 TargetFrameHeightPt = targetFrameHeightPt;
                 TextColor = LaTeXBlockService.NormalizeTextColor(textColor);
                 RestoreSelection = restoreSelection;
+                ConstrainFrameHeight = constrainFrameHeight;
                 Sequence = sequence;
             }
 
@@ -2903,6 +2900,7 @@ namespace LaTeXBlocks.Word
             internal double TargetFrameHeightPt { get; }
             internal int TextColor { get; }
             internal bool RestoreSelection { get; }
+            internal bool ConstrainFrameHeight { get; }
             internal long Sequence { get; }
         }
 

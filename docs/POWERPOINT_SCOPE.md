@@ -45,7 +45,7 @@ MathType objects, and other shapes are never inferred to be LaTeXBlocks merely b
 Text.
 
 Layout width, host-frame geometry, and TeX design size have separate meanings. A new block starts at StemTeX's
-standard 360 pt typesetting width. The editor exposes the same exact point-value control as StemTeX GUI: 30–450 pt,
+standard 360 pt typesetting width. The editor exposes an exact 30–2000 pt point-value control,
 a 0.5 pt step, and one decimal place. This width is a layout/reflow constraint sent to StemTeX, not an image scale.
 That compact control range does not reinterpret an already-saved block or limit direct native frame manipulation.
 
@@ -86,10 +86,10 @@ The PowerPoint editor offers a compact per-block style surface: ordinary-paragra
 Top/Middle/Bottom vertical placement, text color, background fill, and border color/width. This is not a facade over
 PowerPoint's picture formatting. The add-in keeps the author source verbatim in Alternative Text and serializes only
 the style values in a versioned PowerPoint-only tag. At render time, the add-in subtracts padding from the outer
-dimensions and StemTeX typesets an exact inner box with zero paragraph indentation, the selected leading and text
-color, horizontal left alignment, and the selected Top/Middle/Bottom placement inside a fixed-height `vbox`. No
-SVG-side line metric is inferred: ordinary TeX text receives a stable first/final line box, while a standalone display
-remains free of paragraph or line-box injection. The add-in places the returned box at the padding origin, then paints
+width and StemTeX typesets an exact-width inner box with zero paragraph indentation, the selected leading and text
+color, and horizontal left alignment. StemTeX's returned height becomes the PowerPoint shape height.
+Every PowerPoint Block uses StemTeX 0.15's `stemtex_renderer_render_block`; the renderer owns first/final line metrics, list geometry, and
+literal leading-display handling. LaTeXBlocks injects no line-height struts. The add-in places the returned box at the padding origin, then paints
 only the background and inside border and clips the finished SVG; it performs no second vertical-alignment calculation. This avoids
 treating a TeX `\\fbox` as the outer PowerPoint frame, whose paint can otherwise lie outside
 dvisvgm's SVG viewport.
@@ -99,8 +99,7 @@ identity, layout width, font size, and optional style values. The TeX source sta
 after the end marker and preserves its own line structure. `Title` remains empty.
 Text and background colours are distinct named fields.
 
-New auto-height blocks fit their content, so vertical placement has no spare height to distribute. Once a block has a
-fixed native frame height, TeX receives the corresponding inner height and places its content at the selected Top,
+Automatic height is recalculated after insertion and ordinary source, style, width, or font-size edits, so vertical placement has no spare height to distribute. A native vertical resize instead supplies an explicit frame height for that reflow; TeX receives the corresponding inner height and places its content at the selected Top,
 Middle, or Bottom position. When content exceeds that explicit frame, the same TeX alignment determines the preserved
 edge (or center), and the outer SVG viewport only clips the result; it never scales the TeX output, grows the frame, or
 aligns the content again. The line-spacing control applies to ordinary paragraph leading. It deliberately does not redefine

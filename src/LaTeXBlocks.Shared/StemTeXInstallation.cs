@@ -19,7 +19,7 @@ namespace LaTeXBlocks.Word
         internal const string TexLiveEnvironmentVariable = "STEMTEX_TEXMF_ROOT";
         internal const string SettingsKey = @"Software\LaTeXBlocks";
         internal const string TexLiveRootValue = "TeXLiveRoot";
-        internal static readonly Version RequiredRuntimeVersion = new Version(0, 13, 0);
+        internal static readonly Version RequiredRuntimeVersion = new Version(0, 15, 0);
 
         internal static string ApplicationDataRoot => Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),

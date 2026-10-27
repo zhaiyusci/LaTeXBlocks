@@ -2,13 +2,13 @@ using System;
 
 namespace LaTeXBlocks.PowerPoint
 {
-    // This is deliberately the same front-end policy as StemTeX GUI. The renderer
-    // itself accepts any positive fractional width; Office chooses this compact,
-    // editable range for a block's persisted typesetting width.
+    // The renderer and PowerPoint host-frame contract both support widths through
+    // 2000 pt. Keep the editor and Ribbon on that same range so a value is never
+    // silently clamped merely because it passed through a different UI surface.
     internal static class BlockLayoutWidthPolicy
     {
         internal const double MinimumPt = 30.0;
-        internal const double MaximumPt = 450.0;
+        internal const double MaximumPt = 2000.0;
         internal const double DefaultPt = 360.0;
         internal const double StepPt = 0.5;
 

@@ -1,6 +1,6 @@
 param(
     [ValidatePattern('^\d+\.\d+\.\d+$')]
-    [string]$Version = '0.2.149',
+    [string]$Version = '0.2.155',
     [string]$StemTeXSourceDir
 )
 
@@ -28,7 +28,7 @@ $vcRedist = Get-ChildItem 'C:\Program Files\Microsoft Visual Studio\18\Community
 
 if ([string]::IsNullOrWhiteSpace($StemTeXSourceDir)) {
     $StemTeXSourceDir = Join-Path $root `
-        '..\xetex\stemtex\dist\package-stage\StemTeX-0.13.0'
+        '..\xetex\stemtex\dist\package-stage\StemTeX-0.15.0'
 }
 $StemTeXSourceDir = [IO.Path]::GetFullPath($StemTeXSourceDir)
 
@@ -50,8 +50,8 @@ foreach ($required in @(
 if (-not $vcRedist) { throw 'The VC++ 2015-2022 x64 redistributable was not found in Visual Studio.' }
 
 $stemTeXVersion = [Version]((Get-Content (Join-Path $StemTeXSourceDir 'runtime\VERSION') -Raw).Trim())
-if ($stemTeXVersion -lt [Version]'0.13.0') {
-    throw "LaTeXBlocks requires StemTeX 0.13.0 or newer; found $stemTeXVersion."
+if ($stemTeXVersion -lt [Version]'0.15.0') {
+    throw "LaTeXBlocks requires StemTeX 0.15.0 or newer; found $stemTeXVersion."
 }
 
 $rootPath = [IO.Path]::GetFullPath($root).TrimEnd('\') + '\'

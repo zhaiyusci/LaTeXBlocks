@@ -26,6 +26,7 @@ namespace LaTeXBlocks.PowerPoint
         private readonly Button borderColorButton;
         private readonly CheckBox backgroundFillCheck;
         private readonly CheckBox borderCheck;
+        private readonly SplitContainer previewSplit;
         private readonly WebBrowser previewBrowser;
         private readonly Button previewButton;
         private readonly Button acceptButton;
@@ -55,6 +56,7 @@ namespace LaTeXBlocks.PowerPoint
         private int pendingPreviewVersion = -1;
         private Uri pendingPreviewUri;
         private int previewNavigationAttempts;
+        private static int rememberedSourcePaneHeight = 230;
 
         // PowerPoint installs an OLE message filter while a Ribbon callback is
         // unwinding. The hosted WebBrowser is another COM control, so Navigate2
@@ -72,8 +74,11 @@ namespace LaTeXBlocks.PowerPoint
             this.service = service ?? throw new ArgumentNullException(nameof(service));
             this.profileChanged = profileChanged ?? throw new ArgumentNullException(nameof(profileChanged));
             style = style ?? LaTeXBlockStyle.Default;
-            previewFrameHeightPt = outerHeightPt;
-            previewFrameWidthPt = outerWidthPt;
+            // Block height is renderer-owned. Existing frame height is not fed
+            // back into an ordinary edit, otherwise every preview becomes a fixed
+            // viewport and StemTeX's automatic-height result is discarded.
+            previewFrameHeightPt = null;
+            previewFrameWidthPt = null;
             textColor = style.TextColor;
             backgroundColor = style.BackgroundColor;
             borderColor = style.BorderColor;
@@ -102,9 +107,9 @@ namespace LaTeXBlocks.PowerPoint
                 Maximum = (int)(BlockLayoutWidthPolicy.MaximumPt / BlockLayoutWidthPolicy.StepPt),
                 SmallChange = 1,
                 LargeChange = (int)(10.0 / BlockLayoutWidthPolicy.StepPt),
-                TickFrequency = (int)(10.0 / BlockLayoutWidthPolicy.StepPt),
+                TickFrequency = (int)(50.0 / BlockLayoutWidthPolicy.StepPt),
                 Value = (int)Math.Round(widthPt / BlockLayoutWidthPolicy.StepPt),
-                Width = 140,
+                Width = 200,
                 AutoSize = false,
                 Height = 28,
                 Margin = new Padding(0, 0, 0, 0)
@@ -116,7 +121,7 @@ namespace LaTeXBlocks.PowerPoint
                 DecimalPlaces = 1,
                 Increment = (decimal)BlockLayoutWidthPolicy.StepPt,
                 Value = (decimal)widthPt,
-                Width = 66
+                Width = 78
             };
             fontSizeBox = new NumericUpDown
             {
@@ -224,16 +229,21 @@ namespace LaTeXBlocks.PowerPoint
             previewTimer = new Timer { Interval = 250 };
             previewNavigationTimer = new Timer { Interval = 100 };
 
-            var split = new SplitContainer
+            previewSplit = new SplitContainer
             {
                 Dock = DockStyle.Fill,
                 Orientation = Orientation.Horizontal,
-                SplitterDistance = 230
+                SplitterDistance = rememberedSourcePaneHeight,
+                SplitterWidth = 8,
+                Panel1MinSize = 100,
+                Panel2MinSize = 120,
+                Cursor = Cursors.HSplit,
+                BorderStyle = BorderStyle.FixedSingle
             };
-            split.Panel1.Padding = new Padding(12, 8, 12, 8);
-            split.Panel1.Controls.Add(sourceBox);
-            split.Panel2.Padding = new Padding(12, 8, 12, 8);
-            split.Panel2.Controls.Add(previewBrowser);
+            previewSplit.Panel1.Padding = new Padding(12, 8, 12, 8);
+            previewSplit.Panel1.Controls.Add(sourceBox);
+            previewSplit.Panel2.Padding = new Padding(12, 8, 12, 8);
+            previewSplit.Panel2.Controls.Add(previewBrowser);
 
             var top = new Panel
             {
@@ -354,7 +364,7 @@ namespace LaTeXBlocks.PowerPoint
             bottom.Controls.Add(acceptButton);
             bottom.Controls.Add(statusLabel);
 
-            Controls.Add(split);
+            Controls.Add(previewSplit);
             Controls.Add(top);
             Controls.Add(bottom);
             AcceptButton = acceptButton;
@@ -479,7 +489,16 @@ namespace LaTeXBlocks.PowerPoint
                 DialogResult = DialogResult.OK;
                 Close();
             };
-            Shown += (sender, args) => QueueLivePreview();
+            previewSplit.SplitterMoved += (sender, args) =>
+                rememberedSourcePaneHeight = previewSplit.SplitterDistance;
+            Shown += (sender, args) =>
+            {
+                var maximum = Math.Max(previewSplit.Panel1MinSize,
+                    previewSplit.Height - previewSplit.Panel2MinSize - previewSplit.SplitterWidth);
+                previewSplit.SplitterDistance = Math.Max(previewSplit.Panel1MinSize,
+                    Math.Min(rememberedSourcePaneHeight, maximum));
+                QueueLivePreview();
+            };
             FormClosed += (sender, args) =>
             {
                 previewTimer.Stop();
@@ -507,6 +526,10 @@ namespace LaTeXBlocks.PowerPoint
         internal LaTeXBlockStyle AcceptedStyle => acceptedStyle ?? Style;
         internal LaTeXBlockRender AcceptedRender => acceptedRender;
         internal int SourceLineCountForTest => sourceBox.Lines.Length;
+        internal bool PreviewHeightIsAdjustableForTest =>
+            !previewSplit.IsSplitterFixed && previewSplit.SplitterWidth >= 8 &&
+            previewSplit.Panel2MinSize >= 100;
+        internal double MaximumWidthPtForTest => (double)widthBox.Maximum;
         internal void SetSourceForTest(string source) { sourceBox.Text = ToEditorText(source); }
         internal void SetWidthPtForTest(double widthPt)
         {
