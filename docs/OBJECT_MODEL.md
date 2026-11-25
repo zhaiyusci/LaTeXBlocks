@@ -111,19 +111,17 @@ of accepting Word's defaults or copying the old run indiscriminately:
 | Paragraph and UI state | Direct `ParagraphFormat` and document-owned paragraph marks survive normalization. An exact InlineShape selection transfers to the replacement only if that same old object is still selected when rendering commits. A mixed text range uses one shared duplicated-range lease and is restored after each selected formula replacement only while the user still owns that range; a later caret move is never reversed. |
 
 For a multi-formula Font Size action, the renderer inputs and derived outputs change per formula, while every
-independent run-format and Graphics Fill value is captured and replayed per formula. Formulas in different paragraphs
-are replaced through one Flat OPC envelope for their common Word story; paragraph marks and intervening text remain
-inside that envelope unchanged. Only ordinary Auto Content formulas share this envelope. Numbered equations and Fixed
-Blocks retain their distinct placement/frame contracts and are routed through their individual update paths even when
-the same Word selection also contains batchable formulas. The asynchronous drawing replacement is one custom Undo record. It deliberately does
+independent run-format and Graphics Fill value is captured and replayed per formula. Auto formulas, including
+numbered equations, in the same paragraph can share an XML replacement. A size batch spanning multiple paragraphs
+or intervening pictures exports the formula fragments before making any changes and replaces them in reverse order.
+Each replacement restores the original paragraph format, including alignment, indents and custom tab stops. The
+asynchronous drawing replacements share one custom Undo record. It deliberately does
 not absorb Word's already-completed native Font Size command into that record, so Undo first restores the old formula
 drawings as one batch and a subsequent Undo remains Word's own formatting action.
 
-The commit path rechecks the live native size and colour before replacing the object. If either changed while StemTeX
-was rendering, the stale SVG is discarded and one merged refresh is queued. Word enables Font Color for an exact
-`InlineShape` selection but its built-in command does not modify that drawing run. LaTeXBlocks therefore listens to
-one value-free native-format transaction stream (`Began`, `Committed`, `Canceled`) rather than exposing UIA/MSAA
-details to the document layer. The main button has a direct Invoke. A gallery popup is a separate `NetUIToolWindow`:
+The size commit checks the live native size before replacing the object and preserves the current Office fill.
+For Font Color the add-in listens for native transactions (`Began`, `Committed`, `Canceled`).
+The main button has a direct Invoke. A gallery popup has a separate window.
 MSAA selection identifies the active hovered swatch, but hover alone never commits; a left-button down/up pair that
 starts on that same live popup swatch (or a provider Invoke on builds that expose one) confirms the gesture. The
 candidate survives the popup's short close-ordering window, but an Escape followed by a click in its stale screen
@@ -132,13 +130,16 @@ mouse command. Every lifecycle signal then leaves one FIFO UI-thread queue, so `
 terminal signal even when UIA, MSAA, and Win32 callbacks arrive on different threads. More Colors commits only after
 **OK** and dialog close; opening a menu, Cancel, Escape, and window close do not commit.
 
-For an exact formula selection, a confirmed action uses a collapsed-caret `ExecuteMso("FontColorPicker")` transaction
-to read Word's current picker descriptor, immediately restores the exact picture selection, applies the descriptor to
-the drawing run, and queues the render. For an ordinary range containing text and one or more formulas, Word has
-already written the native colour to every selected drawing character; the transaction coordinator reads each frozen
-formula target and queues only its colour delta, without probing or rewriting ordinary text. Programmatic
-accessibility echoes are suppressed. These paths are separate from the generic mouse-capture monitor used only for
-frame resizing; they do not poll and never make the U+2060 scaffold the user's selection.
+After Word commits Font Color, the add-in reads each selected formula's own drawing character and applies that
+colour to its Graphics Fill. Word persists a theme and its variant both in the drawing run and in the embedded SVG.
+When reading a theme, the add-in expands the Word range by one character on each side and locates the formula's
+own drawing run in that range. Word can omit its character properties when exporting the picture alone. Two shades
+selected from the same theme column can also produce identical `Font.Color` values.
+For example, the manually coloured Accent 4 specimen has `w:themeTint="33"` on the run and
+`MsftOfcThm_Accent4_lumMod_20_lumOff_80_Fill_v2` on its SVG glyphs. Once the palette closes, the add-in
+compares the selected drawing runs with their previous colours, including the variant within each theme slot.
+The Font Color main button can reuse the last swatch without opening the palette. A command-bar update
+also prompts a check of the selected theme variants in that case.
 
 The update then snapshots independent run format, inserts and normalizes the new drawing, reapplies that format,
 overwrites renderer inputs and derived placement, and finally reapplies any native theme descriptor. Consequently
@@ -161,17 +162,17 @@ selection is retained; the boundary pair is never permanently included merely to
 
 ## Font-size synchronization
 
-Auto-width formulas store the TeX design size used to render them. LaTeXBlocks listens to Word's native Font Size
-combo-box command and rerenders formulas in the selected range at the new TeX size. Because Word has no general
-formatting-changed event, native formatting paths use a selection-bound snapshot: on entering a selection, the add-in
-records each auto formula's image-character size and colour against that selected drawing identity. The native Font
-Size combo has its own command callback; Font Color uses the dedicated transaction described above and reconciles a
-mixed range immediately. Keyboard, macro, and other formatting paths are still checked when the user leaves the
-selection. A refresh occurs only when the host value actually changed and the SVG has not already been rendered at
-that value. A plain select/deselect cycle therefore cannot rerender a formula merely because its stored TeX size
-differed from inherited Word formatting. The coordinator never retains the mutable global `Selection`; a bounded
-duplicated-range lease exists only for the affected asynchronous replacements. There is no recurring timer or
-document-wide background scan.
+Auto-width formulas store the TeX design size used to render them. When a selection contains formulas,
+LaTeXBlocks records the size and colour of each formula's drawing character. Word can change these values
+without raising a selection-change event or calling the native Font Size combo handler. While the selection
+is held, the add-in checks its formulas after command-bar notifications and periodically reads their current
+font properties to pick up commands that raised no notification. An open font gallery can preview formatting,
+so the add-in waits for it to close before acting on those values.
+
+A changed size queues a StemTeX render at the new size. A changed font colour updates Office Graphics Fill
+in place. Selecting text alone triggers neither operation. The asynchronous size update restores the original
+selection only if it still belongs to the user. A caret move makes the previous selection ineligible for
+restoration. The periodic check is idle for plain text and collapsed carets.
 
 Font size is a renderer input, not an image transform. For an auto-width inline object, LaTeXBlocks reads `Selection.Font.Size`, which is Word's actual typing size. This distinction matters at a run boundary and after changing the size of a collapsed caret: `Selection.Range.Font.Size` can still describe the character to the right even though newly typed text uses another size. For a mixed non-collapsed selection, Word reports `wdUndefined`; replacement then follows Word's native rule and uses the first selected character's insertion size. The resolved size is passed through StemTeX 0.13's native per-request `font_size_pt` API. StemTeX applies the size inside its live TeX worker, so the resulting SVG, natural width, math metrics, script sizes, optical-size choices, and TeX depth are all produced at the requested size. The add-in does not inject `\fontsize` into the user's source and never enlarges a 10 pt SVG to imitate another TeX size. Fixed-width blocks preserve their explicit document design and editor size.
 

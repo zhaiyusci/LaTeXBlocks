@@ -42,18 +42,20 @@ namespace LaTeXBlocks.Word
         private const int UndefinedTextColor = 9999999;
         private readonly WordInterop.Application application;
         private readonly IStemTeXBackend renderers;
-        private readonly string cacheDirectory;
+        internal string CacheDirectory { get; }
         private bool equationCategoryRegistered;
 
 
-        internal LaTeXBlockService(WordInterop.Application application, IStemTeXBackend renderers)
+        internal LaTeXBlockService(WordInterop.Application application, IStemTeXBackend renderers,
+            string cacheDirectory = null)
         {
             this.application = application ?? throw new ArgumentNullException(nameof(application));
             this.renderers = renderers ?? throw new ArgumentNullException(nameof(renderers));
-            cacheDirectory = Path.Combine(
+            CacheDirectory = cacheDirectory ?? Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
                 "LaTeXBlocks", "cache");
-            Directory.CreateDirectory(cacheDirectory);
+            Directory.CreateDirectory(CacheDirectory);
+            SweepExpiredSvgFiles();
         }
 
         internal string[] Profiles => renderers.Profiles;
@@ -255,7 +257,7 @@ namespace LaTeXBlocks.Word
             var styledFixedContent = mode == LaTeXBlockLayoutMode.Fixed && style != null;
             var fixedBlock = mode == LaTeXBlockLayoutMode.Fixed;
             var naturalDisplayBlock = fixedBlock && !outerHeightPt.HasValue &&
-                StemTeXRenderer.StartsWithFullDisplayOrPageWidthEnvironment(renderSource);
+                StemTeXRenderer.IsStandaloneDisplay(renderSource);
             var rendererWidthPt = widthPt;
             if (styledFixedContent)
             {
@@ -330,7 +332,7 @@ namespace LaTeXBlocks.Word
             {
                 finalSvg = result.Bytes;
             }
-            return new LaTeXBlockRender(WriteSvg(finalSvg), finalSvg, result.DepthPt,
+            return new LaTeXBlockRender(finalSvg, result.DepthPt,
                 fontSizePt, textColor, result.Bytes, styledFixedContent ? style : null);
         }
 
@@ -539,14 +541,13 @@ namespace LaTeXBlocks.Word
             target.Text = string.Empty;
             if (replacesText) markDocumentMutated?.Invoke();
             target.Collapse(WordInterop.WdCollapseDirection.wdCollapseStart);
-            var insertionPath = PrepareInsertionSvg(render, mode);
             var svgSize = ReadSvgPhysicalSize(render.SvgBytes);
             // The magic header in Alternative Text is the durable object contract.
             // Keep the root SVG's physical frame separate from the TeX layout width:
             // once a fixed block becomes floating, its frame is what native resize
             // gestures alter, while WidthPt remains the TeX measure.
             metadata = metadata.WithFrameSize(svgSize.WidthPt, svgSize.HeightPt);
-            var shape = target.InlineShapes.AddPicture(insertionPath, LinkToFile: false, SaveWithDocument: true, Range: target);
+            var shape = ImportSvg(target, render, mode);
             markDocumentMutated?.Invoke();
             ApplyContractMetadata(shape, source, metadata);
             EnsureInlineWordJoinerBoundaries(shape, metadata);
@@ -556,11 +557,7 @@ namespace LaTeXBlocks.Word
             shape = NormalizeWordInlineDrawing(shape, svgSize);
             ApplyHostRunTextFormat(shape, metadata, render.TextColor);
             if (nativeTextColor.HasValue)
-            {
-                nativeTextColor.Value.ApplyTo(shape.Range);
-                ApplyFormulaForegroundFill(shape, metadata, render.TextColor,
-                    nativeTextColor);
-            }
+                RestoreNormalizedFormulaColor(shape, metadata, render.TextColor, nativeTextColor.Value);
             if (select)
                 MoveCaretAfterInlineFormula(shape, metadata);
             return shape;
@@ -797,8 +794,8 @@ namespace LaTeXBlocks.Word
             var document = oldShape.Range.Document;
             var hostRunFormat = WordInlineRunFormatSnapshot.Capture(oldShape.Range);
             var nativeTextColor = NativeTextColorDescriptor.Automatic;
-            var preserveNativeTextColor = NativeTextColorDescriptor.TryCapture(
-                oldShape.Range, out nativeTextColor);
+            var preserveNativeTextColor = NativeTextColorDescriptor.TryCaptureDrawingRun(
+                oldShape, out nativeTextColor);
             var mutationStarted = false;
             var undoStarted = false;
             try
@@ -1001,7 +998,7 @@ namespace LaTeXBlocks.Word
             var previousUsesInlineWordJoinerBoundaries = UsesInlineWordJoinerBoundaries(previous);
             var nativeTextColor = NativeTextColorDescriptor.Automatic;
             var preserveNativeTextColor = !previous.HasExplicitStyle &&
-                NativeTextColorDescriptor.TryCapture(oldShape.Range,
+                NativeTextColorDescriptor.TryCaptureDrawingRun(oldShape,
                     out nativeTextColor);
             // Baseline placement is derived layout, not state owned by either the
             // old drawing run or neighboring text. Word supplies the current line
@@ -1049,11 +1046,10 @@ namespace LaTeXBlocks.Word
                     documentMutated = true;
                     ConfigureNumberedEquationTabs(oldShape.Range.Paragraphs[1], numberedLayout);
                 }
-                var insertionPath = PrepareInsertionSvg(render, mode);
                 documentMutated = true;
                 oldShape.Delete();
                 target = document.Range(replacementStart, replacementStart);
-                replacement = target.InlineShapes.AddPicture(insertionPath, LinkToFile: false, SaveWithDocument: true, Range: target);
+                replacement = ImportSvg(target, render, mode);
                 ApplyContractMetadata(replacement, source, metadata);
                 hostRunFormat.Apply(replacement.Range);
                 ApplyHostRunFormat(replacement, metadata, render.TextColor,
@@ -1071,11 +1067,7 @@ namespace LaTeXBlocks.Word
                 hostRunFormat.Apply(replacement.Range);
                 ApplyHostRunTextFormat(replacement, metadata, render.TextColor);
                 if (preserveNativeTextColor)
-                {
-                    nativeTextColor.ApplyTo(replacement.Range);
-                    ApplyFormulaForegroundFill(replacement, metadata,
-                        render.TextColor, nativeTextColor);
-                }
+                    RestoreNormalizedFormulaColor(replacement, metadata, render.TextColor, nativeTextColor);
                 if (selectReplacement)
                 {
                     try
@@ -1120,10 +1112,41 @@ namespace LaTeXBlocks.Word
                 throw new ArgumentException("A batch update requires at least one formula.",
                     nameof(updates));
 
-            var states = new List<BatchInlineUpdateState>(updates.Count);
-            WordInterop.Document document = null;
+            var document = updates[0]?.Range?.Document ??
+                throw new ArgumentException("A batch update contains an empty item.", nameof(updates));
             var undoStarted = false;
-            var documentMutated = false;
+            try
+            {
+                UpdateRenderedBatchCore(updates, replaceSvgMediaDirectly, () =>
+                {
+                    if (undoStarted) return;
+                    application.UndoRecord.StartCustomRecord("Update LaTeXBlocks");
+                    undoStarted = true;
+                });
+            }
+            catch (Exception exception)
+            {
+                var rollbackFailure = TryRollbackCustomRecord(document, ref undoStarted,
+                    undoStarted);
+                if (rollbackFailure != null)
+                    throw new InvalidOperationException(
+                        "Word could not complete or roll back the batched LaTeX Block update.",
+                        new AggregateException(exception, rollbackFailure));
+                throw;
+            }
+            finally
+            {
+                if (undoStarted)
+                    try { application.UndoRecord.EndCustomRecord(); } catch { }
+            }
+        }
+
+        private void UpdateRenderedBatchCore(IList<LaTeXBlockBatchUpdate> updates,
+            bool replaceSvgMediaDirectly, Action beginMutation, string originalXml = null,
+            NativeTextColorDescriptor? fragmentTextColor = null)
+        {
+            var states = new List<BatchInlineUpdateState>(updates.Count);
+            WordInterop.ParagraphFormat paragraphFormat = null;
             try
             {
                 foreach (var update in updates)
@@ -1142,7 +1165,6 @@ namespace LaTeXBlocks.Word
                             update.Render.SvgBytes, update.Render.FontSizePt);
 
                     var range = update.Range;
-                    if (document == null) document = range.Document;
                     var svgSize = ReadSvgPhysicalSize(update.Render.SvgBytes);
                     var metadata = new LaTeXBlockMetadata(previous.Id, update.WidthPt,
                         update.Render.DepthPt, LaTeXBlockLayoutMode.Auto,
@@ -1182,8 +1204,26 @@ namespace LaTeXBlocks.Word
                 var envelopeStart = originalEnvelope.Start;
                 var finalEnvelopeEnd = originalEnvelope.End;
                 var expectedInlineShapeCount = originalEnvelope.InlineShapes.Count;
-                var originalXml = originalEnvelope.WordOpenXML;
+                if (states.Count > 1 && (states[0].ParagraphStart != states[states.Count - 1].ParagraphStart ||
+                    expectedInlineShapeCount != states.Count))
+                {
+                    // Keep each paragraph mark, numbering field and intervening
+                    // picture in place. A fragment spanning paragraphs can rewrite
+                    // the layout of text that wasn't part of the size change.
+                    // Export all fragments before mutation: WordOpenXML can close
+                    // a custom undo record when called between SVG replacements.
+                    var fragments = states.ConvertAll(state => state.Update.Range.WordOpenXML);
+                    var fragmentColors = states.ConvertAll(state => CaptureBatchDrawingColor(state.Update));
+                    for (var index = states.Count - 1; index >= 0; index--)
+                        UpdateRenderedBatchCore(new[] { states[index].Update },
+                            replaceSvgMediaDirectly, beginMutation, fragments[index], fragmentColors[index]);
+                    return;
+                }
+                originalXml = originalXml ?? originalEnvelope.WordOpenXML;
                 var formats = CaptureWordInlineFormatsXml(originalXml, states);
+                // Word reconstructs the host paragraph even for a one-picture
+                // InsertXML. Preserve its actual layout, including custom tabs.
+                paragraphFormat = originalFirst.ParagraphFormat.Duplicate;
 
                 var following = states[states.Count - 1].Update.Range.Duplicate;
                 following.Collapse(WordInterop.WdCollapseDirection.wdCollapseEnd);
@@ -1191,18 +1231,16 @@ namespace LaTeXBlocks.Word
                     following.MoveEnd(WordInterop.WdUnits.wdCharacter, 1) == 1 &&
                     following.Text == "\r";
 
-                application.UndoRecord.StartCustomRecord("Update LaTeXBlocks");
-                undoStarted = true;
                 if (replaceSvgMediaDirectly && TryReplaceWordInlineSvgMediaXml(
                         originalXml, states, formats, out var directMediaXml))
                 {
                     foreach (var state in states)
                         state.CaptureHostFormat(
-                            formats[state.Metadata.Id].NativeTextColor);
-                    documentMutated = true;
+                            formats[state.ImportId].NativeTextColor ?? fragmentTextColor);
                     var mediaInsertion = originalEnvelope.Duplicate;
                     mediaInsertion.Collapse(
                         WordInterop.WdCollapseDirection.wdCollapseStart);
+                    beginMutation();
                     originalEnvelope.Delete();
                     // The package still carries the original PNG fallback, but Word
                     // regenerates it while importing changed SVG media. The saving is
@@ -1217,22 +1255,19 @@ namespace LaTeXBlocks.Word
                     }
                     var mediaEnvelope = mediaInsertion.Duplicate;
                     mediaEnvelope.SetRange(envelopeStart, finalEnvelopeEnd);
+                    mediaEnvelope.ParagraphFormat = paragraphFormat;
                     if (mediaEnvelope.InlineShapes.Count !=
                         expectedInlineShapeCount)
                         throw new InvalidDataException(
                             "Word did not preserve every drawing during SVG media replacement.");
                     var restoredTargets = 0;
-                    var statesById = new Dictionary<Guid, BatchInlineUpdateState>();
-                    foreach (var state in states)
-                        statesById[state.Metadata.Id] = state;
                     foreach (WordInterop.InlineShape candidate in
                         mediaEnvelope.InlineShapes)
                     {
-                        if (!TryReadContract(candidate, out var candidateMetadata,
-                                out _) ||
-                            !statesById.TryGetValue(candidateMetadata.Id,
-                                out var state))
-                            continue;
+                        var state = states[restoredTargets];
+                        if (!TryReadContract(candidate, out var candidateMetadata, out _) ||
+                            candidateMetadata.Id != state.Metadata.Id)
+                            throw new InvalidDataException("Word changed the order of the restored formulas.");
                         state.HostRunFormat.Apply(candidate.Range);
                         candidate.Range.Font.Size =
                             (float)state.Metadata.FontSizePt;
@@ -1270,13 +1305,11 @@ namespace LaTeXBlocks.Word
                     var state = states[index];
                     var insertion = state.Update.Range.Duplicate;
                     insertion.Collapse(WordInterop.WdCollapseDirection.wdCollapseStart);
-                    documentMutated = true;
-                    state.ImportedShape = insertion.InlineShapes.AddPicture(
-                        PrepareInsertionSvg(state.Update.Render,
-                            LaTeXBlockLayoutMode.Auto), LinkToFile: false,
-                        SaveWithDocument: true, Range: insertion);
+                    beginMutation();
+                    state.ImportedShape = ImportSvg(insertion, state.Update.Render,
+                        LaTeXBlockLayoutMode.Auto);
                     state.ImportedShape.Title = BatchMetadataTitlePrefix +
-                        state.Metadata.Id.ToString("D");
+                        state.ImportId.ToString("D");
                 }
 
                 var first = states[0].ImportedShape.Range;
@@ -1284,8 +1317,9 @@ namespace LaTeXBlocks.Word
                 var envelope = first.Duplicate;
                 envelope.SetRange(first.Start, last.End);
                 var importedXml = envelope.WordOpenXML;
+                var originalIds = new HashSet<Guid>(states.ConvertAll(state => state.Metadata.Id));
                 var normalized = NormalizeWordInlineDrawingsXml(importedXml,
-                    formats, out var normalizedCount, out var removedCount);
+                    formats, originalIds, out var normalizedCount, out var removedCount);
                 if (normalizedCount != states.Count)
                     throw new InvalidDataException("Word batch XML did not contain every target formula.");
                 if (removedCount != states.Count)
@@ -1304,28 +1338,16 @@ namespace LaTeXBlocks.Word
                 }
                 var restoredEnvelope = insertionRange.Duplicate;
                 restoredEnvelope.SetRange(envelopeStart, finalEnvelopeEnd);
+                restoredEnvelope.ParagraphFormat = paragraphFormat;
                 if (restoredEnvelope.InlineShapes.Count != expectedInlineShapeCount)
                     throw new InvalidDataException(
                         "Word did not preserve every drawing during batch replacement.");
             }
-            catch (Exception exception)
-            {
-                var rollbackFailure = document == null
-                    ? null
-                    : TryRollbackCustomRecord(document, ref undoStarted,
-                        documentMutated);
-                if (rollbackFailure != null)
-                    throw new InvalidOperationException(
-                        "Word could not complete or roll back the batched LaTeX Block update.",
-                        new AggregateException(exception, rollbackFailure));
-                throw;
-            }
             finally
             {
+                if (paragraphFormat != null) Marshal.ReleaseComObject(paragraphFormat);
                 foreach (var state in states)
                     state.HostRunFormat?.Dispose();
-                if (undoStarted)
-                    try { application.UndoRecord.EndCustomRecord(); } catch { }
             }
         }
 
@@ -1411,7 +1433,7 @@ namespace LaTeXBlocks.Word
                 throw new InvalidOperationException(
                     "Styled Blocks must be rendered against their exact outer frame before SVG composition.");
             var framedBytes = FrameSvg(render.SvgBytes, frameWidthPt, frameHeightPt);
-            return new LaTeXBlockRender(WriteSvg(framedBytes), framedBytes, render.DepthPt,
+            return new LaTeXBlockRender(framedBytes, render.DepthPt,
                 render.FontSizePt, render.TextColor, render.ContentSvgBytes, null);
         }
 
@@ -2390,6 +2412,22 @@ namespace LaTeXBlocks.Word
             ApplySvgForegroundFill(shape, textColor);
         }
 
+        private static void RestoreNormalizedFormulaColor(WordInterop.InlineShape shape,
+            LaTeXBlockMetadata metadata, int textColor, NativeTextColorDescriptor nativeTextColor)
+        {
+            nativeTextColor.ApplyTo(shape.Range);
+            if (metadata.Kind == LaTeXBlockKind.LaTeXBlock) return;
+            // The original drawing was explicitly painted before normalization.
+            // InsertXML can preserve its SVG paint while dropping its run colour.
+            // Writing an already retained fill makes Word recalculate effectExtent.
+            var rgb = NormalizeTextColor(textColor);
+            var expected = nativeTextColor.Kind == NativeTextColorKind.Theme
+                ? nativeTextColor.Value
+                : OfficeGraphicColor.FromRgb(OfficeRgb.FromColorRef(rgb == AutomaticTextColor ? 0 : rgb));
+            if (!WordGraphicColorAdapter.TryReadFill(shape, out var actual) || !actual.Equals(expected))
+                WordGraphicColorAdapter.ApplyToFill(shape, expected);
+        }
+
         private static void ApplyHostRunTextFormat(WordInterop.InlineShape shape,
             LaTeXBlockMetadata metadata, int textColor)
         {
@@ -2783,15 +2821,60 @@ namespace LaTeXBlocks.Word
                     if (TryParseNativeTextColorFromWordOpenXml(range.WordOpenXML,
                             out descriptor))
                         return true;
-                    if (!WordGraphicColorAdapter.TryCaptureFont(range,
-                            out var semanticColor)) return false;
-                    descriptor = new NativeTextColorDescriptor(semanticColor);
-                    return true;
+                    return TryCaptureEffectiveFont(range, out descriptor);
                 }
                 catch (COMException)
                 {
                     return false;
                 }
+            }
+
+            internal static bool TryCaptureEffectiveFont(WordInterop.Range range,
+                out NativeTextColorDescriptor descriptor)
+            {
+                var captured = WordGraphicColorAdapter.TryCaptureFont(range, out var color);
+                descriptor = new NativeTextColorDescriptor(color);
+                return captured;
+            }
+
+            internal static bool TryCaptureDrawingRun(WordInterop.InlineShape shape,
+                out NativeTextColorDescriptor descriptor)
+            {
+                descriptor = Automatic;
+                if (shape == null) return false;
+                try
+                {
+                    var range = shape.Range;
+                    var raw = (int)range.Font.Color;
+                    if (raw == UndefinedTextColor) return false;
+                    if (raw >= 0 && raw <= 0xffffff)
+                    {
+                        descriptor = Direct(raw);
+                        return true;
+                    }
+                    if (!LaTeXBlockMetadata.TryParse(shape.AlternativeText, out var metadata))
+                        return false;
+
+                    // For a picture alone Word can omit the entire w:rPr, even
+                    // though SaveAs writes themeTint on that drawing. A character
+                    // on either side makes Word export the drawing's original run.
+                    var context = range.Duplicate;
+                    context.MoveStart(WordInterop.WdUnits.wdCharacter, -1);
+                    context.MoveEnd(WordInterop.WdUnits.wdCharacter, 1);
+                    int PrecedingCopies()
+                    {
+                        var before = context.Duplicate;
+                        before.SetRange(context.Start, range.Start);
+                        foreach (WordInterop.InlineShape neighbor in before.InlineShapes)
+                            if (TryReadContract(neighbor, out var prior, out _) && prior.Id == metadata.Id)
+                                return 1;
+                        return 0;
+                    }
+                    return TryParseNativeTextColorFromWordOpenXml(context.WordOpenXML,
+                        metadata.Id, PrecedingCopies, out descriptor) ||
+                        TryCaptureEffectiveFont(range, out descriptor);
+                }
+                catch (COMException) { return false; }
             }
 
             private static bool TryCapture(WordInterop.Font font,
@@ -3004,6 +3087,13 @@ namespace LaTeXBlocks.Word
         internal static bool TryParseNativeTextColorFromWordOpenXml(
             string wordOpenXml, out NativeTextColorDescriptor descriptor)
         {
+            return TryParseNativeTextColorFromWordOpenXml(wordOpenXml, null, null,
+                out descriptor);
+        }
+
+        private static bool TryParseNativeTextColorFromWordOpenXml(string wordOpenXml,
+            Guid? drawingId, Func<int> precedingCopies, out NativeTextColorDescriptor descriptor)
+        {
             descriptor = NativeTextColorDescriptor.Automatic;
             if (string.IsNullOrWhiteSpace(wordOpenXml)) return false;
             try
@@ -3017,68 +3107,45 @@ namespace LaTeXBlocks.Word
                     "http://schemas.openxmlformats.org/wordprocessingml/2006/main");
                 var wordNamespace =
                     "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
-                // Range.WordOpenXML is not stable about either the pkg:part name or
-                // the wrapper used for a short selection.  The ownership boundary is
-                // stable, though: Word persists an Office Graphic's theme semantics
-                // on the w:r that owns w:drawing.  Never take the first w:color in
-                // the package; paragraph defaults and neighbouring text can carry a
-                // different theme colour.
-                XmlNode colorNode = null;
-                foreach (XmlNode drawingRun in document.SelectNodes(
-                             "//w:r[w:drawing]", namespaces))
+                // Only the drawing's own run owns its colour. A short Word range
+                // can also include related styles, neighbouring text and images.
+                var story = document.SelectSingleNode(
+                    "//pkg:part[@pkg:name='/word/document.xml']/pkg:xmlData",
+                    namespaces) ?? (XmlNode)document;
+                XmlNode drawing = null;
+                if (drawingId.HasValue)
                 {
-                    var candidate = drawingRun.SelectSingleNode(
-                        "w:rPr/w:color", namespaces);
-                    if (candidate?.Attributes?["themeColor", wordNamespace] == null)
-                        continue;
-                    colorNode = candidate;
-                    break;
-                }
-                // A few Word builds omit w:drawing from a one-character Flat OPC
-                // wrapper.  Accept a package-wide fallback only when there is one
-                // unambiguous semantic theme colour; never guess among neighbours.
-                if (colorNode == null)
-                {
-                    foreach (XmlNode candidate in document.GetElementsByTagName(
-                                 "color", wordNamespace))
+                    namespaces.AddNamespace("wp",
+                        "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing");
+                    var matching = new List<XmlNode>();
+                    foreach (XmlNode run in story.SelectNodes(".//w:r[w:drawing/wp:inline]", namespaces))
                     {
-                        if (candidate.Attributes?["themeColor", wordNamespace] == null)
-                            continue;
-                        if (colorNode != null) return false;
-                        colorNode = candidate;
+                        var description = run.SelectSingleNode("w:drawing/wp:inline/wp:docPr/@descr", namespaces);
+                        if (LaTeXBlockMetadata.TryParse(description?.Value, out var metadata) &&
+                            metadata.Id == drawingId.Value) matching.Add(run);
                     }
+                    if (matching.Count == 0) return false;
+                    drawing = matching[matching.Count == 1 ? 0 : precedingCopies()];
+                }
+                else
+                    drawing = story.SelectSingleNode(".//w:r[w:drawing]", namespaces);
+                XmlNode colorNode;
+                if (drawing != null)
+                    colorNode = drawing.SelectSingleNode("w:rPr/w:color", namespaces);
+                else
+                {
+                    // Some short selections contain just a text run. Use its colour
+                    // only if the story identifies a single unambiguous owner.
+                    var colors = story.SelectNodes(".//w:p/w:r/w:rPr/w:color", namespaces);
+                    colorNode = colors.Count == 1 ? colors[0] : null;
                 }
                 if (colorNode == null) return false;
-                var themeValue = colorNode.Attributes?["themeColor",
-                    wordNamespace]?.Value;
-                if (!TryParseWordThemeColor(themeValue, out var themeColor))
-                    return false;
-
-                var tintAndShade = 0f;
-                var tintValue = colorNode.Attributes?["themeTint",
-                    wordNamespace]?.Value;
-                var shadeValue = colorNode.Attributes?["themeShade",
-                    wordNamespace]?.Value;
-                byte modifier;
-                if (!string.IsNullOrWhiteSpace(tintValue))
-                {
-                    if (tintValue.Length != 2 ||
-                        !byte.TryParse(tintValue, NumberStyles.HexNumber,
-                            CultureInfo.InvariantCulture, out modifier))
-                        return false;
-                    tintAndShade = (255 - modifier) / 255f;
-                }
-                else if (!string.IsNullOrWhiteSpace(shadeValue))
-                {
-                    if (shadeValue.Length != 2 ||
-                        !byte.TryParse(shadeValue, NumberStyles.HexNumber,
-                            CultureInfo.InvariantCulture, out modifier))
-                        return false;
-                    tintAndShade = modifier / 255f - 1f;
-                }
-                descriptor = NativeTextColorDescriptor.Theme(themeColor,
-                    tintAndShade);
-                return true;
+                return TryParseWordColorAttributes(
+                    colorNode.Attributes?["val", wordNamespace]?.Value,
+                    colorNode.Attributes?["themeColor", wordNamespace]?.Value,
+                    colorNode.Attributes?["themeTint", wordNamespace]?.Value,
+                    colorNode.Attributes?["themeShade", wordNamespace]?.Value,
+                    out descriptor);
             }
             catch (XmlException)
             {
@@ -3458,16 +3525,15 @@ namespace LaTeXBlocks.Word
         {
             if (flatOpc == null) throw new ArgumentNullException(nameof(flatOpc));
             if (states == null) throw new ArgumentNullException(nameof(states));
-            var targets = new Dictionary<Guid, BatchInlineUpdateState>();
-            foreach (var state in states) targets[state.Metadata.Id] = state;
             var formats = new Dictionary<Guid, BatchInlineXmlFormat>();
-            foreach (Match run in Regex.Matches(flatOpc,
+            foreach (Match run in Regex.Matches(FindWordDocumentXml(flatOpc).Value,
                 "<w:r\\b[^>]*>[\\s\\S]*?</w:r>", RegexOptions.CultureInvariant,
                 TimeSpan.FromSeconds(2)))
             {
-                if (!TryReadWordInlineMetadata(run.Value, out var metadata) ||
-                    !targets.TryGetValue(metadata.Id, out var state))
-                    continue;
+                if (!TryReadWordInlineMetadata(run.Value, out var metadata)) continue;
+                if (formats.Count >= states.Count || states[formats.Count].Metadata.Id != metadata.Id)
+                    throw new InvalidDataException("Word batch XML changed the order of the formula runs.");
+                var state = states[formats.Count];
                 var properties = Regex.Match(run.Value,
                     "<w:rPr\\b(?:[^>]*/>|[^>]*>[\\s\\S]*?</w:rPr>)",
                     RegexOptions.CultureInvariant);
@@ -3475,7 +3541,7 @@ namespace LaTeXBlocks.Word
                 if (TryParseNativeTextColorFromWordRunXml(run.Value,
                         out var parsedTextColor))
                     nativeTextColor = parsedTextColor;
-                formats[metadata.Id] = new BatchInlineXmlFormat(state.SvgSize,
+                formats[state.ImportId] = new BatchInlineXmlFormat(state.SvgSize,
                     state.Metadata.FontSizePt, state.Metadata.DepthPt,
                     properties.Success ? properties.Value : "<w:rPr></w:rPr>",
                     state.Metadata, state.Metadata.Kind == LaTeXBlockKind.LaTeXBlock
@@ -3497,55 +3563,37 @@ namespace LaTeXBlocks.Word
                 RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
             if (!color.Success) return false;
             var attributes = color.Groups["attributes"].Value;
-            var theme = Regex.Match(attributes,
-                "\\bw:themeColor=\"(?<value>[^\"]+)\"",
-                RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
-            if (!theme.Success)
+            string Attribute(string name) => Regex.Match(attributes,
+                "\\bw:" + name + "=\"(?<value>[^\"]+)\"",
+                RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1)).Groups["value"].Value;
+            return TryParseWordColorAttributes(Attribute("val"), Attribute("themeColor"),
+                Attribute("themeTint"), Attribute("themeShade"), out descriptor);
+        }
+
+        private static bool TryParseWordColorAttributes(string value, string theme,
+            string tint, string shade, out NativeTextColorDescriptor descriptor)
+        {
+            descriptor = NativeTextColorDescriptor.Automatic;
+            if (string.IsNullOrEmpty(theme))
             {
-                var value = Regex.Match(attributes,
-                    "\\bw:val=\"(?<value>[^\"]+)\"",
-                    RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
-                if (!value.Success) return false;
-                var raw = value.Groups["value"].Value;
-                if (string.Equals(raw, "auto", StringComparison.OrdinalIgnoreCase))
-                {
-                    descriptor = NativeTextColorDescriptor.Automatic;
-                    return true;
-                }
-                if (raw.Length != 6 || !int.TryParse(raw,
-                        NumberStyles.HexNumber, CultureInfo.InvariantCulture,
-                        out var rgb))
+                if (string.Equals(value, "auto", StringComparison.OrdinalIgnoreCase)) return true;
+                if (value == null || value.Length != 6 || !int.TryParse(value,
+                        NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var rgb))
                     return false;
                 descriptor = NativeTextColorDescriptor.Direct(
-                    ((rgb >> 16) & 0xff) | (rgb & 0x00ff00) |
-                    ((rgb & 0xff) << 16));
+                    ((rgb >> 16) & 0xff) | (rgb & 0x00ff00) | ((rgb & 0xff) << 16));
                 return true;
             }
-            if (!TryParseWordThemeColor(theme.Groups["value"].Value,
-                    out var themeColor)) return false;
-
+            if (!TryParseWordThemeColor(theme, out var themeColor)) return false;
             var adjustment = 0f;
-            var tint = Regex.Match(attributes,
-                "\\bw:themeTint=\"(?<value>[0-9A-Fa-f]{2})\"",
-                RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
-            var shade = Regex.Match(attributes,
-                "\\bw:themeShade=\"(?<value>[0-9A-Fa-f]{2})\"",
-                RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
-            if (tint.Success)
+            var hasTint = !string.IsNullOrEmpty(tint);
+            var transform = hasTint ? tint : shade;
+            if (!string.IsNullOrEmpty(transform))
             {
-                if (!byte.TryParse(tint.Groups["value"].Value,
-                        NumberStyles.HexNumber, CultureInfo.InvariantCulture,
-                        out var modifier))
+                if (transform.Length != 2 || !byte.TryParse(transform,
+                        NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var modifier))
                     return false;
-                adjustment = (255 - modifier) / 255f;
-            }
-            else if (shade.Success)
-            {
-                if (!byte.TryParse(shade.Groups["value"].Value,
-                        NumberStyles.HexNumber, CultureInfo.InvariantCulture,
-                        out var modifier))
-                    return false;
-                adjustment = modifier / 255f - 1f;
+                adjustment = hasTint ? (255 - modifier) / 255f : modifier / 255f - 1f;
             }
             descriptor = NativeTextColorDescriptor.Theme(themeColor, adjustment);
             return true;
@@ -3617,30 +3665,54 @@ namespace LaTeXBlocks.Word
                     if (!string.IsNullOrWhiteSpace(name)) packageParts[name] = part;
                 }
 
-                var targets = new Dictionary<Guid, BatchInlineUpdateState>();
-                foreach (var state in states) targets[state.Metadata.Id] = state;
-                var found = new HashSet<Guid>();
-                var replacedParts = new Dictionary<string, string>(
-                    StringComparer.OrdinalIgnoreCase);
-                foreach (XmlNode run in mainPart.SelectNodes(".//w:r[w:drawing]",
+                var relationships = relationshipPart.SelectSingleNode("pr:Relationships", namespaces);
+                if (relationships == null) return false;
+                var remainingReferences = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+                foreach (XmlElement blip in mainPart.SelectNodes(".//asvg:svgBlip[@r:embed]", namespaces))
+                {
+                    if (!relationshipTargets.TryGetValue(blip.GetAttribute("embed",
+                            officeRelationshipNamespace), out var partName)) continue;
+                    remainingReferences.TryGetValue(partName, out var count);
+                    remainingReferences[partName] = count + 1;
+                }
+                var found = 0;
+                foreach (XmlNode run in mainPart.SelectNodes(".//w:r[w:drawing/wp:inline]",
                     namespaces))
                 {
                     var documentProperties = run.SelectSingleNode(".//wp:docPr",
                         namespaces) as XmlElement;
                     var alternativeText = documentProperties?.GetAttribute("descr");
-                    if (!LaTeXBlockMetadata.TryParse(alternativeText, out var oldMetadata) ||
-                        !targets.TryGetValue(oldMetadata.Id, out var state) ||
-                        !formats.TryGetValue(oldMetadata.Id, out var format))
-                        continue;
+                    if (!LaTeXBlockMetadata.TryParse(alternativeText, out var oldMetadata)) continue;
+                    if (found >= states.Count || oldMetadata.Id != states[found].Metadata.Id)
+                        return false;
+                    var state = states[found];
+                    var format = formats[state.ImportId];
 
                     var svgBlip = run.SelectSingleNode(".//asvg:svgBlip[@r:embed]",
-                        namespaces);
+                        namespaces) as XmlElement;
                     var svgId = svgBlip?.Attributes?["embed",
                         officeRelationshipNamespace]?.Value;
                     if (string.IsNullOrWhiteSpace(svgId) ||
                         !relationshipTargets.TryGetValue(svgId, out var svgPartName) ||
                         !packageParts.TryGetValue(svgPartName, out var svgPart))
                         return false;
+                    // A pasted drawing can point at the original SVG part. Give
+                    // this physical picture its own relationship before writing.
+                    if (--remainingReferences[svgPartName] > 0)
+                    {
+                        var suffix = state.ImportId.ToString("N");
+                        var name = "media/latexblocks-" + suffix + ".svg";
+                        var newPart = (XmlElement)svgPart.CloneNode(true);
+                        newPart.SetAttribute("name", packageNamespace, "/word/" + name);
+                        svgPart.ParentNode.AppendChild(newPart);
+                        svgPart = newPart;
+                        var relationship = document.CreateElement("Relationship", packageRelationshipNamespace);
+                        relationship.SetAttribute("Id", "rId" + suffix);
+                        relationship.SetAttribute("Type", officeRelationshipNamespace + "/image");
+                        relationship.SetAttribute("Target", name);
+                        relationships.AppendChild(relationship);
+                        svgBlip.SetAttribute("embed", officeRelationshipNamespace, "rId" + suffix);
+                    }
                     var svgBinary = svgPart.SelectSingleNode("pkg:binaryData", namespaces);
                     var svgXml = svgPart.SelectSingleNode("pkg:xmlData", namespaces);
                     if (svgBinary == null && svgXml == null)
@@ -3649,9 +3721,6 @@ namespace LaTeXBlocks.Word
                     var insertionBytes = ApplyFractionalBaselineCompensation(
                         state.Update.Render.SvgBytes, state.Metadata.DepthPt, 1);
                     var replacement = Convert.ToBase64String(insertionBytes);
-                    if (replacedParts.TryGetValue(svgPartName, out var existing) &&
-                        !string.Equals(existing, replacement, StringComparison.Ordinal))
-                        return false;
                     if (svgBinary != null)
                         svgBinary.InnerText = replacement;
                     else
@@ -3663,11 +3732,10 @@ namespace LaTeXBlocks.Word
                             TimeSpan.FromSeconds(1));
                         svgXml.InnerXml = svgText;
                     }
-                    replacedParts[svgPartName] = replacement;
                     NormalizeWordInlineRunXml(run, namespaces, format);
-                    found.Add(oldMetadata.Id);
+                    found++;
                 }
-                if (found.Count != states.Count) return false;
+                if (found != states.Count) return false;
                 patchedXml = document.OuterXml;
                 return true;
             }
@@ -3767,6 +3835,7 @@ namespace LaTeXBlocks.Word
             out LaTeXBlockMetadata metadata)
         {
             metadata = null;
+            if (xml.IndexOf("<wp:inline", StringComparison.Ordinal) < 0) return false;
             var description = Regex.Match(xml,
                 "<wp:docPr\\b[^>]*\\bdescr=\"(?<description>[^\"]*)\"[^>]*/>",
                 RegexOptions.CultureInvariant);
@@ -3790,21 +3859,22 @@ namespace LaTeXBlocks.Word
         }
 
         private static string NormalizeWordInlineDrawingsXml(string flatOpc,
-            IDictionary<Guid, BatchInlineXmlFormat> formats,
+            IDictionary<Guid, BatchInlineXmlFormat> formats, ISet<Guid> originalIds,
             out int normalizedCount, out int removedCount)
         {
             if (flatOpc == null) throw new ArgumentNullException(nameof(flatOpc));
             if (formats == null) throw new ArgumentNullException(nameof(formats));
             var count = 0;
             var removed = 0;
-            var normalized = Regex.Replace(flatOpc,
+            var document = FindWordDocumentXml(flatOpc);
+            var normalized = Regex.Replace(document.Value,
                 "<w:r\\b[^>]*>[\\s\\S]*?</w:r>", match =>
                 {
                     if (!TryReadWordInlineBatchId(match.Value, out var id) ||
                         !formats.TryGetValue(id, out var format))
                     {
                         if (TryReadWordInlineMetadata(match.Value, out var oldMetadata) &&
-                            formats.ContainsKey(oldMetadata.Id))
+                            originalIds.Contains(oldMetadata.Id))
                         {
                             removed++;
                             return string.Empty;
@@ -3843,7 +3913,15 @@ namespace LaTeXBlocks.Word
                 TimeSpan.FromSeconds(2));
             normalizedCount = count;
             removedCount = removed;
-            return normalized;
+            return flatOpc.Remove(document.Index, document.Length).Insert(document.Index, normalized);
+        }
+
+        private static Match FindWordDocumentXml(string flatOpc)
+        {
+            var match = Regex.Match(flatOpc, "<w:document\\b[\\s\\S]*?</w:document>",
+                RegexOptions.CultureInvariant, TimeSpan.FromSeconds(2));
+            if (!match.Success) throw new InvalidDataException("Missing Word document in the SVG package.");
+            return match;
         }
 
         private static string NormalizeWordFormulaRunProperties(string runProperties,
@@ -4131,14 +4209,30 @@ namespace LaTeXBlocks.Word
             fontSizeChanged = mode == LaTeXBlockLayoutMode.Auto &&
                 ShouldRefreshForHostFontSizeChange(selectedSizePt, currentSizePt,
                     renderedSizePt);
-            textColorChanged = !TextColorsEqual(selectedTextColor, currentTextColor);
+            // Font.Color can encode a theme slot and a tint outside the RGB range.
+            // Normalizing both inputs to RGB would collapse distinct theme colours.
+            textColorChanged = selectedTextColor != currentTextColor &&
+                currentTextColor != UndefinedTextColor;
             return fontSizeChanged || textColorChanged;
         }
 
-        private string PrepareInsertionSvg(LaTeXBlockRender render, LaTeXBlockLayoutMode mode)
+        internal WordInterop.InlineShape ImportSvg(WordInterop.Range target,
+            LaTeXBlockRender render, LaTeXBlockLayoutMode mode)
         {
-            if (mode != LaTeXBlockLayoutMode.Auto) return render.SvgPath;
-            return WriteSvg(ApplyFractionalBaselineCompensation(render.SvgBytes, render.DepthPt, 1));
+            var bytes = mode == LaTeXBlockLayoutMode.Auto
+                ? ApplyFractionalBaselineCompensation(render.SvgBytes, render.DepthPt, 1)
+                : render.SvgBytes;
+            var path = Path.Combine(CacheDirectory, Guid.NewGuid().ToString("N") + ".svg");
+            try
+            {
+                File.WriteAllBytes(path, bytes);
+                return target.InlineShapes.AddPicture(path, LinkToFile: false,
+                    SaveWithDocument: true, Range: target);
+            }
+            finally
+            {
+                DeleteCachedSvg(path);
+            }
         }
 
         internal static byte[] ApplyFractionalBaselineCompensation(byte[] svgBytes, double depthPt, double scale)
@@ -4175,12 +4269,27 @@ namespace LaTeXBlocks.Word
             return Encoding.UTF8.GetBytes(svg);
         }
 
-        private string WriteSvg(byte[] bytes)
+        private void SweepExpiredSvgFiles()
         {
-            if (bytes == null || bytes.Length == 0) throw new InvalidDataException("StemTeX returned an empty SVG.");
-            var path = Path.Combine(cacheDirectory, Guid.NewGuid().ToString("N") + ".svg");
-            File.WriteAllBytes(path, bytes);
-            return path;
+            // Older versions kept a GUID-named SVG for each preview. Other Word
+            // instances may still be importing recent files from this directory.
+            var cutoff = DateTime.UtcNow.AddDays(-7);
+            try
+            {
+                foreach (var path in Directory.EnumerateFiles(CacheDirectory, "*.svg"))
+                    if (Guid.TryParseExact(Path.GetFileNameWithoutExtension(path), "N", out _) &&
+                        File.GetLastWriteTimeUtc(path) < cutoff)
+                        DeleteCachedSvg(path);
+            }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
+
+        private static void DeleteCachedSvg(string path)
+        {
+            try { File.Delete(path); }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
         }
 
         private sealed class BatchInlineXmlFormat
@@ -4210,6 +4319,7 @@ namespace LaTeXBlocks.Word
 
         private sealed class BatchInlineUpdateState
         {
+            internal Guid ImportId { get; } = Guid.NewGuid();
             internal BatchInlineUpdateState(LaTeXBlockBatchUpdate update, int start,
                 WordInterop.WdStoryType storyType, int paragraphStart,
                 int paragraphEnd, LaTeXBlockMetadata metadata,
@@ -4237,9 +4347,8 @@ namespace LaTeXBlocks.Word
             internal bool PreserveNativeTextColor { get; private set; }
             internal int SvgForegroundFillColor { get; private set; }
 
-                internal void CaptureHostFormat(
-                    NativeTextColorDescriptor? serializedTextColor = null)
-                {
+            internal void CaptureHostFormat(NativeTextColorDescriptor? serializedTextColor)
+            {
                 // Word's Flat OPC does not expose every effective Font property for
                 // an inline drawing run. Keep the resolved COM Font snapshot for
                 // those independent properties, plus the host-owned paint state.
@@ -4251,13 +4360,25 @@ namespace LaTeXBlocks.Word
                 }
                 else
                 {
-                    PreserveNativeTextColor = NativeTextColorDescriptor.TryCapture(
-                        Update.Range, out var textColor);
-                    NativeTextColor = textColor;
+                    var color = CaptureBatchDrawingColor(Update);
+                    PreserveNativeTextColor = color.HasValue;
+                    NativeTextColor = color.GetValueOrDefault();
                 }
                 SvgForegroundFillColor = CaptureSvgForegroundFillColor(Update.Shape,
                     Update.Render.TextColor);
             }
+        }
+
+        private static NativeTextColorDescriptor? CaptureBatchDrawingColor(LaTeXBlockBatchUpdate update)
+        {
+            if (!NativeTextColorDescriptor.TryCaptureEffectiveFont(update.Range, out var color))
+                return null;
+            // An image-only WordOpenXML fragment can omit w:rPr. The COM font
+            // can identify the theme yet report its base shade after a palette edit.
+            if (color.Kind == NativeTextColorKind.Theme &&
+                NativeTextColorDescriptor.TryCaptureDrawingRun(update.Shape, out var drawingColor))
+                return drawingColor;
+            return color;
         }
 
         private static int CaptureSvgForegroundFillColor(WordInterop.InlineShape shape,
@@ -4335,19 +4456,18 @@ namespace LaTeXBlocks.Word
 
     internal sealed class LaTeXBlockRender
     {
-        internal LaTeXBlockRender(string svgPath, byte[] svgBytes, double depthPt,
+        internal LaTeXBlockRender(byte[] svgBytes, double depthPt,
             double fontSizePt, int textColor = LaTeXBlockService.AutomaticTextColor,
             byte[] contentSvgBytes = null, LaTeXBlockStyle style = null)
         {
-            SvgPath = svgPath;
             SvgBytes = svgBytes ?? throw new ArgumentNullException(nameof(svgBytes));
+            if (svgBytes.Length == 0) throw new InvalidDataException("StemTeX returned an empty SVG.");
             DepthPt = depthPt;
             FontSizePt = fontSizePt;
             TextColor = LaTeXBlockService.NormalizeTextColor(textColor);
             ContentSvgBytes = contentSvgBytes ?? SvgBytes;
             Style = style;
         }
-        internal string SvgPath { get; }
         internal byte[] SvgBytes { get; }
         internal double DepthPt { get; }
         internal double FontSizePt { get; }

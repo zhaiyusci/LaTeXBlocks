@@ -51,6 +51,67 @@ namespace LaTeXBlocks.WordSmoke
             try
             {
                 Directory.CreateDirectory(artifactDirectory);
+                if (args != null && args.Contains("--display-size-layout"))
+                {
+                    var existing = CaptureProcessIds("WINWORD");
+                    word = new WordInterop.Application();
+                    Assert(!word.Visible && word.Documents.Count == 0, "A new hidden Word process is required.");
+                    document = word.Documents.Add();
+                    GetWindowThreadProcessId(new IntPtr(document.Windows[1].Hwnd), out var processId);
+                    ownsWord = processId != 0 && !existing.Contains((int)processId);
+                    Assert(ownsWord, "The layout fixture did not receive its own Word process.");
+                    word.DisplayAlerts = WordInterop.WdAlertLevel.wdAlertsNone;
+                    renderer = new StemTeXBackend();
+                    RunDisplaySizeLayout(word, document, new LaTeXBlockService(word, renderer),
+                        renderer.DefaultAvailableProfile, artifactDirectory);
+                    return 0;
+                }
+                if (args != null && args.Contains("--installed-selection-formatting"))
+                {
+                    InstalledSelectionFormatting.Run(artifactDirectory);
+                    return 0;
+                }
+                if (args != null && args.Contains("--width-probe"))
+                {
+                    word = new WordInterop.Application();
+                    Assert(!word.Visible && word.Documents.Count == 0,
+                        "The Word width probe requires a new, hidden application.");
+                    ownsWord = true;
+                    word.DisplayAlerts = WordInterop.WdAlertLevel.wdAlertsNone;
+                    // Keep a logical document window in the hidden application.
+                    // Word requires it to import SVGs and write their metadata.
+                    document = word.Documents.Add();
+                    renderer = new StemTeXBackend();
+                    RunWidthProbe(new LaTeXBlockService(word, renderer),
+                        renderer.DefaultAvailableProfile, artifactDirectory);
+                    return 0;
+                }
+                if (args != null && args.Contains("--word-batch-size-probe"))
+                {
+                    RunFormatBatchOwnershipSmoke();
+                    renderer = new StemTeXBackend();
+                    var existing = CaptureProcessIds("WINWORD");
+                    word = new WordInterop.Application();
+                    ownsWord = !word.Visible && word.Documents.Count == 0 &&
+                        !NoNewProcesses("WINWORD", existing);
+                    Assert(ownsWord, "The probe requires its own hidden Word process.");
+                    word.DisplayAlerts = WordInterop.WdAlertLevel.wdAlertsNone;
+                    var cache = Path.Combine(artifactDirectory, "svg-cache");
+                    Directory.CreateDirectory(cache);
+                    var oldPreview = Path.Combine(cache, Guid.NewGuid().ToString("N") + ".svg");
+                    File.WriteAllText(oldPreview, "<svg/>");
+                    File.SetLastWriteTimeUtc(oldPreview, DateTime.UtcNow.AddDays(-8));
+                    var batchService = new LaTeXBlockService(word, renderer, cache);
+                    Assert(!File.Exists(oldPreview), "Word retained an expired SVG from an older version.");
+                    var batchProfile = renderer.DefaultAvailableProfile;
+                    RunCopiedFormulaSizeSmoke(word, batchService, batchProfile);
+                    RunMixedSelectionFontSizeSmoke(word, batchService, batchProfile, 0x0000ff, 0x00ff0000);
+                    RunInterleavedNumberedDisplayPersistenceSmoke(word, batchService, batchProfile);
+                    Assert(!Directory.EnumerateFiles(cache, "*.svg").Any(),
+                        "Word left temporary SVGs behind after rendering and embedding the formulas.");
+                    Console.WriteLine("Word SVG cache: expired preview cleared, zero SVG imports left behind.");
+                    return 0;
+                }
                 if (args != null && args.Contains("--color-model-probe"))
                 {
                     RunOfficeColorModelSmoke();
@@ -61,6 +122,12 @@ namespace LaTeXBlocks.WordSmoke
                 {
                     RunUserProfileMigrationSmoke();
                     Console.WriteLine("LaTeXBlocks user-profile migration smoke passed.");
+                    return 0;
+                }
+                if (args != null && args.Contains("--display-leading-probe"))
+                {
+                    renderer = new StemTeXBackend();
+                    RunDisplayLeadingSmoke(renderer, renderer.DefaultAvailableProfile);
                     return 0;
                 }
                 if (string.Equals(Environment.GetEnvironmentVariable(UiaFontColorOnly), "1",
@@ -82,6 +149,7 @@ namespace LaTeXBlocks.WordSmoke
                     return 0;
                 }
                 RunWordFormatInteractionStateSmoke();
+                RunFormatBatchOwnershipSmoke();
                 RunOfficeColorModelSmoke();
                 RunUserProfileMigrationSmoke();
                 var texLiveRoot = StemTeXInstallation.ResolveTexLiveRoot();
@@ -551,6 +619,7 @@ namespace LaTeXBlocks.WordSmoke
                 var delegatedDisplay = renderer.RenderSvg(profile,
                     styledBlockStyle.WrapSource("\\[E=mc^2\\]", 14, true, 160),
                     160, false, 14, true);
+                RunDisplayLeadingSmoke(renderer, profile);
                 var nativeDisplay = renderer.RenderSvg(profile,
                     "\\[E=mc^2\\]\n\\global\\PreviewBorder=0pt%", 160,
                     false, 14, true);
@@ -858,6 +927,7 @@ namespace LaTeXBlocks.WordSmoke
                 document.Content.Font.Size = 11;
                 document.Range(document.Content.End - 1, document.Content.End - 1).Select();
                 var service = new LaTeXBlockService(word, renderer);
+                RunCopiedFormulaSizeSmoke(word, service, profile);
                 if (string.Equals(Environment.GetEnvironmentVariable(MixedFontSizeOnly),
                         "1", StringComparison.Ordinal))
                 {
@@ -1030,7 +1100,7 @@ namespace LaTeXBlocks.WordSmoke
                 word.Selection.Font.Position = 0;
                 word.Selection.NoProofing = 0;
 
-                var reusableInlineRender = new LaTeXBlockRender(null, autoSvg11.Bytes, autoSvg11.DepthPt, 11);
+                var reusableInlineRender = new LaTeXBlockRender(autoSvg11.Bytes, autoSvg11.DepthPt, 11);
                 const string paragraphEndProbe = "paragraph-end probe";
                 const string followingParagraphProbe = "following paragraph";
                 var paragraphEndFixtureStart = document.Content.End - 1;
@@ -1444,8 +1514,8 @@ namespace LaTeXBlocks.WordSmoke
                 var oversizedSvg = Regex.Replace(Encoding.UTF8.GetString(numberedRender.SvgBytes),
                     "(<svg\\b[^>]*?\\bwidth=['\"])[^'\"]+(['\"])", "${1}1000pt${2}",
                     RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
-                var oversizedRender = new LaTeXBlockRender(numberedRender.SvgPath,
-                    Encoding.UTF8.GetBytes(oversizedSvg), numberedRender.DepthPt, numberedRender.FontSizePt);
+                var oversizedRender = new LaTeXBlockRender(Encoding.UTF8.GetBytes(oversizedSvg),
+                    numberedRender.DepthPt, numberedRender.FontSizePt);
                 var oversizedUpdateRejected = false;
                 try
                 {
@@ -1635,6 +1705,42 @@ namespace LaTeXBlocks.WordSmoke
             }
         }
 
+        private static void RunWidthProbe(LaTeXBlockService service, string profile,
+            string artifactDirectory)
+        {
+            var source = string.Join(" ", Enumerable.Repeat(
+                "An ordinary paragraph wraps across several lines at the requested width.", 4));
+            const LaTeXBlockLayoutMode mode = LaTeXBlockLayoutMode.Fixed;
+            var style = LaTeXBlockStyle.Default;
+            var wide = service.RenderCommittedAsync(source, 360, mode, profile, 12,
+                style: style).GetAwaiter().GetResult();
+            var block = service.InsertRendered(source, 360, mode, wide, style);
+            var originalHeight = block.Height;
+            foreach (var width in new[] { 130.0, 360.0 })
+            {
+                var frameWidth = LaTeXBlockSvgFrame.ResolveFormatWidth(width, block.Width);
+                var render = service.RenderCommittedAsync(source, width, mode, profile, 12,
+                    style: style, outerWidthPt: frameWidth).GetAwaiter().GetResult();
+                block = service.UpdateRendered(block, source, width, mode, render, false);
+                Assert(LaTeXBlockService.TryReadContract(block, out var contract, out _) &&
+                       Math.Abs(contract.WidthPt - width) < 0.1 &&
+                       Math.Abs(block.Width - width) < 0.1 &&
+                       Math.Abs(LaTeXBlockService.ReadSvgWidthPt(render.SvgBytes) - width) < 0.1 &&
+                       Math.Abs(block.Height - LaTeXBlockService.ReadSvgHeightPt(render.SvgBytes)) < 0.1 &&
+                       (width < 360 ? block.Height > originalHeight + 12 :
+                           Math.Abs(block.Height - originalHeight) < 0.1),
+                    "Word did not reflow the styled paragraph at the requested width.");
+                Console.WriteLine("Word paragraph: {0:F2} x {1:F2} pt", block.Width, block.Height);
+                if (width < 360)
+                {
+                    var path = Path.Combine(artifactDirectory, "width-130.docx");
+                    block.Range.Document.SaveAs2(path, WordInterop.WdSaveFormat.wdFormatXMLDocument,
+                        AddToRecentFiles: false);
+                    Console.WriteLine(path);
+                }
+            }
+        }
+
         private static void RunOfficeColorModelSmoke()
         {
             var rgb = OfficeGraphicColor.FromRgb(System.Drawing.Color.FromArgb(12, 34, 56));
@@ -1657,6 +1763,33 @@ namespace LaTeXBlocks.WordSmoke
                    (int)WordGraphicColorAdapter.ToGraphicsTheme(
                        OfficeThemeColor.Accent1) == 5,
                 "Office graphic colour and TeX colour ownership were conflated.");
+        }
+
+        private static void RunDisplayLeadingSmoke(StemTeXBackend renderer, string profile)
+        {
+            Assert(StemTeXRenderer.IsStandaloneDisplay("% fake \\]\n\\[x\\] % trailing comment") &&
+                   StemTeXRenderer.IsStandaloneDisplay(@"$$x+\$1$$") &&
+                   StemTeXRenderer.IsStandaloneDisplay(@"\begin{align*}a&=b\\[2pt]c&=d\end{align*}") &&
+                   !StemTeXRenderer.IsStandaloneDisplay(@"\[x\] prose \[y\]") &&
+                   !StemTeXRenderer.IsStandaloneDisplay(@"\begin{equation}x\end{equation} prose") &&
+                   !StemTeXRenderer.IsStandaloneDisplay(@"\begin{minipage}{80pt}first\par second\end{minipage}"),
+                "Single-display recognition discarded paragraph typography or misread a TeX delimiter.");
+            const string display = @"\[E=mc^2\]";
+            const string mixed = display + "\n" + @"First paragraph.\par Second paragraph.\par Third paragraph.";
+            double Height(string source, double leading)
+            {
+                var wrapped = new LaTeXBlockStyle(leading).WrapSource(source, 12, true, 160);
+                return LaTeXBlockService.ReadSvgHeightPt(renderer.RenderSvg(profile, wrapped, 160, false, 12, true).Bytes);
+            }
+            var native = LaTeXBlockService.ReadSvgHeightPt(renderer.RenderSvg(profile,
+                display + "\n\\global\\PreviewBorder=0pt%", 160, false, 12, true).Bytes);
+            var pure = Height(display, 2.0);
+            var compact = Height(mixed, 1.2);
+            var loose = Height(mixed, 2.0);
+            Console.WriteLine("Display-leading geometry (pt): native={0}, pure={1}, mixed 1.2={2}, mixed 2.0={3}",
+                native, pure, compact, loose);
+            Assert(Math.Abs(native - pure) < 0.05 && loose > compact + 12,
+                "A pure display lost its natural height or the mixed block ignored its requested leading.");
         }
 
         private static void RunUserProfileMigrationSmoke()
@@ -1682,14 +1815,54 @@ namespace LaTeXBlocks.WordSmoke
                 File.WriteAllText(Path.Combine(targetExisting, "preamble.tex"), "current");
                 File.WriteAllText(Path.Combine(targetExisting, "warmup.tex"), "current");
 
-                StemTeXInstallation.MigrateUserProfiles(legacyRoot, targetRoot);
+                var retry = Path.Combine(legacyRoot, "retry-profile");
+                Directory.CreateDirectory(retry);
+                File.WriteAllText(Path.Combine(retry, "preamble.tex"), "retry");
+                File.WriteAllText(Path.Combine(retry, "warmup.tex"), "retry");
+                var conflict = Path.Combine(targetRoot, "retry-profile");
+                File.WriteAllText(conflict, "existing user file");
+                var pending = StemTeXInstallation.MigrateUserProfiles(legacyRoot, targetRoot);
                 Assert(File.ReadAllText(Path.Combine(targetRoot, "custom-profile",
                            "preamble.tex")) == "legacy preamble" &&
                        File.Exists(Path.Combine(targetRoot, "custom-profile", "profile.json")) &&
                        File.Exists(Path.Combine(targetRoot, "custom-profile", "assets",
                            "custom.tex")) &&
-                       File.ReadAllText(Path.Combine(targetExisting, "preamble.tex")) == "current",
+                       File.ReadAllText(Path.Combine(targetExisting, "preamble.tex")) == "current" &&
+                       pending.SequenceEqual(new[] { retry }),
                     "Legacy user profiles were not copied into LaTeXBlocks AppData without overwriting an existing profile.");
+                Directory.Move(Path.Combine(targetRoot, "custom-profile"), Path.Combine(targetRoot, "renamed"));
+                Directory.Delete(targetExisting, true);
+                var independent = Path.Combine(legacyRoot, "stemtex-only");
+                Directory.CreateDirectory(independent);
+                File.WriteAllText(Path.Combine(independent, "preamble.tex"), "independent");
+                File.WriteAllText(Path.Combine(independent, "warmup.tex"), "independent");
+                File.Delete(conflict);
+                pending = StemTeXInstallation.MigrateUserProfiles(legacyRoot, targetRoot);
+                Assert(pending.Length == 0 && File.Exists(Path.Combine(conflict, "preamble.tex")) &&
+                       !Directory.Exists(Path.Combine(targetRoot, "custom-profile")) && !Directory.Exists(targetExisting) &&
+                       !Directory.Exists(Path.Combine(targetRoot, "stemtex-only")),
+                    "A migration retry resurrected a removed profile or imported a new independent StemTeX profile.");
+                Directory.Delete(conflict, true);
+                Assert(StemTeXInstallation.MigrateUserProfiles(legacyRoot, targetRoot).Length == 0 &&
+                       !Directory.Exists(conflict), "A successfully retried profile was later recreated.");
+                var cleanTarget = Path.Combine(root, "fresh-target");
+                var freshLegacy = Path.Combine(root, "fresh-legacy");
+                StemTeXInstallation.MigrateUserProfiles(freshLegacy, cleanTarget);
+                Directory.Move(legacyRoot, freshLegacy);
+                Assert(StemTeXInstallation.MigrateUserProfiles(freshLegacy, cleanTarget).Length == 0 &&
+                       Directory.GetDirectories(cleanTarget).Length == 0,
+                    "A fresh installation imported an independent StemTeX profile created after first discovery.");
+                var readOnlyTarget = Path.Combine(root, "unwritable-journal-target");
+                var journalBlocker = readOnlyTarget + ".stemtex-migration-v1";
+                Directory.CreateDirectory(journalBlocker);
+                pending = StemTeXInstallation.MigrateUserProfiles(freshLegacy, readOnlyTarget);
+                Assert(pending.Contains(Path.Combine(freshLegacy, "custom-profile")) &&
+                       Directory.GetDirectories(readOnlyTarget).Length == 0,
+                    "An unavailable migration journal hid the legacy profile or allowed a partial import.");
+                Directory.Delete(journalBlocker);
+                Assert(StemTeXInstallation.MigrateUserProfiles(freshLegacy, readOnlyTarget).Length == 0 &&
+                       File.Exists(Path.Combine(readOnlyTarget, "custom-profile", "preamble.tex")),
+                    "Migration did not retry after its journal became writable.");
             }
             finally
             {
@@ -2480,6 +2653,7 @@ namespace LaTeXBlocks.WordSmoke
                        ColorsWithinChannelTolerance(replacementFillRgb,
                            resolvedThemeColor, 1),
                     "Replacing a themed formula SVG downgraded its Word run or Graphics Fill to direct RGB.");
+                AssertZeroEffectExtent(inline, "Updated themed inline formula");
                 LaTeXBlockService.ApplySvgForegroundThemeFill(inline,
                     WordInterop.WdThemeColorIndex.wdThemeColorAccent2, -0.25f);
                 Assert(LaTeXBlockService.TryReadSvgForegroundThemeFill(inline,
@@ -3081,6 +3255,159 @@ namespace LaTeXBlocks.WordSmoke
             }
         }
 
+        private static void RunDisplaySizeLayout(WordInterop.Application word, WordInterop.Document document,
+            LaTeXBlockService service, string profile, string directory)
+        {
+            const string source = @"\frac{x_1}{y^2}";
+            const int width = 360;
+            var page = document.PageSetup;
+            page.PageWidth = 600;
+            page.LeftMargin = 72;
+            page.RightMargin = 72;
+            document.Content.Text = "Heading\r\rLeading prose suffix\rEquation prose tail\rEnding";
+            document.Content.Font.Name = "Times New Roman";
+            document.Content.Font.Size = 12;
+            var ids = new Guid[3];
+            var errors = new List<string>();
+            var referenceCenters = new double[3];
+            var referenceStops = new string[3];
+            var expectedBaseline = new int[3];
+            for (var i = 0; i < ids.Length; i++)
+            {
+                var p = document.Paragraphs[i + 2].Range;
+                var offset = i == 0 ? 0 : p.Text.IndexOf(" prose", StringComparison.Ordinal);
+                document.Range(p.Start + offset, p.Start + offset).Select();
+                var kind = i == 2 ? LaTeXBlockKind.NumberedMath : LaTeXBlockKind.DisplayMath;
+                var render = service.RenderCommittedAsync(source, width, LaTeXBlockLayoutMode.Auto,
+                    profile, 12, true, renderKind: kind).GetAwaiter().GetResult();
+                var shape = i == 2
+                    ? service.InsertNumberedRendered(source, width, LaTeXBlockLayoutMode.Auto, render)
+                    : service.InsertRendered(source, width, LaTeXBlockLayoutMode.Auto, render, null, kind);
+                Assert(LaTeXBlockService.TryReadContract(shape, out var metadata, out _),
+                    "Failed to insert the display layout fixture.");
+                ids[i] = metadata.Id;
+                expectedBaseline[i] = -(int)Math.Round(render.DepthPt, MidpointRounding.AwayFromZero);
+                var format = shape.Range.ParagraphFormat;
+                format.TabStops.ClearAll();
+                if (i == 0)
+                {
+                    // A standalone drawing centered with Word's paragraph command.
+                    var preceding = document.Range(shape.Range.Start - 1, shape.Range.Start);
+                    Assert(preceding.Text == "\t", "Standalone display was missing its initial tab.");
+                    preceding.Delete();
+                    format.Alignment = WordInterop.WdParagraphAlignment.wdAlignParagraphCenter;
+                }
+                else
+                {
+                    format.TabStops.Add(i == 1 ? 172 : 194, WordInterop.WdTabAlignment.wdAlignTabCenter);
+                    if (i == 2) format.TabStops.Add(367, WordInterop.WdTabAlignment.wdAlignTabRight);
+                }
+                format.TabStops.Add(411, WordInterop.WdTabAlignment.wdAlignTabDecimal,
+                    WordInterop.WdTabLeader.wdTabLeaderDots);
+            }
+            var originalText = document.Content.Text;
+            var labels = new[] { "standalone", "manual-break", "numbered" };
+            double Position(WordInterop.Range range, bool horizontal)
+            {
+                var point = range.Duplicate;
+                point.Collapse(WordInterop.WdCollapseDirection.wdCollapseStart);
+                return Convert.ToDouble(point.Information[horizontal
+                    ? WordInterop.WdInformation.wdHorizontalPositionRelativeToPage
+                    : WordInterop.WdInformation.wdVerticalPositionRelativeToPage]);
+            }
+            foreach (var size in new[] { 12, 22, 9 })
+            {
+                if (size != 12)
+                {
+                    document.Content.Select();
+                    word.Selection.Font.Size = size;
+                    var updates = new List<LaTeXBlockBatchUpdate>();
+                    for (var i = 0; i < ids.Length; i++)
+                    {
+                        var shape = FindInlineFormula(document, ids[i]);
+                        Assert(LaTeXBlockService.TryReadContract(shape, out var metadata, out var stored),
+                            "Native Word Font Size lost a drawing.");
+                        var range = shape.Range;
+                        var paragraph = range.Paragraphs[1].Range;
+                        var render = service.RenderCommittedAsync(stored, metadata.WidthPt,
+                            metadata.Mode, profile, size, true, renderKind: metadata.Kind).GetAwaiter().GetResult();
+                        expectedBaseline[i] = -(int)Math.Round(render.DepthPt, MidpointRounding.AwayFromZero);
+                        updates.Add(new LaTeXBlockBatchUpdate(shape, stored, metadata.WidthPt,
+                            render, metadata, range, paragraph.Start, paragraph.End));
+                    }
+                    service.UpdateRenderedBatch(updates, true);
+                }
+                document.Repaginate();
+                var artifact = Path.Combine(directory, "display-layout-" + size);
+                document.SaveAs2(artifact + ".docx", WordInterop.WdSaveFormat.wdFormatXMLDocument,
+                    AddToRecentFiles: false);
+                document.ExportAsFixedFormat(artifact + ".pdf", WordInterop.WdExportFormat.wdExportFormatPDF);
+                if (document.Content.Text != originalText || document.Paragraphs.Count != 5)
+                    errors.Add(size + " pt changed the document text or paragraph boundaries.");
+                // A collapsed caret at the beginning of a centered paragraph
+                // reports the left margin. Use the actual, paginated drawing
+                // rectangles, in vertical order on this single-page fixture.
+                var pages = document.Windows[1].Panes[1].Pages;
+                var rectangles = pages[1].Rectangles.Cast<WordInterop.Rectangle>()
+                    .Where(r =>
+                    {
+                        try { return r.RectangleType == WordInterop.WdRectangleType.wdShapeRectangle; }
+                        // Word includes UI adornments for which RectangleType is unavailable.
+                        catch (COMException ex) when (ex.ErrorCode == unchecked((int)0x800A1703)) { return false; }
+                    })
+                    .OrderBy(r => r.Top).ToArray();
+                Assert(pages.Count == 1 && rectangles.Length == ids.Length,
+                    "Word did not paginate the three drawings on one page.");
+                for (var i = 0; i < ids.Length; i++)
+                {
+                    var shape = FindInlineFormula(document, ids[i]);
+                    Assert(LaTeXBlockService.TryReadContract(shape, out var metadata, out _),
+                        "Could not measure the replaced SVG.");
+                    var range = shape.Range;
+                    var paragraph = range.Paragraphs[1].Range;
+                    var rectangle = rectangles[i];
+                    var center = rectangle.Left + rectangle.Width / 2.0;
+                    var y = rectangle.Top;
+                    var tabs = string.Join(",", paragraph.ParagraphFormat.TabStops.Cast<WordInterop.TabStop>()
+                        .Where(t => t.CustomTab).Select(t => $"{t.Position:g}/{t.Alignment}/{t.Leader}"));
+                    var message = $"{labels[i]} {size} pt";
+                    Console.WriteLine($"{message}: center X={center:F2}, Y={y:F2}, " +
+                        $"frame={shape.Width:F2}x{shape.Height:F2}, baseline={range.Font.Position}, tabs={tabs}");
+                    if (size == 12) { referenceCenters[i] = center; referenceStops[i] = tabs; }
+                    var nominalCenter = i == 0 ? page.PageWidth / 2 : page.LeftMargin + (i == 1 ? 172 : 194);
+                    if (Math.Abs(center - nominalCenter) > 2 || Math.Abs(center - referenceCenters[i]) > 2)
+                        errors.Add($"{message}: expected center X={nominalCenter}, got {center:F2}.");
+                    if (referenceStops[i] != tabs || i == 0 &&
+                        paragraph.ParagraphFormat.Alignment != WordInterop.WdParagraphAlignment.wdAlignParagraphCenter)
+                        errors.Add($"{message}: Word paragraph alignment or a custom tab changed.");
+                    if (Math.Abs(rectangle.Width - shape.Width) > 1 || Math.Abs(rectangle.Height - shape.Height) > 1 ||
+                        metadata.FontSizePt != size || range.Font.Size != size ||
+                        range.Font.Position != expectedBaseline[i])
+                        errors.Add($"{message}: drawing size/baseline differed from its new TeX render.");
+                    var previous = i == 0 ? document.Paragraphs[1].Range : paragraph;
+                    var next = i == 0 ? document.Paragraphs[3].Range :
+                        document.Range(paragraph.End - 2, paragraph.End - 1);
+                    if (Position(previous, false) >= y || y >= Position(next, false))
+                        errors.Add($"{message}: drawing is outside its surrounding text lines.");
+                    if (i == 2)
+                    {
+                        Assert(document.Fields.Count == 1, "Native equation SEQ field lost.");
+                        var field = document.Fields[1];
+                        var bookmark = LaTeXBlockService.EquationBookmarkName(ids[i]);
+                        var rightEdge = document.Range(field.Result.End + 2, field.Result.End + 2);
+                        var numberRight = Position(rightEdge, true);
+                        Console.WriteLine($"Numbered {size} pt: right edge X={numberRight:F2}");
+                        if (field.Type != WordInterop.WdFieldType.wdFieldSequence || field.Result.Text != "1" ||
+                            !document.Bookmarks.Exists(bookmark) || document.Bookmarks[bookmark].Range.Start != field.Result.Start ||
+                            document.Bookmarks[bookmark].Range.End != field.Result.End ||
+                            Math.Abs(numberRight - (page.LeftMargin + 367)) > 2)
+                            errors.Add($"{message}: equation number, its bookmark or right alignment changed.");
+                    }
+                }
+            }
+            Assert(errors.Count == 0, string.Join(Environment.NewLine, errors));
+        }
+
         private static void RunMixedSelectionFontSizeSmoke(WordInterop.Application word,
             LaTeXBlockService service, string profile, int firstColor, int secondColor)
         {
@@ -3163,12 +3490,17 @@ namespace LaTeXBlocks.WordSmoke
                 var selectionEnd = secondParagraph.End;
                 var paragraphCount = document.Paragraphs.Count;
                 var textBefore = document.Content.Text;
-                document.Range(selectionStart, selectionEnd).Select();
-                word.Selection.Font.Size = (float)changedFontSizePt;
-                Assert(word.Selection.Range.InlineShapes.Count == 2,
+                // This test supplies the batch directly. Leave the caret in plain
+                // text so an installed add-in cannot post a second batch for these
+                // same drawings while their actual Word runs change together.
+                var outside = document.Content.End - 1;
+                document.Range(outside, outside).Select();
+                var mixedRange = document.Range(selectionStart, selectionEnd);
+                mixedRange.Font.Size = (float)changedFontSizePt;
+                Assert(mixedRange.InlineShapes.Count == 2,
                     "The Ctrl+A-like cross-paragraph range did not expose both formulas.");
-                Assert(Math.Abs((double)word.Selection.Font.Size - changedFontSizePt) < 0.001,
-                    "Word did not expose the committed Font Size on the full mixed selection.");
+                Assert(Math.Abs((double)mixedRange.Font.Size - changedFontSizePt) < 0.001,
+                    "Word did not expose the committed Font Size on the full mixed range.");
                 Assert(Math.Abs((double)first.Range.Font.Size - changedFontSizePt) < 0.001 &&
                        Math.Abs((double)second.Range.Font.Size - changedFontSizePt) < 0.001,
                     "Word did not apply the full-selection Font Size to both formula anchors.");
@@ -3404,8 +3736,9 @@ namespace LaTeXBlocks.WordSmoke
                     lastMetadata.Id);
                 Assert(first != null && numbered != null && last != null,
                     "The interleaved formulas did not survive save and reopen.");
-                document.Content.Select();
-                word.Selection.Font.Size = (float)changedFontSizePt;
+                var outside = document.Content.End - 1;
+                document.Range(outside, outside).Select();
+                document.Content.Font.Size = (float)changedFontSizePt;
 
                 var changedFirstRender = service.RenderCommittedAsync(firstSource,
                     360, LaTeXBlockLayoutMode.Auto, profile, changedFontSizePt,
@@ -3463,6 +3796,201 @@ namespace LaTeXBlocks.WordSmoke
                     document.Close(WordInterop.WdSaveOptions.wdDoNotSaveChanges);
                     Release(document);
                 }
+            }
+        }
+
+        private static void RunFormatBatchOwnershipSmoke()
+        {
+            // Word includes unrelated themed text in Flat OPC selections. A direct
+            // or inherited drawing colour must not pick up that neighbour's tint.
+            var neighbor = "<w:r><w:rPr><w:color w:themeColor=\"accent4\" " +
+                "w:themeTint=\"33\"/></w:rPr><w:t>text</w:t></w:r>";
+            string DrawingColorXml(string properties) =>
+                "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">" +
+                "<w:body><w:p>" + neighbor + "<w:r><w:rPr>" + properties +
+                "</w:rPr><w:drawing/></w:r></w:p></w:body></w:document>";
+            Assert(LaTeXBlockService.TryParseNativeTextColorFromWordOpenXml(
+                       DrawingColorXml("<w:color w:val=\"FF0000\"/>"), out var red) &&
+                   red.Equals(LaTeXBlockService.NativeTextColorDescriptor.Direct(255)) &&
+                   !LaTeXBlockService.TryParseNativeTextColorFromWordOpenXml(
+                       DrawingColorXml(""), out _),
+                "A neighbouring text run overrode the drawing's direct or inherited colour.");
+            var targets = new ThisAddIn.FormatBatchTargets();
+            var first = targets.NextSequence();
+            targets.Register(101, first, 16);
+            targets.Register(102, first, 16);
+            var second = targets.NextSequence();
+            targets.Register(102, second, 24);
+            targets.Register(103, second, 24);
+            Assert(targets.IsCurrent(101, first) && !targets.IsCurrent(102, first) &&
+                   targets.IsCurrent(102, second) && targets.IsCurrent(103, second),
+                "A new Word batch superseded a different formula or kept a stale target.");
+            targets.Complete(102, first);
+            targets.Complete(101, first);
+            Assert(!targets.IsCurrent(101, first) && targets.IsCurrent(102, second),
+                "Finishing an older Word batch discarded its successor.");
+            targets.Clear();
+            Assert(!targets.IsCurrent(103, second), "Resetting Word kept an old format target.");
+        }
+
+        private static void RunCopiedFormulaSizeSmoke(WordInterop.Application word,
+            LaTeXBlockService service, string profile)
+        {
+            const string source = "$x^2$";
+            var mode = LaTeXBlockLayoutMode.Auto;
+            var original = service.RenderPreview(source, 360, mode, profile, 12);
+            var medium = service.RenderPreview(source, 360, mode, profile, 18);
+            var large = service.RenderPreview(source, 360, mode, profile, 26);
+            var doc = word.Documents.Add();
+            try
+            {
+                doc.Range(0, 0).Text = "A B C end";
+                doc.Content.Font.Size = 12;
+                doc.Range(0, 1).Select();
+                var first = service.InsertRendered(source, 360, mode, original);
+                Assert(LaTeXBlockService.TryReadContract(first, out var contract, out _),
+                    "The original formula has no Word contract.");
+                foreach (var marker in new[] { 'B', 'C' })
+                {
+                    var at = doc.Content.Text.IndexOf(marker);
+                    doc.Range(at, at + 1).FormattedText = first.Range.FormattedText;
+                }
+                Assert(doc.InlineShapes.Count == 3, "Word did not make both inline copies.");
+
+                void CheckSize(int position, LaTeXBlockRender render)
+                {
+                    var shape = doc.InlineShapes[position];
+                    var svg = ReadPackageBinary(shape.Range.WordOpenXML, "image/svg+xml");
+                    var expectedWidth = LaTeXBlockService.ReadSvgWidthPt(render.SvgBytes);
+                    Assert(LaTeXBlockService.TryReadContract(shape, out var metadata, out _) &&
+                           metadata.Id == contract.Id && metadata.FontSizePt == render.FontSizePt &&
+                           Math.Abs(shape.Range.Font.Size - render.FontSizePt) < 0.001 &&
+                           Math.Abs(shape.Width - expectedWidth) < 0.11 &&
+                           Math.Abs(LaTeXBlockService.ReadSvgWidthPt(svg) - expectedWidth) < 0.01,
+                        "Wrong run size, formula contract, SVG or shape width at copy " + position +
+                        " (expected " + render.FontSizePt + " pt).");
+                }
+                LaTeXBlockBatchUpdate Resize(int position, LaTeXBlockRender render)
+                {
+                    var shape = doc.InlineShapes[position];
+                    var range = shape.Range;
+                    range.Font.Size = (float)render.FontSizePt;
+                    var paragraph = range.Paragraphs[1].Range;
+                    Assert(LaTeXBlockService.TryReadContract(shape, out var metadata, out _),
+                        "Missing formula metadata on Word copy " + position);
+                    return new LaTeXBlockBatchUpdate(shape, source, 360, render, metadata,
+                        range, paragraph.Start, paragraph.End);
+                }
+
+                CheckSize(1, original);
+                CheckSize(2, original);
+                CheckSize(3, original);
+                service.UpdateRenderedBatch(new[] { Resize(1, medium), Resize(2, large) }, true);
+                Assert(doc.Undo(), "Word could not undo the copied-formula batch.");
+                for (var index = 1; index <= 3; index++)
+                {
+                    Assert(LaTeXBlockService.TryReadContract(doc.InlineShapes[index],
+                               out var previous, out _) && previous.FontSizePt == 12,
+                        "After undo, copy " + index + " has metadata size " +
+                        previous?.FontSizePt + " pt (expected 12).");
+                }
+                Assert(doc.Redo(), "Word could not redo the copied-formula batch.");
+                CheckSize(1, medium);
+                CheckSize(2, large);
+                CheckSize(3, original);
+                service.UpdateRenderedBatch(new[] { Resize(1, large), Resize(3, medium) }, true);
+                Assert(doc.Undo() &&
+                       LaTeXBlockService.TryReadContract(doc.InlineShapes[1], out var priorFirst, out _) &&
+                       priorFirst.FontSizePt == medium.FontSizePt &&
+                       LaTeXBlockService.TryReadContract(doc.InlineShapes[3], out var priorLast, out _) &&
+                       priorLast.FontSizePt == original.FontSizePt,
+                    "One Word undo did not restore both sides of the unselected drawing.");
+                Assert(doc.Redo(), "Word could not redo the split format batch.");
+                CheckSize(1, large);
+                CheckSize(2, large);
+                CheckSize(3, medium);
+                Assert(doc.Paragraphs.Count == 1 && doc.Content.Text.EndsWith(" end\r",
+                           StringComparison.Ordinal), "The batch altered surrounding text.");
+
+                var pending = new ThisAddIn.FormatBatchTargets();
+                Func<LaTeXBlockRender> QueueSize(int position, int points, bool singleReplacement = false)
+                {
+                    var shape = doc.InlineShapes[position];
+                    var identity = Marshal.GetIUnknownForObject(shape);
+                    var key = identity.ToInt64();
+                    Marshal.Release(identity);
+                    var range = shape.Range;
+                    Assert(LaTeXBlockService.TryReadContract(shape, out var metadata, out var savedSource),
+                        "The queued formula lost its metadata.");
+                    range.Font.Size = points;
+                    var sequence = pending.NextSequence();
+                    var color = LaTeXBlockService.ResolveTextColor(range);
+                    pending.Register(key, sequence, points);
+                    var task = service.RenderCommittedAsync(savedSource, 360, mode, profile, points,
+                        textColor: color);
+                    return () =>
+                    {
+                        var rendered = task.GetAwaiter().GetResult();
+                        var update = pending.PrepareSizeUpdate(key, sequence, shape, savedSource, metadata, rendered);
+                        if (update != null)
+                        {
+                            if (singleReplacement)
+                                service.UpdateRendered(shape, update.Source, update.WidthPt, mode, update.Render, false);
+                            else
+                                service.UpdateRenderedBatch(new[] { update }, true);
+                            pending.Complete(key, sequence);
+                        }
+                        return rendered;
+                    };
+                }
+                void ApplyOfficeColor(int position, LaTeXBlockService.NativeTextColorDescriptor color)
+                {
+                    var shape = doc.InlineShapes[position];
+                    color.ApplyTo(shape.Range);
+                    Assert(service.TryApplySvgForegroundFillsBatch(new[] {
+                        new LaTeXBlockColorUpdate(shape, color.DirectWordColor, color)
+                    }), "Native Word colour was rejected while resizing a copied formula.");
+                }
+                void CheckOfficeColor(int position, LaTeXBlockService.NativeTextColorDescriptor expected)
+                {
+                    var shape = doc.InlineShapes[position];
+                    Assert(LaTeXBlockService.NativeTextColorDescriptor.TryCapture(shape.Range, out var run)
+                           && run.Equals(expected), "The size commit replaced the native run colour of copy " + position);
+                    if (expected.Kind == LaTeXBlockService.NativeTextColorKind.Theme)
+                        Assert(LaTeXBlockService.TryReadSvgForegroundThemeFill(shape, out var theme, out var tint)
+                               && theme == expected.ThemeColor && Math.Abs(tint - expected.TintAndShade) < 0.000001,
+                            "The size commit lost the Office theme or tint of copy " + position);
+                    else
+                        Assert(LaTeXBlockService.TryReadSvgForegroundFillColor(shape, out var rgb)
+                               && rgb == expected.DirectWordColor,
+                            "The size commit reverted the Office RGB fill of copy " + position);
+                }
+                var red = LaTeXBlockService.NativeTextColorDescriptor.Direct(0x0000ff);
+                var tinted = LaTeXBlockService.NativeTextColorDescriptor.Theme(
+                    WordInterop.WdThemeColorIndex.wdThemeColorAccent6, 0.8f);
+                ApplyOfficeColor(1, red);
+                var finishFirst = QueueSize(1, 20);
+                var finishSecond = QueueSize(3, 28);
+                ApplyOfficeColor(1, red);
+                ApplyOfficeColor(3, tinted);
+                var secondResult = finishSecond();
+                var firstResult = finishFirst();
+                CheckSize(1, firstResult);
+                CheckSize(2, large);
+                CheckSize(3, secondResult);
+                CheckOfficeColor(1, red);
+                CheckOfficeColor(3, tinted);
+                var finishRgb = QueueSize(1, 22, true);
+                var blue = LaTeXBlockService.NativeTextColorDescriptor.Direct(0xff0000);
+                ApplyOfficeColor(1, blue);
+                CheckSize(1, finishRgb());
+                CheckOfficeColor(1, blue);
+                Console.WriteLine("Word: copied formulas passed undo, overlapping 20/28 pt, repeated RGB, changed RGB and Accent6 tint 0.8 checks.");
+            }
+            finally
+            {
+                doc.Close(WordInterop.WdSaveOptions.wdDoNotSaveChanges);
+                Release(doc);
             }
         }
 
@@ -3873,8 +4401,7 @@ namespace LaTeXBlocks.WordSmoke
                 updatedMetadata = reflowedMetadata;
 
                 var plainRange = document.Range(document.Content.End - 1, document.Content.End - 1);
-                var plainInline = plainRange.InlineShapes.AddPicture(initialRender.SvgPath,
-                    LinkToFile: false, SaveWithDocument: true, Range: plainRange);
+                var plainInline = service.ImportSvg(plainRange, initialRender, LaTeXBlockLayoutMode.Fixed);
                 var plainFloating = plainInline.ConvertToShape();
                 plainFloating.Select();
                 Assert(!service.TryGetSelectedFloatingBlock(out _, out _),

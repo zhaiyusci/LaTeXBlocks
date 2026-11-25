@@ -29,6 +29,8 @@ namespace LaTeXBlocks.Word
         internal static string BuildCustomUi()
         {
             return "<customUI xmlns=\"http://schemas.microsoft.com/office/2009/07/customui\" onLoad=\"OnLoad\">" +
+                   "<commands><command idMso=\"FontSizeIncreaseWord\" onAction=\"OnNativeFontSizeStep\"/>" +
+                   "<command idMso=\"FontSizeDecreaseWord\" onAction=\"OnNativeFontSizeStep\"/></commands>" +
                    "<ribbon><tabs><tab id=\"LaTeXBlocks.Tab\" label=\"LaTeXBlocks\">" +
                    "<group id=\"LaTeXBlocks.Blocks\" label=\"LaTeX\">" +
                    "<button id=\"LaTeXBlocks.InsertFormula\" label=\"Inline Math\" size=\"large\" getImage=\"GetCommandImage\" onAction=\"OnInsertFormula\"/>" +
@@ -56,6 +58,11 @@ namespace LaTeXBlocks.Word
         }
 
         public void OnLoad(Office.IRibbonUI ui) { ribbonUi = ui; }
+        public void OnNativeFontSizeStep(Office.IRibbonControl control, ref bool cancelDefault)
+        {
+            cancelDefault = false;
+            addIn.ObserveNativeFontSizeStep();
+        }
         public object GetCommandImage(Office.IRibbonControl control)
         {
             return Branding.RibbonImageProvider.GetImage(control.Id);

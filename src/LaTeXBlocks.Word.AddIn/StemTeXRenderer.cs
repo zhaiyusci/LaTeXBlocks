@@ -393,21 +393,23 @@ namespace LaTeXBlocks.Word
                    source + "\n\\endgroup";
         }
 
-        // A display starting at the beginning of a Block already provides its own
-        // vertical TeX layout. The Block-style wrapper must not prepend a paragraph
-        // in that case, because it would become a visible empty line above the
-        // display. This is deliberately narrower than the auto-width rejection in
-        // AddMeasurementMarkers: an ordinary paragraph that later contains a display
-        // still uses the ordinary paragraph wrapper.
-        internal static bool StartsWithFullDisplayOrPageWidthEnvironment(string source)
+        // Only a single display can bypass paragraph typography. Match its first
+        // closing delimiter so that two displays with text between them are mixed
+        // content even when the last token also looks like a closing delimiter.
+        internal static bool IsStandaloneDisplay(string source)
         {
-            var uncommented = RemoveTeXCommentsForDetection(source);
-            var trimmed = (uncommented ?? string.Empty).TrimStart();
-            if (trimmed.StartsWith("\\[", StringComparison.Ordinal) ||
-                trimmed.StartsWith("$$", StringComparison.Ordinal)) return true;
-            return Regex.IsMatch(trimmed,
-                "^\\\\begin\\s*\\{\\s*(?:displaymath|equation\\*?|align\\*?|gather\\*?|multline\\*?|flalign\\*?|minipage)\\s*\\}",
-                RegexOptions.CultureInvariant);
+            var text = RemoveTeXCommentsForDetection(source).Trim();
+            var opening = Regex.Match(text,
+                @"^(?:\\\[|\$\$|\\begin\s*\{\s*(?<env>displaymath|equation\*?|align\*?|alignat\*?|gather\*?|multline\*?|flalign\*?)\s*\})");
+            if (!opening.Success) return false;
+            // Skip escaped pairs such as \\ and \$ while looking for the close.
+            var closingPattern = opening.Groups["env"].Success
+                ? @"\\end\s*\{\s*" + Regex.Escape(opening.Groups["env"].Value) + @"\s*\}"
+                : opening.Value == "$$" ? @"\$\$" : @"\\\]";
+            var tokens = new Regex("(?<close>" + closingPattern + @")|\\[\s\S]");
+            for (var token = tokens.Match(text, opening.Length); token.Success; token = token.NextMatch())
+                if (token.Groups["close"].Success) return token.Index + token.Length == text.Length;
+            return false;
         }
 
         internal static string RemoveTeXCommentsForDetection(string source)

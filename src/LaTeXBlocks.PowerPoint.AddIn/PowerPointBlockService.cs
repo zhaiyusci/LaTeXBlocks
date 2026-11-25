@@ -270,7 +270,14 @@ namespace LaTeXBlocks.PowerPoint
                 LaTeXBlockLayoutMode.Fixed, render.FontSizePt, LaTeXBlockRole.Content,
                 0, 0, null, LaTeXBlockKind.LaTeXBlock);
 
-            try { application.StartNewUndoEntry(); } catch { }
+            // A background render can complete after the user switches decks.
+            // StartNewUndoEntry acts on the active window, not the target shape.
+            try
+            {
+                if (Equals(application.ActiveWindow?.Presentation, slide.Parent))
+                    application.StartNewUndoEntry();
+            }
+            catch (COMException) { }
             PowerPointInterop.Shape replacement = null;
             try
             {

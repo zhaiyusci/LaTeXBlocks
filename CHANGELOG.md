@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.2.156] — 2026-11-25
+
+- Update Word formulas while the selection stays in place. Native font-size commands re-render the selected formulas, and Font Color applies the chosen theme tint or shade to the SVG, including when the main button reuses the last swatch.
+- Keep the latest size and colour when Word receives formatting commands in quick succession. Copied formulas resize independently, and batch updates preserve display-equation alignment, tab stops and numbering in a single undo step.
+- Preserve the exact inline formula width after insertion and editing. Reapplying a fill that Word had already retained could add a small right margin.
+- Apply the Ribbon width to the outer Block frame in Word and PowerPoint so text reflows at the requested width. Blocks that start with display math followed by prose now honour paragraph typography and line spacing.
+- Migrate existing StemTeX user profiles once and retry failed copies. Renaming or deleting a migrated profile in LaTeXBlocks now persists across restarts.
+- Remove temporary Word SVG files after import. Add Office smoke tests for retained selections, saved SVG colours, equation positions and Block reflow.
+
 ## [0.2.155] — 2026-10-27
 
 - Route every Word and PowerPoint Block through StemTeX's automatic-height block renderer. First/final line metrics, list geometry, and leading-display handling now have one renderer-owned policy rather than a per-block option.

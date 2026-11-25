@@ -258,6 +258,8 @@ namespace LaTeXBlocks.Word
         private const string FontColorDropDownId = "FontColorPicker_Dropdown";
         private const string MoreColorsId = "FontColorMoreColorsDialog";
         private const string FontSizeId = "FontSize";
+        private const string OfficeGalleryWindowClass = "Net UI Tool Window";
+        private const uint GetAncestorRootOwner = 3;
         private const int MaximumAncestorDepth = 16;
         private const uint EventObjectHide = 0x8003;
         private const uint EventObjectFocus = 0x8005;
@@ -310,6 +312,7 @@ namespace LaTeXBlocks.Word
         private uint paletteCandidateEventTime;
         private long paletteCandidateInteractionId;
         private IntPtr palettePopupRootHwnd;
+        private IntPtr observedColorPopup;
         private long palettePressedInteractionId;
         private IntPtr palettePressedHwnd;
         private long pendingPaletteCommitInteractionId;
@@ -358,8 +361,18 @@ namespace LaTeXBlocks.Word
         }
 
         public event EventHandler<WordFormatInteractionEventArgs> FormatInteraction;
+        internal event Action ObservedColorPopupClosed;
 
         internal bool IsRunning => started && !disposed;
+        internal bool IsTrackingFontColor
+        {
+            get
+            {
+                lock (stateGate)
+                    return IsPaletteSessionActive() || interactionState.IsMoreColorsOpen ||
+                        pendingPaletteCommitInteractionId != 0 || formatSignalDrainScheduled;
+            }
+        }
         internal string DiagnosticStateForTest =>
             "selection=" + Volatile.Read(ref paletteSelectionsForTest) +
             ", candidate=" + Volatile.Read(ref paletteCandidatesForTest) +
@@ -382,6 +395,7 @@ namespace LaTeXBlocks.Word
             Interlocked.Exchange(ref interactionContextEnabled, enabled ? 1 : 0);
             ColorSyncDiagnostics.Write("monitor.context", "enabled=" + enabled);
             if (enabled) return;
+            Interlocked.Exchange(ref observedColorPopup, IntPtr.Zero);
             StopPaletteCommitTimer();
             lock (stateGate)
             {
@@ -496,6 +510,8 @@ namespace LaTeXBlocks.Word
 
                 if (eventType == EventObjectHide)
                 {
+                    if (childId == 0 && objectId == ObjIdWindow)
+                        NotifyObservedPopupClose(hwnd, true);
                     var hiddenRoot = GetAncestor(hwnd, GetAncestorRoot);
                     lastPaletteHideForTest = hwnd.ToInt64() + "/" + objectId +
                         "/" + childId + "/root=" + hiddenRoot.ToInt64() +
@@ -1230,6 +1246,60 @@ namespace LaTeXBlocks.Word
             });
         }
 
+        internal static IntPtr FindVisibleFormatPopup()
+        {
+            // The keyboard can open a gallery without a picker Begin event.
+            // Query only top-level Office galleries/dialogs on this desktop.
+            // The similarly named Layered window also hosts ordinary key tips.
+            var processId = GetCurrentProcessId();
+            var activeOwner = GetAncestor(GetActiveWindow(), GetAncestorRootOwner);
+            var popup = FindVisibleProcessWindow(OfficeGalleryWindowClass, processId, activeOwner);
+            return popup != IntPtr.Zero ? popup :
+                FindVisibleProcessWindow("bosa_sdm_msword", processId, activeOwner);
+        }
+
+        private static IntPtr FindVisibleProcessWindow(string className, uint processId,
+            IntPtr activeOwner)
+        {
+            var window = IntPtr.Zero;
+            while ((window = FindWindowEx(IntPtr.Zero, window, className, null)) != IntPtr.Zero)
+            {
+                GetWindowThreadProcessId(window, out var ownerProcess);
+                if (ownerProcess == processId && IsWindowVisible(window) &&
+                    (activeOwner == IntPtr.Zero ||
+                     GetAncestor(window, GetAncestorRootOwner) == activeOwner)) return window;
+            }
+            return IntPtr.Zero;
+        }
+
+        internal void WatchColorPopupClose(IntPtr popup)
+        {
+            Interlocked.Exchange(ref observedColorPopup, popup);
+            // Handle a popup that closed between FindWindowEx and registration.
+            if (!IsWindowVisible(popup)) NotifyObservedPopupClose(popup);
+        }
+
+        private void NotifyObservedPopupClose(IntPtr window, bool nativeHide = false)
+        {
+            if (window == IntPtr.Zero || disposed) return;
+            if (Interlocked.CompareExchange(ref observedColorPopup, IntPtr.Zero, window) != window)
+            {
+                // A quick keyboard choice can close the real gallery before the
+                // first coalesced OnUpdate inspects it. This hook is scoped to
+                // WINWORD; an ordinary ribbon/key-tip window is not a gallery.
+                if (!nativeHide) return;
+                var className = new StringBuilder(64);
+                if (GetClassName(window, className, className.Capacity) <= 0 ||
+                    !string.Equals(className.ToString(), OfficeGalleryWindowClass,
+                        StringComparison.OrdinalIgnoreCase)) return;
+                var activeOwner = GetAncestor(GetActiveWindow(), GetAncestorRootOwner);
+                if (activeOwner != IntPtr.Zero &&
+                    GetAncestor(window, GetAncestorRootOwner) != activeOwner) return;
+            }
+            try { dispatcher.BeginInvoke(new Action(() => ObservedColorPopupClosed?.Invoke())); }
+            catch (InvalidOperationException) { }
+        }
+
         private static bool IsOfficeFormattingWindow(IntPtr window)
         {
             if (window == IntPtr.Zero) return false;
@@ -1240,8 +1310,9 @@ namespace LaTeXBlocks.Word
             // never start UI Automation for clicks in Word's document canvas: one
             // provider call per ordinary click can build a backlog that delays both
             // later colour menus and WINWORD process exit.
-            return className.ToString().StartsWith("NetUI",
-                StringComparison.OrdinalIgnoreCase);
+            var name = className.ToString();
+            return name.StartsWith("NetUI", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(name, OfficeGalleryWindowClass, StringComparison.OrdinalIgnoreCase);
         }
 
         private static bool IsSameWindowTree(IntPtr first, IntPtr second)
@@ -1571,6 +1642,20 @@ namespace LaTeXBlocks.Word
         [DllImport("user32.dll")]
         private static extern uint GetWindowThreadProcessId(IntPtr hwnd,
             out uint processId);
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        private static extern IntPtr FindWindowEx(IntPtr parent, IntPtr after,
+            string className, string windowName);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool IsWindowVisible(IntPtr window);
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr GetActiveWindow();
+
+        [DllImport("kernel32.dll")]
+        private static extern uint GetCurrentProcessId();
 
         [DllImport("user32.dll")]
         private static extern IntPtr WindowFromPoint(NativePoint point);

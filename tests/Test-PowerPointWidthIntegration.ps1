@@ -22,16 +22,16 @@ $presentationPath = Join-Path $PSScriptRoot 'artifacts\latex-blocks-powerpoint-s
 $registerScript = Join-Path $root 'scripts\Register-LaTeXBlocks.ps1'
 
 if (Get-Process POWERPNT -ErrorAction SilentlyContinue) {
-    throw 'Close PowerPoint before running the width integration test.'
+    throw 'Close PowerPoint before running the installed-add-in integration test.'
 }
 if (-not (Test-Path -LiteralPath $presentationPath)) {
     throw "Run the PowerPoint smoke test first: $presentationPath is missing."
 }
-if ($ResizeFactor -le 0 -or $ResizeFactor -gt 5) {
-    throw 'ResizeFactor must be greater than zero and no greater than five.'
+if ($ResizeFactor -le 1 -or $ResizeFactor -gt 5) {
+    throw 'ResizeFactor must be greater than one and no greater than five.'
 }
-if ($CornerResizeFactor -le 0 -or $CornerResizeFactor -gt 5) {
-    throw 'CornerResizeFactor must be greater than zero and no greater than five.'
+if ($CornerResizeFactor -le 1 -or $CornerResizeFactor -gt 5) {
+    throw 'CornerResizeFactor must be greater than one and no greater than five.'
 }
 if ($AutoReflowFactor -le 0 -or $AutoReflowFactor -ge 1) {
     throw 'AutoReflowFactor must be greater than zero and less than one.'
@@ -77,14 +77,31 @@ function Get-ShapeTag([object]$Shape, [string]$Name) {
 }
 
 function Get-LaTeXBlockContract([object]$Shape) {
-    $json = [string]$Shape.Title
-    if ([string]::IsNullOrWhiteSpace($json)) { throw 'LaTeX Block JSON contract is missing.' }
-    $contract = $json | ConvertFrom-Json
-    if ($contract.version -ne 1 -or $contract.type -ne 'latex-block' -or
-        [string]::IsNullOrWhiteSpace([string]$contract.id)) {
-        throw "Invalid LaTeX Block JSON contract: $json"
+    # PowerPointBlockService accepts pictures and SVG graphics, including links.
+    if ([int]$Shape.Type -notin 11, 13, 28, 29) { throw 'The shape is not a picture.' }
+    $lines = [string]$Shape.AlternativeText -split '\r\n|\r|\n'
+    $end = [Array]::IndexOf($lines, '% !end-latexblocks')
+    if ($lines[0] -cne '% !latexblocks 1' -or $end -lt 2) {
+        throw 'The picture has no LaTeXBlocks header.'
     }
-    return $contract
+    $fields = @{}
+    foreach ($line in $lines[1..($end - 1)]) {
+        if ($line -cnotmatch '^% ([a-z0-9-]+): (.*)$' -or $fields.ContainsKey($Matches[1])) {
+            throw "Invalid LaTeXBlocks header field: $line"
+        }
+        $fields[$Matches[1]] = $Matches[2]
+    }
+    if ($fields.kind -cne 'latex-block' -or $fields.mode -cne 'fixed') {
+        throw 'The picture is not a fixed-width LaTeX Block.'
+    }
+    return [pscustomobject]@{
+        id = [Guid]::ParseExact($fields.id, 'D').ToString('D')
+        widthPt = ConvertTo-InvariantDouble $fields['width-pt'] 'typesetting width'
+        fontSizePt = ConvertTo-InvariantDouble $fields['font-size-pt'] 'font size'
+        frameWidthPt = ConvertTo-InvariantDouble $fields['frame-width-pt'] 'frame width'
+        frameHeightPt = ConvertTo-InvariantDouble $fields['frame-height-pt'] 'frame height'
+        styled = $fields.ContainsKey('padding-pt')
+    }
 }
 
 function ConvertTo-InvariantDouble([string]$Text, [string]$Description) {
@@ -115,12 +132,12 @@ function Assert-HostFrameContract([object]$Shape, [object]$ExpectedMetadata,
     }
 
     $metadata = Get-LaTeXBlockContract $Shape
-    $svgWidth = [double]$metadata.svgWidthPt
-    $svgHeight = [double]$metadata.svgHeightPt
+    $svgWidth = [double]$metadata.frameWidthPt
+    $svgHeight = [double]$metadata.frameHeightPt
     $actualWidth = [double]$Shape.Width
     $actualHeight = [double]$Shape.Height
 
-    # The tags describe the final SVG root box. They must match PowerPoint's
+    # The header describes the final SVG root box. It must match PowerPoint's
     # picture box: otherwise PowerPoint is still applying a host-side scale.
     Assert-Near $actualWidth $svgWidth 0.12 "$Label shape/SVG width"
     Assert-Near $actualHeight $svgHeight 0.12 "$Label shape/SVG height"
@@ -136,8 +153,8 @@ function Test-HostFrameGeometry([object]$Shape, [double]$ExpectedWidth,
     [double]$ExpectedHeight) {
     try {
         $contract = Get-LaTeXBlockContract $Shape
-        $svgWidth = [double]$contract.svgWidthPt
-        $svgHeight = [double]$contract.svgHeightPt
+        $svgWidth = [double]$contract.frameWidthPt
+        $svgHeight = [double]$contract.frameHeightPt
         return [Math]::Abs([double]$Shape.Width - $ExpectedWidth) -le 0.15 -and
                [Math]::Abs([double]$Shape.Height - $ExpectedHeight) -le 0.15 -and
                [Math]::Abs([double]$Shape.Width - $svgWidth) -le 0.12 -and
@@ -157,31 +174,8 @@ function Get-LaTeXBlockShape([object]$Presentation, [string]$StableId = '') {
                 $keep = $false
                 try {
                     try { $metadata = Get-LaTeXBlockContract $candidate } catch { continue }
-                    if ([string]::IsNullOrEmpty($StableId)) {
-                        # PowerPoint can enumerate a just-replaced SVG picture
-                        # before its title/metadata has propagated. A block is not
-                        # usable for the initial integration assertion until its
-                        # complete semantic contract is visible as well.
-                        try {
-                            $null = Get-LaTeXBlockContract $candidate
-                        }
-                        catch {
-                            continue
-                        }
-                        $keep = $true
-                        return $candidate
-                    }
-                    # Shape replacement is atomic from the user's point of view,
-                    # but COM enumeration can briefly expose a just-created shape
-                    # before its Title property has propagated. Skip that transient
-                    # candidate and keep polling for the stable semantic ID.
-                    try {
-                        $metadata = Get-LaTeXBlockContract $candidate
-                    }
-                    catch {
-                        continue
-                    }
-                    if ([string]$metadata.id -eq $StableId) {
+                    if ($metadata.styled -and ([string]::IsNullOrEmpty($StableId) -or
+                        $metadata.id -eq $StableId)) {
                         $keep = $true
                         return $candidate
                     }
@@ -356,7 +350,6 @@ try {
     Add-Type -AssemblyName System.Windows.Forms
 
     $application = New-Object -ComObject PowerPoint.Application
-    $application.Visible = -1
     Start-Sleep -Milliseconds 1200
 
     for ($index = 1; $index -le $application.COMAddIns.Count; $index++) {
@@ -378,7 +371,8 @@ try {
         throw 'PowerPoint did not connect the LaTeXBlocks add-in.'
     }
 
-    $presentation = $application.Presentations.Open($presentationPath, 0, 0, 0)
+    # Open a windowless untitled copy so the fixture stays pristine on failure.
+    $presentation = $application.Presentations.Open($presentationPath, 0, -1, 0)
     $selectedShape = Get-LaTeXBlockShape $presentation
     if ($null -eq $selectedShape) {
         throw 'The smoke presentation contains no recognized LaTeX block.'
@@ -390,6 +384,12 @@ try {
     $fontSizeBefore = [double]$before.fontSizePt
     $visibleWidthBefore = [double]$selectedShape.Width
     $visibleHeightBefore = [double]$selectedShape.Height
+    # Use enough ordinary words to cross multiple line boundaries at both widths.
+    $headerEnd = '% !end-latexblocks'
+    $alternativeText = [string]$selectedShape.AlternativeText
+    $selectedShape.AlternativeText = $alternativeText.Substring(0,
+        $alternativeText.IndexOf($headerEnd, [StringComparison]::Ordinal) + $headerEnd.Length) +
+        [Environment]::NewLine + ('A paragraph that wraps naturally at the requested width. ' * 5).Trim()
     $horizontalTargetWidth = $visibleWidthBefore * $ResizeFactor
     $selectedShape.Width = [single]($visibleWidthBefore * $ResizeFactor)
 
@@ -404,6 +404,7 @@ try {
     $after = Get-LaTeXBlockContract $replacementShape
     $visibleWidthAfter = [double]$replacementShape.Width
     $visibleHeightAfter = [double]$replacementShape.Height
+    $replacementNaturalHeight = $visibleHeightAfter
     $null = Assert-HostFrameContract $replacementShape $after $horizontalTargetWidth $visibleHeightAfter 'Horizontal frame'
     $currentLayoutWidth = [double]$after.widthPt
 
@@ -432,6 +433,9 @@ try {
     $reflowShape = Wait-ForReflowedFrame $presentation $stableId $reflowTargetWidth $currentLayoutWidth $fontSizeBefore 'Decrease' $TimeoutSeconds 'Narrow reflow'
     $reflowMetadata = Get-LaTeXBlockContract $reflowShape
     $null = Assert-HostFrameContract $reflowShape $reflowMetadata $reflowTargetWidth ([double]$reflowShape.Height) 'Auto-reflow frame'
+    if ([double]$reflowShape.Height -le [double]$replacementNaturalHeight + $fontSizeBefore * 0.5) {
+        throw 'Narrowing the paragraph did not add a rendered text line.'
+    }
     $visibleWidthAfter = [double]$reflowShape.Width
     $visibleHeightAfter = [double]$reflowShape.Height
     $currentLayoutWidth = [double]$reflowMetadata.widthPt
@@ -525,14 +529,13 @@ try {
         throw 'The LaTeX block disappeared between consecutive native resize gestures.'
     }
     Assert-Near ([double]$rapidResizeShape.Width) $firstGestureTargetWidth 0.15 'First consecutive native frame width'
-    Assert-Near ([double]$rapidResizeShape.Height) $cornerTargetHeight 0.15 'First consecutive native frame height'
     Set-HostFrameWidth $presentation $rapidResizeShape $stableId $lastGestureTargetWidth
     Release-ComObject $rapidResizeShape
     $rapidResizeShape = $null
 
     $lastGestureShape = Wait-ForReflowedFrame $presentation $stableId $lastGestureTargetWidth $currentLayoutWidth $fontSizeBefore 'Increase' $TimeoutSeconds 'Consecutive native resize'
     $lastGestureExpected = Get-LaTeXBlockContract $lastGestureShape
-    $null = Assert-HostFrameContract $lastGestureShape $lastGestureExpected $lastGestureTargetWidth $cornerTargetHeight 'Consecutive native frame'
+    $null = Assert-HostFrameContract $lastGestureShape $lastGestureExpected $lastGestureTargetWidth ([double]$lastGestureShape.Height) 'Consecutive native frame'
     Release-ComObject $lastGestureShape
     $lastGestureShape = $null
 
@@ -577,12 +580,13 @@ finally {
     Release-ComObject $replacementShape
     Release-ComObject $selectedShape
     if ($null -ne $presentation) {
+        try { $presentation.Saved = -1 } catch { }
         try { $presentation.Close() } catch { }
         Release-ComObject $presentation
     }
     Release-ComObject $addIn
     if ($null -ne $application) {
-        try { $application.Quit() } catch { }
+        try { if ($application.Presentations.Count -eq 0) { $application.Quit() } } catch { }
         Release-ComObject $application
     }
     [GC]::Collect()
@@ -590,7 +594,7 @@ finally {
     [GC]::Collect()
     [GC]::WaitForPendingFinalizers()
 
-    if ($hadRegistryKey) {
+    if ($RegisterDevelopmentBuild -and $hadRegistryKey) {
         if (-not (Test-Path -LiteralPath $registryKey)) {
             [void](New-Item -Path $registryKey -Force)
         }
@@ -600,7 +604,7 @@ finally {
             }
         }
     }
-    elseif (Test-Path -LiteralPath $registryKey) {
+    elseif ($RegisterDevelopmentBuild -and (Test-Path -LiteralPath $registryKey)) {
         Remove-Item -LiteralPath $registryKey -Recurse -Force
     }
 }

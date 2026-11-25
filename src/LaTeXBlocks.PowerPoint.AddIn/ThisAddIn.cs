@@ -142,12 +142,10 @@ namespace LaTeXBlocks.PowerPoint
             var source = PowerPointBlockService.FromOfficeAlternativeText(
                 shape.AlternativeText);
             var style = PowerPointBlockService.ReadStyle(shape);
-            var frameHeightPt = PowerPointBlockService.ReadFrameHeightPt(shape);
-            var frameWidthPt = PowerPointBlockService.ReadFrameWidthPt(shape);
             using (var editor = new LaTeXBlockEditorForm(Blocks, source, metadata.WidthPt,
                 metadata.FontSizePt,
                 currentProfile ?? Renderers.DefaultAvailableProfile,
-                SetCurrentProfile, true, style, null, null))
+                SetCurrentProfile, true, style))
             {
                 if (editor.ShowDialog(new LaTeXBlocksRibbon.PowerPointWindow(Application)) ==
                     DialogResult.OK)
@@ -259,6 +257,7 @@ namespace LaTeXBlocks.PowerPoint
                 hasExplicitFormatIntent |= existing.HasExplicitFormatIntent;
                 autoReflowAttempts = existing.AutoReflowAttempts;
             }
+            targetFrameWidthPt = LaTeXBlockSvgFrame.ResolveFormatWidth(widthPt, targetFrameWidthPt);
             if (widthPt.HasValue) targetWidthPt = widthPt.Value;
             if (fontSizePt.HasValue) targetFontSizePt = fontSizePt.Value;
             if (frameHeightPt.HasValue)

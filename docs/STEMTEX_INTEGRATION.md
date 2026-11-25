@@ -101,9 +101,10 @@ Profiles are discovered from immediate children of both collections below when t
 A user profile shadows an installed profile with the same directory name. The normal default is `unicodemath`; if it
 is absent, the first discovered profile in case-insensitive alphabetical order is used.
 
-On first discovery, profiles created by an earlier integration under `%LOCALAPPDATA%\StemTeX\profiles` are copied
-into the LaTeXBlocks-owned collection without overwriting an existing same-named profile. The legacy copy is retained
-as a backup and used only as a fallback if migration could not copy it.
+On first discovery, LaTeXBlocks records the existing profiles under `%LOCALAPPDATA%\StemTeX\profiles` and copies
+them into its own collection. An existing same-named LaTeXBlocks profile takes precedence. If copying fails, the
+legacy profile remains available until a later discovery successfully retries it. After migration, users can
+rename or delete profiles in either application independently.
 
 Both Office Ribbon tabs expose the unmodified StemTeX `stemtex-profile-creator.exe`. LaTeXBlocks launches it with
 `--runtime`, the currently resolved `--texmf`, and the user `--profiles` collection. The Creator owns its font/package

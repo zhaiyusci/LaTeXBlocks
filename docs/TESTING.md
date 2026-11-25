@@ -1,11 +1,11 @@
 # Testing
 
 LaTeXBlocks tests are desktop smoke tests, not mocked Office tests. They require the selected Microsoft Office host,
-StemTeX 0.13 or newer, and a usable system TeX Live root. The test validates that the resolved root contains
+StemTeX 0.15.0 or newer, and a usable system TeX Live root. The test validates that the resolved root contains
 `texmf-dist\web2c`. Build the requested configuration before running them.
 
-Close Word and PowerPoint before a test run. In particular, the PowerPoint smoke test fails immediately if any
-`POWERPNT` process is already running.
+Close Word and PowerPoint before running the full smoke suites or the PowerPoint native resize integration test.
+The focused width and batch-size probes below use temporary documents and can run alongside an open Office session.
 
 ## Build the test executables
 
@@ -33,6 +33,31 @@ pwsh.exe -NoProfile -File .\scripts\Test-LaTeXBlocks.ps1 -Configuration Debug -T
 
 `-TargetHost` accepts `Word`, `PowerPoint`, and `Both`; `Both` runs the Word executable first and then the
 PowerPoint executable.
+
+For focused, unattended checks of paragraph reflow and inline formula sizes, run the Release probes.
+
+```powershell
+.\tests\LaTeXBlocks.WordSmoke\bin\Release\LaTeXBlocks.WordSmoke.exe --width-probe
+.\tests\LaTeXBlocks.PowerPointSmoke\bin\Release\LaTeXBlocks.PowerPointSmoke.exe --width-probe
+.\tests\LaTeXBlocks.WordSmoke\bin\Release\LaTeXBlocks.WordSmoke.exe --word-batch-size-probe
+.\tests\LaTeXBlocks.WordSmoke\bin\Release\LaTeXBlocks.WordSmoke.exe --display-size-layout
+```
+
+The display-size probe measures Word's paginated formula positions at 12, 22 and 9 pt. It checks paragraph
+alignment, custom tab stops, baseline and equation numbers, and saves DOCX and PDF copies at each size.
+
+To exercise formatting through the **registered Word add-in**, run:
+
+```powershell
+.\tests\LaTeXBlocks.WordSmoke\bin\Release\LaTeXBlocks.WordSmoke.exe --installed-selection-formatting
+```
+
+This test opens a separate hidden Word process and reports the hash of the loaded add-in. With text and two
+formulas selected, it checks Grow Font, an exact size, red and Accent 6 with an 80% tint. It measures the
+formula size and reads the Graphics Fill while the original range is still selected, before saving any result.
+It also changes the size and theme colour in quick succession and checks both drawings against the last
+confirmed settings. The full run covers moving the caret after a command and different colours on two drawings.
+`--held-selection-only` runs the retained-selection checks. `--color-only` limits the run to colour cases.
 
 Run the real Word ribbon interaction gate explicitly:
 

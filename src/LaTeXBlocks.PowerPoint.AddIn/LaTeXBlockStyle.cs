@@ -237,8 +237,7 @@ namespace LaTeXBlocks.Word
 
             var hasFixedWidth = contentWidthPt.HasValue && contentWidthPt.Value > 0;
             var hasFixedHeight = contentHeightPt.HasValue && contentHeightPt.Value > 0;
-            var standaloneDisplay =
-                StemTeXRenderer.StartsWithFullDisplayOrPageWidthEnvironment(source);
+            var standaloneDisplay = StemTeXRenderer.IsStandaloneDisplay(source);
             if (standaloneDisplay && !hasFixedHeight)
                 return WrapLeadingDisplayForStemTeXBlock(source);
 

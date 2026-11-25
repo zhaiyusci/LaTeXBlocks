@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
+using System.Threading;
 using Microsoft.Win32;
 
 #if POWERPOINT
@@ -88,49 +90,34 @@ namespace LaTeXBlocks.Word
             }
             if (bestHome != null) return bestHome;
             throw new DirectoryNotFoundException(
-                "StemTeX 0.13 or newer with SVG support was not found. Install LaTeXBlocks " +
+                "StemTeX " + RequiredRuntimeVersion + " or newer with SVG support was not found. Install LaTeXBlocks " +
                 "or set " + HomeEnvironmentVariable + " to a compatible StemTeX distribution.");
         }
 
         internal static string[] DiscoverProfiles()
         {
-            var home = ResolveStemTeXHome();
-            EnsureUserProfilesRoot();
-            var result = new List<string>();
-            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
-            // User profiles take precedence when their directory name matches an
-            // installed profile. This mirrors the creator's writable collection and
-            // lets a user intentionally replace the bundled default without editing it.
-            AddProfiles(UserProfilesRoot, result, seen);
-            // Only used if a legacy profile could not be copied during migration.
-            AddProfiles(LegacyUserProfilesRoot, result, seen);
-            AddProfiles(Path.Combine(home, "gui", "profiles"), result, seen);
-            result.Sort(StringComparer.OrdinalIgnoreCase);
-            return result.ToArray();
+            return ProfileDirectories(ResolveStemTeXHome()).Select(Path.GetFileName)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(name => name, StringComparer.OrdinalIgnoreCase).ToArray();
         }
 
         internal static string ResolveProfileRoot(string stemTeXHome, string profile)
         {
             if (string.IsNullOrWhiteSpace(profile))
                 throw new ArgumentException("A StemTeX profile is required.", nameof(profile));
-            EnsureUserProfilesRoot();
-            foreach (var root in new[]
-            {
-                UserProfilesRoot,
-                LegacyUserProfilesRoot,
-                Path.Combine(stemTeXHome, "gui", "profiles")
-            })
-            {
-                if (!Directory.Exists(root)) continue;
-                foreach (var directory in Directory.GetDirectories(root))
-                {
-                    if (!string.Equals(Path.GetFileName(directory), profile,
-                        StringComparison.OrdinalIgnoreCase)) continue;
-                    if (IsUsableProfile(directory)) return Path.GetFullPath(directory);
-                }
-            }
+            foreach (var directory in ProfileDirectories(stemTeXHome))
+                if (string.Equals(Path.GetFileName(directory), profile, StringComparison.OrdinalIgnoreCase))
+                    return Path.GetFullPath(directory);
             throw new DirectoryNotFoundException("StemTeX profile was not found: " + profile);
+        }
+
+        private static IEnumerable<string> ProfileDirectories(string stemTeXHome)
+        {
+            var pending = MigrateUserProfiles(LegacyUserProfilesRoot, UserProfilesRoot);
+            var bundled = Path.Combine(stemTeXHome, "gui", "profiles");
+            return Directory.GetDirectories(UserProfilesRoot).Concat(pending)
+                .Concat(Directory.Exists(bundled) ? Directory.GetDirectories(bundled) : Array.Empty<string>())
+                .Where(IsUsableProfile);
         }
 
         internal static void EnsureUserProfilesRoot()
@@ -138,40 +125,95 @@ namespace LaTeXBlocks.Word
             MigrateUserProfiles(LegacyUserProfilesRoot, UserProfilesRoot);
         }
 
-        internal static void MigrateUserProfiles(string legacyRoot, string targetRoot)
+        // The journal contains only profiles still awaiting migration. An empty
+        // journal is final even if independent StemTeX profiles are created later.
+        internal static string[] MigrateUserProfiles(string legacyRoot, string targetRoot)
         {
             if (string.IsNullOrWhiteSpace(targetRoot))
                 throw new ArgumentException("A target profile directory is required.",
                     nameof(targetRoot));
             Directory.CreateDirectory(targetRoot);
-            if (string.IsNullOrWhiteSpace(legacyRoot) || !Directory.Exists(legacyRoot) ||
-                string.Equals(Path.GetFullPath(legacyRoot).TrimEnd(Path.DirectorySeparatorChar),
-                    Path.GetFullPath(targetRoot).TrimEnd(Path.DirectorySeparatorChar),
-                    StringComparison.OrdinalIgnoreCase)) return;
-
-            foreach (var source in Directory.GetDirectories(legacyRoot))
+            var journal = targetRoot.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) +
+                ".stemtex-migration-v1";
+            // The two Office hosts and their renderer processes share this journal.
+            // Completed migrations need neither a lock nor a read of the legacy tree.
+            if (File.Exists(journal) && new FileInfo(journal).Length == 0) return Array.Empty<string>();
+            using (var mutex = new Mutex(false, @"Local\LaTeXBlocks.StemTeXProfileMigration"))
             {
-                if (!IsUsableProfile(source)) continue;
-                var destination = Path.Combine(targetRoot, Path.GetFileName(source));
-                if (Directory.Exists(destination)) continue;
-                var staging = Path.Combine(targetRoot, ".migrate-" + Guid.NewGuid().ToString("N"));
+                try { mutex.WaitOne(); }
+                catch (AbandonedMutexException) { } // A previous host exited; the journal is atomic.
                 try
                 {
-                    CopyDirectory(source, staging);
-                    if (!IsUsableProfile(staging)) continue;
-                    try { Directory.Move(staging, destination); }
-                    catch (IOException)
+                    string[] names;
+                    if (File.Exists(journal)) names = File.ReadAllLines(journal);
+                    else
                     {
-                        if (!Directory.Exists(destination)) throw;
+                        names = Directory.Exists(legacyRoot)
+                            ? Directory.GetDirectories(legacyRoot).Where(IsUsableProfile).Select(Path.GetFileName).ToArray()
+                            : Array.Empty<string>();
+                        // Keep legacy profiles readable if this location is temporarily
+                        // read-only. Wait for a durable snapshot before copying anything.
+                        if (!TrySavePendingProfiles(journal, names))
+                            return names.Select(name => Path.Combine(legacyRoot, name)).ToArray();
                     }
+                    var pending = new List<string>();
+                    foreach (var name in names)
+                    {
+                        if (string.IsNullOrWhiteSpace(name) || name == "." || name == ".." ||
+                            name != Path.GetFileName(name)) continue;
+                        var source = Path.Combine(legacyRoot, name);
+                        if (!TryMigrateProfile(source, Path.Combine(targetRoot, name)))
+                            pending.Add(name);
+                    }
+                    if (pending.Count != names.Length) TrySavePendingProfiles(journal, pending);
+                    return pending.Select(name => Path.Combine(legacyRoot, name)).ToArray();
+                }
+                finally { mutex.ReleaseMutex(); }
+            }
+        }
+
+        private static bool TrySavePendingProfiles(string journal, IEnumerable<string> names)
+        {
+            var temporary = journal + "." + Guid.NewGuid().ToString("N");
+            try
+            {
+                try
+                {
+                    File.WriteAllLines(temporary, names);
+                    if (File.Exists(journal)) File.Replace(temporary, journal, null);
+                    else File.Move(temporary, journal);
+                    return true;
+                }
+                finally { File.Delete(temporary); }
+            }
+            catch (UnauthorizedAccessException) { return false; }
+            catch (IOException) { return false; }
+        }
+
+        private static bool TryMigrateProfile(string source, string destination)
+        {
+            if (Directory.Exists(destination)) return IsUsableProfile(destination);
+            // A crash can leave an incomplete copy. Keep it outside the collection
+            // so neither discovery nor the Profile Creator can offer it as a profile.
+            var staging = Path.Combine(Path.GetDirectoryName(Path.GetDirectoryName(destination)),
+                ".stemtex-profile-" + Guid.NewGuid().ToString("N"));
+            try
+            {
+                CopyDirectory(source, staging);
+                if (!IsUsableProfile(staging)) return false;
+                Directory.Move(staging, destination);
+                return true;
+            }
+            catch (UnauthorizedAccessException) { return false; }
+            catch (IOException) { return IsUsableProfile(destination); }
+            finally
+            {
+                try
+                {
+                    if (Directory.Exists(staging)) Directory.Delete(staging, true);
                 }
                 catch (UnauthorizedAccessException) { }
                 catch (IOException) { }
-                finally
-                {
-                    try { if (Directory.Exists(staging)) Directory.Delete(staging, true); }
-                    catch { }
-                }
             }
         }
 
@@ -265,16 +307,6 @@ namespace LaTeXBlocks.Word
                 throw new FileNotFoundException(
                     "The bundled StemTeX Profile Creator is unavailable. Reinstall LaTeXBlocks.", executable);
             return executable;
-        }
-
-        private static void AddProfiles(string root, List<string> profiles, HashSet<string> seen)
-        {
-            if (!Directory.Exists(root)) return;
-            foreach (var directory in Directory.GetDirectories(root))
-            {
-                var name = Path.GetFileName(directory);
-                if (IsUsableProfile(directory) && seen.Add(name)) profiles.Add(name);
-            }
         }
 
         private static bool IsUsableProfile(string directory)

@@ -50,8 +50,6 @@ namespace LaTeXBlocks.PowerPoint
         private Color textColor;
         private Color backgroundColor;
         private Color borderColor;
-        private readonly double? previewFrameHeightPt;
-        private readonly double? previewFrameWidthPt;
         private LaTeXBlockRender pendingPreview;
         private int pendingPreviewVersion = -1;
         private Uri pendingPreviewUri;
@@ -68,17 +66,11 @@ namespace LaTeXBlocks.PowerPoint
 
         internal LaTeXBlockEditorForm(PowerPointBlockService service, string source,
             double widthPt, double fontSizePt, string profile,
-            Action<string> profileChanged, bool editing, LaTeXBlockStyle style = null,
-            double? outerHeightPt = null, double? outerWidthPt = null)
+            Action<string> profileChanged, bool editing, LaTeXBlockStyle style = null)
         {
             this.service = service ?? throw new ArgumentNullException(nameof(service));
             this.profileChanged = profileChanged ?? throw new ArgumentNullException(nameof(profileChanged));
             style = style ?? LaTeXBlockStyle.Default;
-            // Block height is renderer-owned. Existing frame height is not fed
-            // back into an ordinary edit, otherwise every preview becomes a fixed
-            // viewport and StemTeX's automatic-height result is discarded.
-            previewFrameHeightPt = null;
-            previewFrameWidthPt = null;
             textColor = style.TextColor;
             backgroundColor = style.BackgroundColor;
             borderColor = style.BorderColor;
@@ -639,7 +631,7 @@ namespace LaTeXBlocks.PowerPoint
             try
             {
                 var render = await service.RenderPreviewAsync(source, width, profile, fontSize,
-                    style, previewFrameHeightPt, previewFrameWidthPt, true);
+                    style, null, null, styleWasExplicit: true);
                 phase = "Preview update";
                 if (IsDisposed) return;
                 if (version == editVersion)

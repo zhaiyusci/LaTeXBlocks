@@ -18,6 +18,13 @@ namespace LaTeXBlocks.Word
     // is authored by a package-independent dvisvgm colour special in TeX.
     internal static class LaTeXBlockSvgFrame
     {
+        internal static double ResolveFormatWidth(double? requestedWidthPt, double hostFrameWidthPt)
+        {
+            // Ribbon width sets the outer edge as in the editor. Other format
+            // changes keep the observed (possibly manually resized) Office frame.
+            return requestedWidthPt ?? hostFrameWidthPt;
+        }
+
         internal static byte[] Decorate(byte[] svgBytes, LaTeXBlockStyle style,
             double requestedFrameWidthPt, double? requestedFrameHeightPt,
             bool embedForeground = false)

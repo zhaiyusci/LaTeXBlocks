@@ -16,10 +16,15 @@ namespace LaTeXBlocks.PowerPointSmoke
     internal static class Program
     {
         [STAThread]
-        private static int Main()
+        private static int Main(string[] args)
         {
             try
             {
+                if (Array.IndexOf(args, "--width-probe") >= 0)
+                {
+                    RunWidthProbe();
+                    return 0;
+                }
                 if (Process.GetProcessesByName("POWERPNT").Length != 0)
                     throw new InvalidOperationException(
                         "Close PowerPoint before running the PowerPoint smoke test.");
@@ -31,6 +36,81 @@ namespace LaTeXBlocks.PowerPointSmoke
             {
                 Console.Error.WriteLine(exception);
                 return 1;
+            }
+        }
+
+        private static void RunWidthProbe()
+        {
+            var source = string.Join(" ", System.Linq.Enumerable.Repeat(
+                "An ordinary paragraph wraps across several lines at the requested width.", 4));
+            bool alreadyRunning = Process.GetProcessesByName("POWERPNT").Length != 0;
+            var app = new PowerPointInterop.Application();
+            var previousWindow = app.Windows.Count > 0 ? app.ActiveWindow : null;
+            PowerPointInterop.Presentation presentation = null;
+            try
+            {
+                presentation = app.Presentations.Add(Office.MsoTriState.msoFalse);
+                var slide = presentation.Slides.Add(1, PowerPointInterop.PpSlideLayout.ppLayoutBlank);
+                using (var backend = new StemTeXBackend())
+                {
+                    var service = new PowerPointBlockService(app, backend);
+                    var profile = backend.DefaultAvailableProfile;
+                    var style = LaTeXBlockStyle.Default;
+                    var wide = service.RenderCommittedAsync(source, 360, profile, 12, style,
+                        null, 360, true).GetAwaiter().GetResult();
+                    var originalHeight = PowerPointBlockService.ReadSvgHeightPt(wide.SvgBytes);
+                    // Insert into the windowless slide directly. Normal insertion uses
+                    // a visible active selection to choose the slide and insertion point.
+                    var block = slide.Shapes.AddPicture(wide.SvgPath, Office.MsoTriState.msoFalse,
+                        Office.MsoTriState.msoTrue, 10, 10, 360, (float)originalHeight);
+                    block.AlternativeText = LaTeXBlockMetadata.Create(360, fontSizePt: 12,
+                        style: style).WithFrameSize(360, originalHeight).Serialize(source);
+                    foreach (var width in new[] { 130.0, 360.0 })
+                    {
+                        var frameWidth = LaTeXBlockSvgFrame.ResolveFormatWidth(width, block.Width);
+                        var render = service.RenderCommittedAsync(source, width, profile, 12,
+                            style, null, frameWidth, true).GetAwaiter().GetResult();
+                        block = service.UpdateRendered(block, source, width, render, false, null,
+                            frameWidth, style, true, true);
+                        Assert(PowerPointBlockService.TryReadContract(block, out var contract, out _) &&
+                               Math.Abs(contract.WidthPt - width) < 0.1 &&
+                               Math.Abs(block.Width - width) < 0.1 &&
+                               Math.Abs(PowerPointBlockService.ReadSvgWidthPt(render.SvgBytes) - width) < 0.1 &&
+                               Math.Abs(block.Height - PowerPointBlockService.ReadSvgHeightPt(render.SvgBytes)) < 0.1 &&
+                               (width < 360 ? block.Height > originalHeight + 12 :
+                                   Math.Abs(block.Height - originalHeight) < 0.1),
+                            "PowerPoint did not reflow the styled paragraph at the requested width.");
+                        Console.WriteLine("PowerPoint paragraph: {0:F2} x {1:F2} pt", block.Width, block.Height);
+                        if (width < 360)
+                        {
+                            var directory = Path.Combine(AppDomain.CurrentDomain.BaseDirectory,
+                                "artifacts", "run-" + Process.GetCurrentProcess().Id);
+                            Directory.CreateDirectory(directory);
+                            var path = Path.Combine(directory, "width-130.pptx");
+                            presentation.SaveCopyAs(path,
+                                PowerPointInterop.PpSaveAsFileType.ppSaveAsOpenXMLPresentation);
+                            Console.WriteLine(path);
+                        }
+                    }
+                }
+            }
+            finally
+            {
+                if (presentation != null)
+                {
+                    presentation.Saved = Office.MsoTriState.msoTrue;
+                    presentation.Close();
+                    Release(presentation);
+                }
+                try
+                {
+                    if (previousWindow != null)
+                        Assert(app.ActiveWindow.HWND == previousWindow.HWND &&
+                               Equals(app.ActiveWindow.Presentation, previousWindow.Presentation),
+                            "The windowless probe changed the active PowerPoint window.");
+                    if (!alreadyRunning && app.Presentations.Count == 0) app.Quit();
+                }
+                finally { Release(app); }
             }
         }
 

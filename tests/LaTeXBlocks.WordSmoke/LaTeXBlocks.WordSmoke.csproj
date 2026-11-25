@@ -12,5 +12,5 @@
     <ProjectReference Include="..\..\src\LaTeXBlocks.RenderHost\LaTeXBlocks.RenderHost.csproj"><Project>{E60B5C1A-7A1B-4C8E-9EA2-EA226D9CDAB6}</Project><Name>LaTeXBlocks.RenderHost</Name><ReferenceOutputAssembly>False</ReferenceOutputAssembly></ProjectReference>
   </ItemGroup>
   <ItemGroup><Content Include="..\..\src\LaTeXBlocks.RenderHost\bin\$(Configuration)\LaTeXBlocks.RenderHost.host"><Link>LaTeXBlocks.RenderHost.host</Link><CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory></Content></ItemGroup>
-  <ItemGroup><Compile Include="Program.cs"/></ItemGroup><Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
+  <ItemGroup><Compile Include="Program.cs"/><Compile Include="InstalledSelectionFormatting.cs"/></ItemGroup><Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
 </Project>

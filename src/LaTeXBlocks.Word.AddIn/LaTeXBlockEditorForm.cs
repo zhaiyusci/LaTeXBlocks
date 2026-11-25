@@ -39,8 +39,6 @@ namespace LaTeXBlocks.Word
         private readonly Action<string> profileChanged;
         private readonly double inheritedFontSizePt;
         private readonly bool mathEditor;
-        private readonly double? previewFrameHeightPt;
-        private readonly double? previewFrameWidthPt;
         private readonly double naturalWidthSentinelPt;
         private readonly bool lockModeToFixed;
         private Color textColor;
@@ -65,8 +63,7 @@ namespace LaTeXBlocks.Word
             Action<string> profileChanged, bool editing, double fontSizePt = 10,
             string windowTitle = null, bool displayMathStyle = false,
             int textColor = LaTeXBlockService.AutomaticTextColor,
-            LaTeXBlockStyle style = null, double? outerHeightPt = null,
-            double? outerWidthPt = null, bool lockModeToFixed = false,
+            LaTeXBlockStyle style = null, bool lockModeToFixed = false,
             LaTeXBlockKind kind = LaTeXBlockKind.Unspecified)
         {
             this.service = service ?? throw new ArgumentNullException(nameof(service));
@@ -80,11 +77,6 @@ namespace LaTeXBlocks.Word
                         : LaTeXBlockKind.InlineMath;
             mathEditor = kind != LaTeXBlockKind.LaTeXBlock;
             this.lockModeToFixed = lockModeToFixed;
-            // Ordinary source/style edits are automatic-height operations. Feeding
-            // the old Word frame height back into TeX would turn the preview into a
-            // fixed-height vbox and hide StemTeX's newly measured block height.
-            previewFrameHeightPt = null;
-            previewFrameWidthPt = null;
             style = style ?? new LaTeXBlockStyle(textColor: ToDrawingColor(textColor));
             this.textColor = style.TextColor;
             backgroundColor = style.BackgroundColor;
@@ -622,9 +614,7 @@ namespace LaTeXBlocks.Word
             {
                 var render = await service.RenderPreviewAsync(source, width, mode, profile, fontSize,
                     Kind == LaTeXBlockKind.DisplayMath || Kind == LaTeXBlockKind.NumberedMath,
-                    LaTeXBlockService.ToWordColor(textColor), style,
-                    CanEditStyle ? previewFrameHeightPt : null,
-                    CanEditStyle ? previewFrameWidthPt : null, Kind);
+                    LaTeXBlockService.ToWordColor(textColor), style, renderKind: Kind);
                 phase = "Preview update";
                 if (IsDisposed) return;
                 if (version == editVersion)
@@ -690,7 +680,7 @@ namespace LaTeXBlocks.Word
         private void BeginPreviewNavigation(LaTeXBlockRender render, int version)
         {
             var token = version.ToString() + "-" + Guid.NewGuid().ToString("N");
-            var htmlPath = Path.Combine(Path.GetDirectoryName(render.SvgPath), token + ".preview.html");
+            var htmlPath = Path.Combine(service.CacheDirectory, token + ".preview.html");
             File.WriteAllText(htmlPath, BuildPreviewHtml(render.SvgBytes, token), new UTF8Encoding(false));
             previewFiles.Add(htmlPath);
             pendingPreview = render;
